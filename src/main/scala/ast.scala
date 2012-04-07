@@ -10,31 +10,52 @@ case class ExprProj(expr: SqlExpr, alias: Option[String]) extends SqlProj
 case object StarProj extends SqlProj
 
 abstract class SqlExpr
-case class OrClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
-case class AndClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Or(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class And(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 
-case class EQClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
-case class NEQClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Eq(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Neq(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Ge(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Gt(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Le(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Lt(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 
-case class GEClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
-case class GTClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
-case class LEClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
-case class LTClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class In(elem: SqlExpr, set: Either[Seq[SqlExpr], SelectStmt]) extends SqlExpr
+case class Like(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 
-case class PlusClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
-case class MinusClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Plus(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Minus(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 
-case class MultClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
-case class DivClause(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Mult(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Div(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 
-case class NotClause(expr: SqlExpr) extends SqlExpr
+case class Not(expr: SqlExpr) extends SqlExpr
+case class Exists(select: SelectStmt) extends SqlExpr
 
 case class FieldIdent(qualifier: Option[String], name: String) extends SqlExpr
-case class FunctionCall(name: String, args: Seq[SqlExpr]) extends SqlExpr
 case class Subselect(subquery: SelectStmt) extends SqlExpr
+
+case object CountStar extends SqlExpr
+case class CountExpr(expr: SqlExpr, distinct: Boolean) extends SqlExpr
+case class Sum(expr: SqlExpr, distinct: Boolean) extends SqlExpr
+case class Avg(expr: SqlExpr, distinct: Boolean) extends SqlExpr
+case class Min(expr: SqlExpr) extends SqlExpr
+case class Max(expr: SqlExpr) extends SqlExpr
+
+case class FunctionCall(name: String, args: Seq[SqlExpr]) extends SqlExpr
+
+sealed abstract trait ExtractType
+case object YEAR extends ExtractType
+case object MONTH extends ExtractType
+case object DAY extends ExtractType
+
+case class Extract(expr: SqlExpr, what: ExtractType) extends SqlExpr
+
+case class Substring(expr: SqlExpr, from: Int, length: Option[Int]) extends SqlExpr
 
 case class IntLiteral(v: Long) extends SqlExpr
 case class StringLiteral(v: String) extends SqlExpr
+case object NullLiteral extends SqlExpr
 
 abstract class SqlRelation
 case class TableRelation(name: String, alias: Option[String]) extends SqlRelation
@@ -45,5 +66,5 @@ sealed abstract trait OrderType
 case object ASC extends OrderType
 case object DESC extends OrderType
 
-case class SqlGroupBy(keys: Seq[String]) 
+case class SqlGroupBy(keys: Seq[String], having: Option[SqlExpr]) 
 case class SqlOrderBy(keys: Seq[(String, OrderType)]) 
