@@ -54,7 +54,7 @@ class SQLParser extends StandardTokenParsers {
     "join", "asc", "desc", "from", "on", "not", "having", "distinct",
     "case", "when", "then", "else", "end", "for", "from", "exists", "between", "like", "in", 
     "year", "month", "day", "null", "is", "date", "interval", "group", "order",
-    "date"
+    "date", "left", "right", "outer", "inner"
   )
   
   lexical.reserved ++= functions
@@ -98,7 +98,7 @@ class SQLParser extends StandardTokenParsers {
       "in" ~ "(" ~ (select | rep1sep(expr, ",")) ~ ")" ^^ {
         case op ~ _ ~ a ~ _ => (op, a)
       } |
-      "like" ~ add_expr ^^ { case op ~ a => (op, a) }
+      opt("not") ~ "like" ~ add_expr ^^ { case n ~ op ~ a => (op, a, n.isDefined) }
     ) ^^ {
       case lhs ~ elems =>
         elems.foldLeft(lhs) {
@@ -112,7 +112,7 @@ class SQLParser extends StandardTokenParsers {
           case (acc, (("between", l: SqlExpr, r: SqlExpr))) => And(Ge(acc, l), Le(acc, r))
           case (acc, (("in", e: Seq[_]))) => In(acc, Left(e.asInstanceOf[Seq[SqlExpr]]))
           case (acc, (("in", s: SelectStmt))) => In(acc, Right(s))
-          case (acc, (("like", e: SqlExpr))) => Like(acc, e)
+          case (acc, (("like", e: SqlExpr, n: Boolean))) => Like(acc, e, n)
         }
     } |
     "not" ~> cmp_expr ^^ (Not(_)) |
@@ -177,9 +177,17 @@ class SQLParser extends StandardTokenParsers {
   def relations: Parser[Seq[SqlRelation]] = "from" ~> rep1sep(relation, ",")
 
   def relation: Parser[SqlRelation] =
-    simple_relation ~ rep("join" ~ simple_relation ~ "on" ~ expr ^^ { case "join" ~ r ~ "on" ~ e => (r, e)}) ^^ {
-      case r ~ elems => elems.foldLeft(r) { case (x, r) => JoinRelation(x, r._1, r._2) }
+    simple_relation ~ rep(opt(join_type) ~ "join" ~ simple_relation ~ "on" ~ expr ^^ 
+      { case tpe ~ _ ~ r ~ _ ~ e => (tpe.getOrElse(InnerJoin), r, e)}) ^^ {
+      case r ~ elems => elems.foldLeft(r) { case (x, r) => JoinRelation(x, r._2, r._1, r._3) }
     }
+
+  def join_type: Parser[JoinType] =
+    ("left" | "right") ~ opt("outer") ^^ { 
+      case "left" ~ o  => LeftJoin(o.isDefined)
+      case "right" ~ o => RightJoin(o.isDefined)
+    } |
+    "inner" ^^^ (InnerJoin)
 
   def simple_relation: Parser[SqlRelation] = 
     ident ~ opt("as") ~ opt(ident) ^^ { 

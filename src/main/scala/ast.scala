@@ -21,7 +21,7 @@ case class Le(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 case class Lt(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 
 case class In(elem: SqlExpr, set: Either[Seq[SqlExpr], SelectStmt]) extends SqlExpr
-case class Like(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
+case class Like(lhs: SqlExpr, rhs: SqlExpr, negate: Boolean) extends SqlExpr
 
 case class Plus(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 case class Minus(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
@@ -70,7 +70,13 @@ case class IntervalLiteral(e: String, unit: ExtractType) extends SqlExpr
 abstract class SqlRelation
 case class TableRelation(name: String, alias: Option[String]) extends SqlRelation
 case class SubqueryRelation(subquery: SelectStmt, alias: String) extends SqlRelation
-case class JoinRelation(left: SqlRelation, right: SqlRelation, clause: SqlExpr) extends SqlRelation
+
+sealed abstract trait JoinType
+case class LeftJoin(outer: Boolean) extends JoinType
+case class RightJoin(outer: Boolean) extends JoinType
+case object InnerJoin extends JoinType
+
+case class JoinRelation(left: SqlRelation, right: SqlRelation, tpe: JoinType, clause: SqlExpr) extends SqlRelation
 
 sealed abstract trait OrderType
 case object ASC extends OrderType
