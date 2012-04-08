@@ -53,9 +53,16 @@ case class Extract(expr: SqlExpr, what: ExtractType) extends SqlExpr
 
 case class Substring(expr: SqlExpr, from: Int, length: Option[Int]) extends SqlExpr
 
+case class UnaryPlus(expr: SqlExpr) extends SqlExpr
+case class UnaryMinus(expr: SqlExpr) extends SqlExpr
+
 case class IntLiteral(v: Long) extends SqlExpr
+case class FloatLiteral(v: Double) extends SqlExpr
 case class StringLiteral(v: String) extends SqlExpr
 case object NullLiteral extends SqlExpr
+
+case class DateLiteral(d: String) extends SqlExpr
+case class IntervalLiteral(e: String, unit: ExtractType) extends SqlExpr
 
 abstract class SqlRelation
 case class TableRelation(name: String, alias: Option[String]) extends SqlRelation

@@ -1,7 +1,51 @@
+import scala.util.matching.Regex
+
 import scala.util.parsing.combinator._
+import scala.util.parsing.combinator.lexical._
 import scala.util.parsing.combinator.syntactical._
+import scala.util.parsing.combinator.token._
+
+import scala.util.parsing.input.CharArrayReader.EofCh
 
 class SQLParser extends StandardTokenParsers {
+
+  class SqlLexical extends StdLexical {
+    case class FloatLit(chars: String) extends Token {
+      override def toString = chars 
+    }
+    override def token: Parser[Token] = 
+      ( identChar ~ rep( identChar | digit )              ^^ { case first ~ rest => processIdent(first :: rest mkString "") }
+      | rep1(digit) ~ opt('.' ~> rep(digit))              ^^ { 
+        case i ~ None    => NumericLit(i mkString "") 
+        case i ~ Some(d) => FloatLit(i.mkString("") + "." + d.mkString("")) 
+      }
+      | '\'' ~ rep( chrExcept('\'', '\n', EofCh) ) ~ '\'' ^^ { case '\'' ~ chars ~ '\'' => StringLit(chars mkString "") }
+      | '\"' ~ rep( chrExcept('\"', '\n', EofCh) ) ~ '\"' ^^ { case '\"' ~ chars ~ '\"' => StringLit(chars mkString "") }
+      | EofCh                                             ^^^ EOF
+      | '\'' ~> failure("unclosed string literal")        
+      | '\"' ~> failure("unclosed string literal")        
+      | delim                                             
+      | failure("illegal character")
+      )
+    def regex(r: Regex): Parser[String] = new Parser[String] {
+      def apply(in: Input) = {
+        val source = in.source
+        val offset = in.offset
+        val start = offset // handleWhiteSpace(source, offset)
+        (r findPrefixMatchOf (source.subSequence(start, source.length))) match {
+          case Some(matched) =>
+            Success(source.subSequence(start, start + matched.end).toString,
+                    in.drop(start + matched.end - offset))
+          case None =>
+            Success("", in)
+        }
+      }
+    }
+  }
+  override val lexical = new SqlLexical
+
+  def floatLit: Parser[String] = 
+    elem("decimal", _.isInstanceOf[lexical.FloatLit]) ^^ (_.chars)
 
   val functions = Seq("count", "sum", "avg", "min", "max", "substring", "extract")
 
@@ -9,23 +53,24 @@ class SQLParser extends StandardTokenParsers {
     "select", "as", "or", "and", "group", "order", "by", "where", "limit",
     "join", "asc", "desc", "from", "on", "not", "having", "distinct",
     "case", "for", "from", "exists", "between", "like", "in", 
-    "year", "month", "day", "null", "is"
+    "year", "month", "day", "null", "is", "date", "interval", "group", "order",
+    "date"
   )
   
   lexical.reserved ++= functions
 
   lexical.delimiters += (
-    "*", "+", "-", "<", "=", "<>", "!=", "<=", ">=", ">", "/", "(", ")", ",", "."
+    "*", "+", "-", "<", "=", "<>", "!=", "<=", ">=", ">", "/", "(", ")", ",", ".", ";"
   )
 
   def select: Parser[SelectStmt] = 
     "select" ~> projections ~ 
       opt(relations) ~ opt(filter) ~ 
-      opt(groupBy) ~ opt(orderBy) ~ opt(limit) ^^ {
+      opt(groupBy) ~ opt(orderBy) ~ opt(limit) <~ opt(";") ^^ {
     case p ~ r ~ f ~ g ~ o ~ l => SelectStmt(p, r, f, g, o, l)
   }
 
-  def projections: Parser[Seq[SqlProj]] = repsep(projection, ", ")
+  def projections: Parser[Seq[SqlProj]] = repsep(projection, ",")
 
   def projection: Parser[SqlProj] =
     "*" ^^^ (StarProj) |
@@ -91,7 +136,9 @@ class SQLParser extends StandardTokenParsers {
       case a ~ Some( b: String ) => FieldIdent(Some(a), b)
       case a ~ Some( xs: Seq[_] ) => FunctionCall(a, xs.asInstanceOf[Seq[SqlExpr]])
     } |
-    "(" ~> (expr | select ^^ (Subselect(_))) <~ ")" 
+    "(" ~> (expr | select ^^ (Subselect(_))) <~ ")" | 
+    "+" ~> primary_expr ^^ (UnaryPlus(_)) |
+    "-" ~> primary_expr ^^ (UnaryMinus(_)) 
 
   def known_function: Parser[SqlExpr] =
     "count" ~> "(" ~> ( "*" ^^^ (CountStar) | opt("distinct") ~ expr ^^ { case d ~ e => CountExpr(e, d.isDefined) }) <~ ")" |
@@ -99,10 +146,10 @@ class SQLParser extends StandardTokenParsers {
     "max" ~> "(" ~> expr <~ ")" ^^ (Max(_)) |
     "sum" ~> "(" ~> (opt("distinct") ~ expr) <~ ")" ^^ { case d ~ e => Sum(e, d.isDefined) } |
     "avg" ~> "(" ~> (opt("distinct") ~ expr) <~ ")" ^^ { case d ~ e => Avg(e, d.isDefined) } |
-    "extract" ~> ("year" | "month" | "day") ~ "from" ~ expr ^^ {
-      case "year" ~ "from" ~ e => Extract(e, YEAR)
-      case "month" ~ "from" ~ e => Extract(e, MONTH)
-      case "day" ~ "from" ~ e => Extract(e, DAY)
+    "extract" ~> "(" ~ ("year" | "month" | "day") ~ "from" ~ expr ~ ")" ^^ {
+      case _ ~ "year" ~ _ ~ e ~ _ => Extract(e, YEAR)
+      case _ ~ "month" ~ _ ~ e ~ _ => Extract(e, MONTH)
+      case _ ~ "day" ~ _ ~ e ~ _ => Extract(e, DAY)
     } |
     "substring" ~> "(" ~> ( expr ~ "from" ~ numericLit ~ opt("for" ~> numericLit) ) <~ ")" ^^ {
       case e ~ "from" ~ a ~ b => Substring(e, a.toInt, b.map(_.toInt))
@@ -110,8 +157,13 @@ class SQLParser extends StandardTokenParsers {
 
   def literal: Parser[SqlExpr] =
     numericLit ^^ { case i => IntLiteral(i.toInt) } |
-    stringLit ^^ { case s => StringLiteral(stripQuotes(s)) }
-    "null" ^^^ (NullLiteral)
+    floatLit ^^ { case f => FloatLiteral(f.toDouble) } |
+    stringLit ^^ { case s => StringLiteral(s) } |
+    "null" ^^^ (NullLiteral) |
+    "date" ~> stringLit ^^ (DateLiteral(_)) |
+    "interval" ~> stringLit ~ ("year" ^^^ (YEAR) | "month" ^^^ (MONTH) | "day" ^^^ (DAY)) ^^ {
+      case d ~ u => IntervalLiteral(d, u)
+    }
 
   def relations: Parser[Seq[SqlRelation]] = "from" ~> rep1sep(relation, ",")
 
@@ -121,27 +173,26 @@ class SQLParser extends StandardTokenParsers {
     }
 
   def simple_relation: Parser[SqlRelation] = 
-    ident ~ opt(ident) ^^ { 
-      case ident ~ alias => TableRelation(ident, alias)
+    ident ~ opt("as") ~ opt(ident) ^^ { 
+      case ident ~ _ ~ alias => TableRelation(ident, alias)
     } |
-    select ~ "as" ~ ident ^^ {
-      case select ~ "as" ~ alias => SubqueryRelation(select, alias) 
+    "(" ~ select ~ ")" ~ opt("as") ~ ident ^^ {
+      case _ ~ select ~ _ ~ _ ~ alias => SubqueryRelation(select, alias) 
     }
 
   def filter: Parser[SqlExpr] = "where" ~> expr
 
   def groupBy: Parser[SqlGroupBy] = 
-    "group" ~> "by" ~> repsep(ident, ",") ~ opt("having" ~> expr) ^^ {
+    "group" ~> "by" ~> rep1sep(ident, ",") ~ opt("having" ~> expr) ^^ {
       case k ~ h => SqlGroupBy(k, h)
     }
 
   def orderBy: Parser[SqlOrderBy] = 
-    "order" ~> "by" ~> repsep( ident ~ opt("asc" | "desc") ^^ { 
+    "order" ~> "by" ~> rep1sep( ident ~ opt("asc" | "desc") ^^ { 
       case i ~ (Some("asc") | None) => (i, ASC)
       case i ~ Some("desc") => (i, DESC)
     }, ",") ^^ (SqlOrderBy(_))
 
-  // TODO: don't allow negative number
   def limit: Parser[Int] = "limit" ~> numericLit ^^ (_.toInt)
 
   private def stripQuotes(s:String) = s.substring(1, s.length-1)
