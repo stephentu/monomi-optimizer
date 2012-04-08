@@ -73,7 +73,7 @@ class SQLParser extends StandardTokenParsers {
   def projections: Parser[Seq[SqlProj]] = repsep(projection, ",")
 
   def projection: Parser[SqlProj] =
-    "*" ^^^ (StarProj) |
+    "*" ^^ (_ => StarProj()) |
     expr ~ opt("as" ~> ident) ^^ {
       case expr ~ ident => ExprProj(expr, ident)
     }
@@ -143,14 +143,14 @@ class SQLParser extends StandardTokenParsers {
 
   def case_expr: Parser[SqlExpr] =
     "case" ~> 
-      opt(expr) ~ rep1("when" ~> expr ~ "then" ~ expr ^^ { case a ~ _ ~ b => (a, b) }) ~ 
+      opt(expr) ~ rep1("when" ~> expr ~ "then" ~ expr ^^ { case a ~ _ ~ b => CaseExprCase(a, b) }) ~ 
       opt("else" ~> expr) <~ "end" ^^ {
       case Some(e) ~ cases ~ default => CaseExpr(e, cases, default)
       case None ~ cases ~ default => CaseWhenExpr(cases, default)
     }
 
   def known_function: Parser[SqlExpr] =
-    "count" ~> "(" ~> ( "*" ^^^ (CountStar) | opt("distinct") ~ expr ^^ { case d ~ e => CountExpr(e, d.isDefined) }) <~ ")" |
+    "count" ~> "(" ~> ( "*" ^^ (_ => CountStar()) | opt("distinct") ~ expr ^^ { case d ~ e => CountExpr(e, d.isDefined) }) <~ ")" |
     "min" ~> "(" ~> expr <~ ")" ^^ (Min(_)) |
     "max" ~> "(" ~> expr <~ ")" ^^ (Max(_)) |
     "sum" ~> "(" ~> (opt("distinct") ~ expr) <~ ")" ^^ { case d ~ e => Sum(e, d.isDefined) } |
@@ -168,7 +168,7 @@ class SQLParser extends StandardTokenParsers {
     numericLit ^^ { case i => IntLiteral(i.toInt) } |
     floatLit ^^ { case f => FloatLiteral(f.toDouble) } |
     stringLit ^^ { case s => StringLiteral(s) } |
-    "null" ^^^ (NullLiteral) |
+    "null" ^^ (_ => NullLiteral()) |
     "date" ~> stringLit ^^ (DateLiteral(_)) |
     "interval" ~> stringLit ~ ("year" ^^^ (YEAR) | "month" ^^^ (MONTH) | "day" ^^^ (DAY)) ^^ {
       case d ~ u => IntervalLiteral(d, u)
