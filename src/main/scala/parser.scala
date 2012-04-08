@@ -95,8 +95,8 @@ class SQLParser extends StandardTokenParsers {
       "between" ~ add_expr ~ "and" ~ add_expr ^^ {
         case op ~ a ~ _ ~ b => (op, a, b) 
       } |
-      "in" ~ "(" ~ (select | rep1sep(expr, ",")) ~ ")" ^^ {
-        case op ~ _ ~ a ~ _ => (op, a)
+      opt("not") ~ "in" ~ "(" ~ (select | rep1sep(expr, ",")) ~ ")" ^^ {
+        case n ~ op ~ _ ~ a ~ _ => (op, a, n.isDefined)
       } |
       opt("not") ~ "like" ~ add_expr ^^ { case n ~ op ~ a => (op, a, n.isDefined) }
     ) ^^ {
@@ -110,8 +110,8 @@ class SQLParser extends StandardTokenParsers {
           case (acc, ((">", rhs: SqlExpr))) => Gt(acc, rhs)
           case (acc, ((">=", rhs: SqlExpr))) => Ge(acc, rhs)
           case (acc, (("between", l: SqlExpr, r: SqlExpr))) => And(Ge(acc, l), Le(acc, r))
-          case (acc, (("in", e: Seq[_]))) => In(acc, Left(e.asInstanceOf[Seq[SqlExpr]]))
-          case (acc, (("in", s: SelectStmt))) => In(acc, Right(s))
+          case (acc, (("in", e: Seq[_], n: Boolean))) => In(acc, Left(e.asInstanceOf[Seq[SqlExpr]]), n)
+          case (acc, (("in", s: SelectStmt, n: Boolean))) => In(acc, Right(s), n)
           case (acc, (("like", e: SqlExpr, n: Boolean))) => Like(acc, e, n)
         }
     } |

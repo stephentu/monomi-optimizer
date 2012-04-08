@@ -20,7 +20,7 @@ case class Gt(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 case class Le(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 case class Lt(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr
 
-case class In(elem: SqlExpr, set: Either[Seq[SqlExpr], SelectStmt]) extends SqlExpr
+case class In(elem: SqlExpr, set: Either[Seq[SqlExpr], SelectStmt], negate: Boolean) extends SqlExpr
 case class Like(lhs: SqlExpr, rhs: SqlExpr, negate: Boolean) extends SqlExpr
 
 case class Plus(lhs: SqlExpr, rhs: SqlExpr) extends SqlExpr

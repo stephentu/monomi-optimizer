@@ -328,36 +328,36 @@ order by
       val r = parser.parse(
 """
 select
-	c_custkey,
-	c_name,
-	sum(l_extendedprice * (1 - l_discount)) as revenue,
-	c_acctbal,
-	n_name,
-	c_address,
-	c_phone,
-	c_comment
+  c_custkey,
+  c_name,
+  sum(l_extendedprice * (1 - l_discount)) as revenue,
+  c_acctbal,
+  n_name,
+  c_address,
+  c_phone,
+  c_comment
 from
-	customer,
-	orders,
-	lineitem,
-	nation
+  customer,
+  orders,
+  lineitem,
+  nation
 where
-	c_custkey = o_custkey
-	and l_orderkey = o_orderkey
-	and o_orderdate >= date '1999-01-01'
-	and o_orderdate < date '1999-01-01' + interval '3' month
-	and l_returnflag = 'R'
-	and c_nationkey = n_nationkey
+  c_custkey = o_custkey
+  and l_orderkey = o_orderkey
+  and o_orderdate >= date '1999-01-01'
+  and o_orderdate < date '1999-01-01' + interval '3' month
+  and l_returnflag = 'R'
+  and c_nationkey = n_nationkey
 group by
-	c_custkey,
-	c_name,
-	c_acctbal,
-	c_phone,
-	n_name,
-	c_address,
-	c_comment
+  c_custkey,
+  c_name,
+  c_acctbal,
+  c_phone,
+  n_name,
+  c_address,
+  c_comment
 order by
-	revenue desc
+  revenue desc
 """)
       r should beSome
     }
@@ -367,32 +367,32 @@ order by
       val r = parser.parse(
 """
 select
-	ps_partkey,
-	sum(ps_supplycost * ps_availqty) as value
+  ps_partkey,
+  sum(ps_supplycost * ps_availqty) as value
 from
-	partsupp,
-	supplier,
-	nation
+  partsupp,
+  supplier,
+  nation
 where
-	ps_suppkey = s_suppkey
-	and s_nationkey = n_nationkey
-	and n_name = 'nnation'
+  ps_suppkey = s_suppkey
+  and s_nationkey = n_nationkey
+  and n_name = 'nnation'
 group by
-	ps_partkey having
-		sum(ps_supplycost * ps_availqty) > (
-			select
-				sum(ps_supplycost * ps_availqty) * 300
-			from
-				partsupp,
-				supplier,
-				nation
-			where
-				ps_suppkey = s_suppkey
-				and s_nationkey = n_nationkey
-				and n_name = 'name'
-		)
+  ps_partkey having
+    sum(ps_supplycost * ps_availqty) > (
+      select
+        sum(ps_supplycost * ps_availqty) * 300
+      from
+        partsupp,
+        supplier,
+        nation
+      where
+        ps_suppkey = s_suppkey
+        and s_nationkey = n_nationkey
+        and n_name = 'name'
+    )
 order by
-	value desc;
+  value desc;
 """)
       r should beSome
     }
@@ -402,33 +402,33 @@ order by
       val r = parser.parse(
 """
 select
-	l_shipmode,
-	sum(case
-		when o_orderpriority = '1-URGENT'
-			or o_orderpriority = '2-HIGH'
-			then 1
-		else 0
-	end) as high_line_count,
-	sum(case
-		when o_orderpriority <> '1-URGENT'
-			and o_orderpriority <> '2-HIGH'
-			then 1
-		else 0
-	end) as low_line_count
+  l_shipmode,
+  sum(case
+    when o_orderpriority = '1-URGENT'
+      or o_orderpriority = '2-HIGH'
+      then 1
+    else 0
+  end) as high_line_count,
+  sum(case
+    when o_orderpriority <> '1-URGENT'
+      and o_orderpriority <> '2-HIGH'
+      then 1
+    else 0
+  end) as low_line_count
 from
-	orders,
-	lineitem
+  orders,
+  lineitem
 where
-	o_orderkey = l_orderkey
-	and l_shipmode in ('mode0', 'mode1')
-	and l_commitdate < l_receiptdate
-	and l_shipdate < l_commitdate
-	and l_receiptdate >= date '1998-01-01'
-	and l_receiptdate < date '1998-01-01' + interval '1' year
+  o_orderkey = l_orderkey
+  and l_shipmode in ('mode0', 'mode1')
+  and l_commitdate < l_receiptdate
+  and l_shipdate < l_commitdate
+  and l_receiptdate >= date '1998-01-01'
+  and l_receiptdate < date '1998-01-01' + interval '1' year
 group by
-	l_shipmode
+  l_shipmode
 order by
-	l_shipmode;
+  l_shipmode;
 """)
       r should beSome
     }
@@ -438,28 +438,333 @@ order by
       val r = parser.parse(
 """
 select
-	c_count,
-	count(*) as custdist
+  c_count,
+  count(*) as custdist
 from
-	(
-		select
-			c_custkey,
-			count(o_orderkey) as c_count
-		from
-			customer left outer join orders on
-				c_custkey = o_custkey
-				and o_comment not like '%:1%:2%'
-		group by
-			c_custkey
-	) as c_orders 
+  (
+    select
+      c_custkey,
+      count(o_orderkey) as c_count
+    from
+      customer left outer join orders on
+        c_custkey = o_custkey
+        and o_comment not like '%:1%:2%'
+    group by
+      c_custkey
+  ) as c_orders 
 group by
-	c_count
+  c_count
 order by
-	custdist desc,
-	c_count desc;
+  custdist desc,
+  c_count desc;
 """)
       r should beSome
     }
 
+    "parse query14" in {
+      val parser = new SQLParser
+      val r = parser.parse(
+"""
+select
+  100.00 * sum(case
+    when p_type like 'PROMO%'
+      then l_extendedprice * (1 - l_discount)
+    else 0
+  end) / sum(l_extendedprice * (1 - l_discount)) as promo_revenue
+from
+  lineitem,
+  part
+where
+  l_partkey = p_partkey
+  and l_shipdate >= date '1999-01-01'
+  and l_shipdate < date '1999-01-01' + interval '1' month;
+""")
+      r should beSome
+    }
+
+    "parse query16" in {
+      val parser = new SQLParser
+      val r = parser.parse(
+"""
+select
+  p_brand,
+  p_type,
+  p_size,
+  count(distinct ps_suppkey) as supplier_cnt
+from
+  partsupp,
+  part
+where
+  p_partkey = ps_partkey
+  and p_brand <> 'foo'
+  and p_type not like 'bar%'
+  and p_size in (3, 4, 5, 6, 7, 8, 9, 10)
+  and ps_suppkey not in (
+    select
+      s_suppkey
+    from
+      supplier
+    where
+      s_comment like '%Customer%Complaints%'
+  )
+group by
+  p_brand,
+  p_type,
+  p_size
+order by
+  supplier_cnt desc,
+  p_brand,
+  p_type,
+  p_size;
+""")
+      r should beSome
+    }
+
+    "parse query17" in {
+      val parser = new SQLParser
+      val r = parser.parse(
+"""
+select
+  sum(l_extendedprice) / 7.0 as avg_yearly
+from
+  lineitem,
+  part
+where
+  p_partkey = l_partkey
+  and p_brand = 'a'
+  and p_container = 'b'
+  and l_quantity < (
+    select
+      0.2 * avg(l_quantity)
+    from
+      lineitem
+    where
+      l_partkey = p_partkey
+  );
+""")
+      r should beSome
+    }
+
+    "parse query18" in {
+      val parser = new SQLParser
+      val r = parser.parse(
+"""
+select
+  c_name,
+  c_custkey,
+  o_orderkey,
+  o_orderdate,
+  o_totalprice,
+  sum(l_quantity)
+from
+  customer,
+  orders,
+  lineitem
+where
+  o_orderkey in (
+    select
+      l_orderkey
+    from
+      lineitem
+    group by
+      l_orderkey having
+        sum(l_quantity) > 330
+  )
+  and c_custkey = o_custkey
+  and o_orderkey = l_orderkey
+group by
+  c_name,
+  c_custkey,
+  o_orderkey,
+  o_orderdate,
+  o_totalprice
+order by
+  o_totalprice desc,
+  o_orderdate
+limit 100;
+""")
+      r should beSome
+    }
+
+    "parse query19" in {
+      val parser = new SQLParser
+      val r = parser.parse(
+"""
+select
+  sum(l_extendedprice* (1 - l_discount)) as revenue
+from
+  lineitem,
+  part
+where
+  (
+    p_partkey = l_partkey
+    and p_brand = 'foo'
+    and p_container in ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+    and l_quantity >= 4 and l_quantity <= 4 + 10
+    and p_size between 1 and 5
+    and l_shipmode in ('AIR', 'AIR REG')
+    and l_shipinstruct = 'DELIVER IN PERSON'
+  )
+  or
+  (
+    p_partkey = l_partkey
+    and p_brand = 'bar'
+    and p_container in ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
+    and l_quantity >= 5 and l_quantity <= 5 + 10
+    and p_size between 1 and 10
+    and l_shipmode in ('AIR', 'AIR REG')
+    and l_shipinstruct = 'DELIVER IN PERSON'
+  )
+  or
+  (
+    p_partkey = l_partkey
+    and p_brand = 'baz'
+    and p_container in ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+    and l_quantity >= 6 and l_quantity <= 6 + 10
+    and p_size between 1 and 15
+    and l_shipmode in ('AIR', 'AIR REG')
+    and l_shipinstruct = 'DELIVER IN PERSON'
+  );
+""")
+      r should beSome
+    }
+
+    "parse query20" in {
+      val parser = new SQLParser
+      val r = parser.parse(
+"""
+select
+  s_name,
+  s_address
+from
+  supplier,
+  nation
+where
+  s_suppkey in (
+    select
+      ps_suppkey
+    from
+      partsupp
+    where
+      ps_partkey in (
+        select
+          p_partkey
+        from
+          part
+        where
+          p_name like 'foo%'
+      )
+      and ps_availqty > (
+        select
+          0.5 * sum(l_quantity)
+        from
+          lineitem
+        where
+          l_partkey = ps_partkey
+          and l_suppkey = ps_suppkey
+          and l_shipdate >= date '1999-01-01'
+          and l_shipdate < date '1999-01-01' + interval '1' year
+      )
+  )
+  and s_nationkey = n_nationkey
+  and n_name = 'foo'
+order by
+  s_name;
+""")
+      r should beSome
+    }
+
+    "parse query21" in {
+      val parser = new SQLParser
+      val r = parser.parse(
+"""
+select
+  s_name,
+  count(*) as numwait
+from
+  supplier,
+  lineitem l1,
+  orders,
+  nation
+where
+  s_suppkey = l1.l_suppkey
+  and o_orderkey = l1.l_orderkey
+  and o_orderstatus = 'F'
+  and l1.l_receiptdate > l1.l_commitdate
+  and exists (
+    select
+      *
+    from
+      lineitem l2
+    where
+      l2.l_orderkey = l1.l_orderkey
+      and l2.l_suppkey <> l1.l_suppkey
+  )
+  and not exists (
+    select
+      *
+    from
+      lineitem l3
+    where
+      l3.l_orderkey = l1.l_orderkey
+      and l3.l_suppkey <> l1.l_suppkey
+      and l3.l_receiptdate > l3.l_commitdate
+  )
+  and s_nationkey = n_nationkey
+  and n_name = 'foo'
+group by
+  s_name
+order by
+  numwait desc,
+  s_name
+limit 100;
+""")
+      r should beSome
+    }
+
+    "parse query22" in {
+      val parser = new SQLParser
+      val r = parser.parse(
+"""
+select
+  cntrycode,
+  count(*) as numcust,
+  sum(c_acctbal) as totacctbal
+from
+  (
+    select
+      substring(c_phone from 1 for 2) as cntrycode,
+      c_acctbal
+    from
+      customer
+    where
+      substring(c_phone from 1 for 2) in
+        ('11', '22', '33', '44', '55', '66', '77')
+      and c_acctbal > (
+        select
+          avg(c_acctbal)
+        from
+          customer
+        where
+          c_acctbal > 0.00
+          and substring(c_phone from 1 for 2) in
+            ('11', '22', '33', '44', '55', '66', '77')
+      )
+      and not exists (
+        select
+          *
+        from
+          orders
+        where
+          o_custkey = c_custkey
+      )
+  ) as custsale
+group by
+  cntrycode
+order by
+  cntrycode;
+""")
+      r should beSome
+    }
   }
 }
