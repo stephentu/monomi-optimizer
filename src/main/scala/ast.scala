@@ -53,6 +53,9 @@ case class Extract(expr: SqlExpr, what: ExtractType) extends SqlExpr
 
 case class Substring(expr: SqlExpr, from: Int, length: Option[Int]) extends SqlExpr
 
+case class CaseExpr(expr: SqlExpr, cases: Seq[(SqlExpr, SqlExpr)], default: Option[SqlExpr]) extends SqlExpr
+case class CaseWhenExpr(cases: Seq[(SqlExpr, SqlExpr)], default: Option[SqlExpr]) extends SqlExpr
+
 case class UnaryPlus(expr: SqlExpr) extends SqlExpr
 case class UnaryMinus(expr: SqlExpr) extends SqlExpr
 

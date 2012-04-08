@@ -52,7 +52,7 @@ class SQLParser extends StandardTokenParsers {
   lexical.reserved += (
     "select", "as", "or", "and", "group", "order", "by", "where", "limit",
     "join", "asc", "desc", "from", "on", "not", "having", "distinct",
-    "case", "for", "from", "exists", "between", "like", "in", 
+    "case", "when", "then", "else", "end", "for", "from", "exists", "between", "like", "in", 
     "year", "month", "day", "null", "is", "date", "interval", "group", "order",
     "date"
   )
@@ -138,7 +138,16 @@ class SQLParser extends StandardTokenParsers {
     } |
     "(" ~> (expr | select ^^ (Subselect(_))) <~ ")" | 
     "+" ~> primary_expr ^^ (UnaryPlus(_)) |
-    "-" ~> primary_expr ^^ (UnaryMinus(_)) 
+    "-" ~> primary_expr ^^ (UnaryMinus(_)) |
+    case_expr
+
+  def case_expr: Parser[SqlExpr] =
+    "case" ~> 
+      opt(expr) ~ rep1("when" ~> expr ~ "then" ~ expr ^^ { case a ~ _ ~ b => (a, b) }) ~ 
+      opt("else" ~> expr) <~ "end" ^^ {
+      case Some(e) ~ cases ~ default => CaseExpr(e, cases, default)
+      case None ~ cases ~ default => CaseWhenExpr(cases, default)
+    }
 
   def known_function: Parser[SqlExpr] =
     "count" ~> "(" ~> ( "*" ^^^ (CountStar) | opt("distinct") ~ expr ^^ { case d ~ e => CountExpr(e, d.isDefined) }) <~ ")" |
