@@ -1,5 +1,6 @@
 trait Node {
   def copyWithContext(ctx: Context): Node
+  val ctx: Context
 }
 
 case class SelectStmt(projections: Seq[SqlProj], 

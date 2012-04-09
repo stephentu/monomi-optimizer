@@ -1,19 +1,31 @@
 import java.sql._
 import java.util._
 
-abstract class Relation(val name: String, val columns: Seq[Column]) {
+abstract trait Relation {
+  val name: String
+  val columns: Seq[Column]
   def lookupColumn(name: String): Option[Column] = {
     columns filter (_.name == name) headOption
   }
 }
-case class TableRelation(override val name: String, override val columns: Seq[Column]) extends Relation(name, columns)
-case class SubqueryRelation(override val name: String, override val columns: Seq[Column], stmt: SelectStmt) extends Relation(name, columns)
+case class TableRelation(name: String, columns: Seq[Column]) extends Relation
+case class SubqueryRelation(name: String, columns: Seq[Column], stmt: SelectStmt) extends Relation
 
-abstract class Column(val name: String, val tpe: DataType)
-case class TableColumn(override val name: String, override val tpe: DataType, relation: String) extends Column(name, tpe)
-case class AliasedColumn(override val name: String, orig: Column) extends Column(name, orig.tpe)
-case class ExprColumn(override val name: String, expr: SqlExpr) extends Column(name, UnknownType)
-case class VirtualColumn(expr: SqlExpr) extends Column("<virtual>", UnknownType) {
+abstract trait Column {
+  val name: String
+  val tpe: DataType
+}
+case class TableColumn(name: String, tpe: DataType, relation: String) extends Column
+case class AliasedColumn(name: String, orig: Column) extends Column {
+  val tpe = orig.tpe
+}
+case class ExprColumn(name: String, expr: SqlExpr) extends Column {
+  val tpe = UnknownType
+}
+case class VirtualColumn(expr: SqlExpr) extends Column {
+  val name = "<virtual>"
+  val tpe = UnknownType
+
   assert(expr.getPrecomputableRelation.isDefined)
   val relation: String = expr.getPrecomputableRelation.get
 }

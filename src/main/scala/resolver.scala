@@ -1,4 +1,4 @@
-trait Resolver extends Traversals {
+trait Resolver extends Transformers with Traversals {
   case class ResolutionException(msg: String) extends RuntimeException(msg)
 
   private var ctr = 0
@@ -11,17 +11,16 @@ trait Resolver extends Traversals {
   def resolve(stmt: SelectStmt, schema: Map[String, TableRelation]): SelectStmt = {
 
     // init contexts 
-    val n = {
-      def gen(x: Node, ctx: Context): Context = x match {
-        case SelectStmt(_, _, _, _, _, _, _) => new Context(Option(ctx))
-        case _ => ctx 
-      }
-      def trfm(x: Node, ctx: Context): Node = x.copyWithContext(ctx)
-      traverseWithContext[Context](stmt, null)(gen)(trfm)
-    }
+    val n = topDownTransformationWithParent(stmt)((parent: Option[Node], child: Node) => child match {
+      case s: SelectStmt => 
+        Some(s.copyWithContext(new Context(parent.map(_.ctx))))
+      case e => 
+        Some(e.copyWithContext(parent.map(_.ctx).getOrElse(throw new RuntimeException("should have ctx"))))
+    })
+    println(n)
 
     // build contexts up
-    val n1 = traverse(n) {
+    topDownTraversal(n) {
       case s @ SelectStmt(projections, relations, _, _, _, _, ctx) => 
 
         println(s)
@@ -80,18 +79,17 @@ trait Resolver extends Traversals {
             }
         }
 
-        s
-      case e => e
+      case _ =>
     }
 
     // resolve field idents
-    traverse(n1) {
+    topDownTransformation(n) {
       case FieldIdent(qual, name, _, ctx) =>
         val col = 
           ctx.lookupColumn(qual, name).getOrElse(
             throw ResolutionException("no such field: " + name))
-        FieldIdent(qual, name, col, ctx) 
-      case e => e
+        Some(FieldIdent(qual, name, col, ctx))
+      case _ => None
     }.asInstanceOf[SelectStmt]
   }
 }

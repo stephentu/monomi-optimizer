@@ -1,6 +1,24 @@
 import scala.collection.mutable.ArrayBuffer
 
 trait Generator extends Traversals {
+  def generatePlanFromOnionSet(
+    stmt: SelectStmt, schema: Map[String, Relation], onionSet: OnionSet): PlanNode = {
+
+    // order is
+    // 1) where clause (filter)
+    // 2) group by 
+    // 3) select clause (projections)
+    // 4) order by
+
+    // 1) collect clauses which cannot be answered, and replace nodes w/ 
+    
+    throw new Exception("unimpl")
+  }
+
+  def generateCandidatePlans(stmt: SelectStmt, schema: Map[String, Relation]): Seq[PlanNode] = {
+    generateOnionSets(stmt, schema).map(o => generatePlanFromOnionSet(stmt, schema, o))
+  }
+
   def generateOnionSets(stmt: SelectStmt, schema: Map[String, Relation]): Seq[OnionSet] = {
 
     def findOrigColumn(c: Column): Option[(String, Column)] = c match {
@@ -22,7 +40,7 @@ trait Generator extends Traversals {
             onionSet.opts.put(r, onionSet.opts.getOrElse(r, 0) | o)
         }
 
-      traverse(start)(wrap {
+      topDownTraversal(start) {
         case Ge(FieldIdent(_, _, symL, _), FieldIdent(_, _, symR, _), ctx0) if ctx == ctx0 =>
           add2(symL, symR, Onions.OPE)
         case Ge(FieldIdent(_, _, symL, _), rhs, ctx0) if ctx == ctx0 && rhs.isLiteral =>
@@ -75,12 +93,12 @@ trait Generator extends Traversals {
 
         case _ =>
           
-      })
+      }
     }
 
     val s = new ArrayBuffer[OnionSet]
 
-    traverse(stmt)(wrap {
+    topDownTraversal(stmt) {
       case SelectStmt(p, _, f, g, o, _, ctx) =>
         s += new OnionSet(Onions.Projection)
         p.foreach(e => traverseContext(e, ctx, s.last))
@@ -94,7 +112,7 @@ trait Generator extends Traversals {
         s += new OnionSet(Onions.OrderBy)
         o.foreach(e => traverseContext(e, ctx, s.last))
       case _ =>
-    })
+    }
 
     s.toSeq
   }
