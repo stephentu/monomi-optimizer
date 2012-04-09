@@ -1,7 +1,11 @@
 import java.sql._
 import java.util._
 
-case class Relation(name: String, columns: Seq[Column])
+case class Relation(name: String, columns: Seq[Column]) {
+  def lookupColumn(name: String): Option[Column] = {
+    columns filter (_.name == name) headOption
+  }
+}
 case class Column(name: String, tpe: DataType)
 
 trait Schema {
