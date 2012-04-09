@@ -13,14 +13,14 @@ trait Resolver extends Transformers with Traversals {
     // init contexts 
     val n = topDownTransformationWithParent(stmt)((parent: Option[Node], child: Node) => child match {
       case s: SelectStmt => 
-        Some(s.copyWithContext(new Context(parent.map(_.ctx))))
+        (Some(s.copyWithContext(new Context(parent.map(_.ctx)))), true)
       case e => 
-        Some(e.copyWithContext(parent.map(_.ctx).getOrElse(throw new RuntimeException("should have ctx"))))
+        (Some(e.copyWithContext(parent.map(_.ctx).getOrElse(throw new RuntimeException("should have ctx")))), true)
     })
     println(n)
 
     // build contexts up
-    topDownTraversal(n) {
+    topDownTraversal(n)(wrapReturnTrue {
       case s @ SelectStmt(projections, relations, _, _, _, _, ctx) => 
 
         println(s)
@@ -79,8 +79,8 @@ trait Resolver extends Transformers with Traversals {
             }
         }
 
-      case _ =>
-    }
+      case _ => (None, true)
+    })
 
     // resolve field idents
     topDownTransformation(n) {
@@ -88,8 +88,8 @@ trait Resolver extends Transformers with Traversals {
         val col = 
           ctx.lookupColumn(qual, name).getOrElse(
             throw ResolutionException("no such field: " + name))
-        Some(FieldIdent(qual, name, col, ctx))
-      case _ => None
+        (Some(FieldIdent(qual, name, col, ctx)), true)
+      case _ => (None, true)
     }.asInstanceOf[SelectStmt]
   }
 }

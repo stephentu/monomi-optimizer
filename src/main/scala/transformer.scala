@@ -1,6 +1,6 @@
 trait Transformers {
 
-  def topDownTransformation(n: Node)(f: Node => Option[Node]): Node =
+  def topDownTransformation(n: Node)(f: Node => (Option[Node], Boolean)): Node =
     topDownTransformationWithParent(n)( (p: Option[Node], c: Node) => f(c) )
 
   // order:
@@ -9,12 +9,13 @@ trait Transformers {
   // 3. if children change, replace node (but don't call f() again on the replaced node)
   //
   // assumptions: nodes don't change too much in structure ast-wise
-  def topDownTransformationWithParent(n: Node)(f: (Option[Node], Node) => Option[Node]): Node = 
+  def topDownTransformationWithParent(n: Node)(f: (Option[Node], Node) => (Option[Node], Boolean)): Node = 
     topDownTransformation0(None, n)(f)
 
-  def topDownTransformation0(p: Option[Node], n: Node)(f: (Option[Node], Node) => Option[Node]): Node = {
-    val nCopy = f(p, n)
+  def topDownTransformation0(p: Option[Node], n: Node)(f: (Option[Node], Node) => (Option[Node], Boolean)): Node = {
+    val (nCopy, keepGoing) = f(p, n)
     val newNode = nCopy getOrElse n
+    if (!keepGoing) return newNode
     def recur[N0 <: Node](n0: N0) = 
       topDownTransformation0(Some(newNode), n0)(f).asInstanceOf[N0]
     newNode match {

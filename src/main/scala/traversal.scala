@@ -1,7 +1,9 @@
 trait Traversals {
 
-  def topDownTraversal[A](n: Node)(f: Node => A): Unit =
-    topDownTraversalWithParent(n)( (p: Option[Node], c: Node) => { f(c); true } )
+  def wrapReturnTrue[A](f: Node => A): Node => Boolean = (n: Node) => { f(n); true }
+
+  def topDownTraversal(n: Node)(f: Node => Boolean): Unit =
+    topDownTraversalWithParent(n)( (p: Option[Node], c: Node) => f(c) )
 
   def topDownTraversalWithParent(n: Node)(f: (Option[Node], Node) => Boolean): Unit =
     topDownTraversal0(None, n)(f)

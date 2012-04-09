@@ -10,7 +10,6 @@ trait Generator extends Traversals {
     // 3) select clause (projections)
     // 4) order by
 
-    // 1) collect clauses which cannot be answered, and replace nodes w/ 
     
     throw new Exception("unimpl")
   }
@@ -40,7 +39,7 @@ trait Generator extends Traversals {
             onionSet.opts.put(r, onionSet.opts.getOrElse(r, 0) | o)
         }
 
-      topDownTraversal(start) {
+      topDownTraversal(start)(wrapReturnTrue {
         case Ge(FieldIdent(_, _, symL, _), FieldIdent(_, _, symR, _), ctx0) if ctx == ctx0 =>
           add2(symL, symR, Onions.OPE)
         case Ge(FieldIdent(_, _, symL, _), rhs, ctx0) if ctx == ctx0 && rhs.isLiteral =>
@@ -93,12 +92,12 @@ trait Generator extends Traversals {
 
         case _ =>
           
-      }
+      })
     }
 
     val s = new ArrayBuffer[OnionSet]
 
-    topDownTraversal(stmt) {
+    topDownTraversal(stmt)(wrapReturnTrue {
       case SelectStmt(p, _, f, g, o, _, ctx) =>
         s += new OnionSet(Onions.Projection)
         p.foreach(e => traverseContext(e, ctx, s.last))
@@ -112,7 +111,7 @@ trait Generator extends Traversals {
         s += new OnionSet(Onions.OrderBy)
         o.foreach(e => traverseContext(e, ctx, s.last))
       case _ =>
-    }
+    })
 
     s.toSeq
   }
