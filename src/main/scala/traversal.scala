@@ -1,4 +1,9 @@
 trait Traversals {
+  def wrap[A](f: Node => A): (Node => Node) = (n: Node) => {
+    f(n)
+    n
+  }
+
   def traverse(n: Node)(trfm: Node => Node): Node = {
     def _gen(x: Node, a: AnyRef): AnyRef = null
     def _trfm(x: Node, a: AnyRef): Node = trfm(x)
@@ -48,9 +53,10 @@ trait Traversals {
       case CaseWhenExpr(c, d, ctx) => trfm(CaseWhenExpr(c.map(recur), d.map(recur), ctx), a_ctx)
       case UnaryPlus(e, ctx) => trfm(UnaryPlus(recur(e), ctx), a_ctx)
       case UnaryMinus(e, ctx) => trfm(UnaryMinus(recur(e), ctx), a_ctx)
-      case SubqueryRelation(s, a, ctx) => trfm(SubqueryRelation(recur(s), a, ctx), a_ctx)
+      case SubqueryRelationAST(s, a, ctx) => trfm(SubqueryRelationAST(recur(s), a, ctx), a_ctx)
       case JoinRelation(l, r, t, c, ctx) => trfm(JoinRelation(recur(l), recur(r), t, recur(c), ctx), a_ctx)
       case SqlGroupBy(k, h, ctx) => trfm(SqlGroupBy(k, h.map(recur), ctx), a_ctx)
+      case SqlOrderBy(k, ctx) => trfm(SqlOrderBy(k.map(x => (recur(x._1), x._2)), ctx), a_ctx)
       case e => trfm(e, a_ctx)
     }
   }

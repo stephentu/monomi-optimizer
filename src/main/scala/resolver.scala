@@ -8,7 +8,7 @@ trait Resolver extends Traversals {
     r
   }
 
-  def resolve(stmt: SelectStmt, schema: Map[String, Relation]): SelectStmt = {
+  def resolve(stmt: SelectStmt, schema: Map[String, TableRelation]): SelectStmt = {
 
     // init contexts 
     val n = {
@@ -35,7 +35,7 @@ trait Resolver extends Traversals {
         }
 
         def processRelation(r: SqlRelation): Unit = r match {
-          case TableRelation(name, alias, _) => 
+          case TableRelationAST(name, alias, _) => 
 
             println("processing: " + name)
             println(ctx.relations)
@@ -50,12 +50,12 @@ trait Resolver extends Traversals {
             // add relation to ctx
             ctx.relations += (name0 -> r)
 
-          case SubqueryRelation(subquery, alias, ctxInner) =>
+          case SubqueryRelationAST(subquery, alias, ctxInner) =>
             // check name
             val name0 = checkName(alias, None, ctx)
 
             // add relation to ctx
-            ctx.relations += ((name0, Relation(name0, subquery.ctx.projections.toSeq)))
+            ctx.relations += ((name0, SubqueryRelation(name0, subquery.ctx.projections.toSeq, subquery)))
 
           case JoinRelation(left, right, _, _, _) =>
             processRelation(left)
@@ -68,12 +68,11 @@ trait Resolver extends Traversals {
         projections.foreach {
           case ExprProj(FieldIdent(qual, name, _, _), alias, _) =>
             ctx.projections += 
-              ctx.lookupColumn(qual, name).map(_.copy(name = alias.getOrElse(name))).getOrElse(
+            ctx.lookupColumn(qual, name).map(x => alias.map(a => AliasedColumn(a, x)).getOrElse(x)).getOrElse(
                 throw ResolutionException("no such field: " + name))
           case ExprProj(expr, alias, _) => 
-            // TODO: we need type information to propagate
             ctx.projections +=
-              Column(alias.getOrElse(anonName), UnknownType)
+              ExprColumn(alias.getOrElse(anonName), expr)
           case StarProj(_) =>
             ctx.relations.foreach {
               case (name, relation) => 

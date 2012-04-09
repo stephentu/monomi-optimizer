@@ -1,12 +1,22 @@
 import java.sql._
 import java.util._
 
-case class Relation(name: String, columns: Seq[Column]) {
+abstract class Relation(val name: String, val columns: Seq[Column]) {
   def lookupColumn(name: String): Option[Column] = {
     columns filter (_.name == name) headOption
   }
 }
-case class Column(name: String, tpe: DataType)
+case class TableRelation(override val name: String, override val columns: Seq[Column]) extends Relation(name, columns)
+case class SubqueryRelation(override val name: String, override val columns: Seq[Column], stmt: SelectStmt) extends Relation(name, columns)
+
+abstract class Column(val name: String, val tpe: DataType)
+case class TableColumn(override val name: String, override val tpe: DataType, relation: String) extends Column(name, tpe)
+case class AliasedColumn(override val name: String, orig: Column) extends Column(name, orig.tpe)
+case class ExprColumn(override val name: String, expr: SqlExpr) extends Column(name, UnknownType)
+case class VirtualColumn(expr: SqlExpr) extends Column("<virtual>", UnknownType) {
+  assert(expr.getPrecomputableRelation.isDefined)
+  val relation: String = expr.getPrecomputableRelation.get
+}
 
 trait Schema {
   def loadSchema(): Map[String, Relation]
@@ -40,7 +50,7 @@ where table_schema = 'public' and table_name = ?
       val r = s.executeQuery
       val columns = r.map(rs => {
         val cname = rs.getString(1)
-        Column(cname, rs.getString(2) match {
+        TableColumn(cname, rs.getString(2) match {
           case "character varying" => VariableLenString(rs.getInt(3))
           case "character" => FixedLenString(rs.getInt(3))
           case "date" => DateType
@@ -49,10 +59,10 @@ where table_schema = 'public' and table_name = ?
             assert(rs.getInt(4) % 8 == 0)
             IntType(rs.getInt(4) / 8)
           case e => sys.error("unknown type: " + e)
-        })
+        }, name)
       })
       s.close()
-      (name, Relation(name, columns))
+      (name, TableRelation(name, columns))
     }).toMap
   }
 }

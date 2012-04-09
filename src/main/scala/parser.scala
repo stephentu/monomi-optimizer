@@ -191,10 +191,10 @@ class SQLParser extends StandardTokenParsers {
 
   def simple_relation: Parser[SqlRelation] = 
     ident ~ opt("as") ~ opt(ident) ^^ { 
-      case ident ~ _ ~ alias => TableRelation(ident, alias)
+      case ident ~ _ ~ alias => TableRelationAST(ident, alias)
     } |
     "(" ~ select ~ ")" ~ opt("as") ~ ident ^^ {
-      case _ ~ select ~ _ ~ _ ~ alias => SubqueryRelation(select, alias) 
+      case _ ~ select ~ _ ~ _ ~ alias => SubqueryRelationAST(select, alias) 
     }
 
   def filter: Parser[SqlExpr] = "where" ~> expr
@@ -206,8 +206,8 @@ class SQLParser extends StandardTokenParsers {
 
   def orderBy: Parser[SqlOrderBy] = 
     "order" ~> "by" ~> rep1sep( ident ~ opt("asc" | "desc") ^^ { 
-      case i ~ (Some("asc") | None) => (i, ASC)
-      case i ~ Some("desc") => (i, DESC)
+      case i ~ (Some("asc") | None) => (FieldIdent(None, i), ASC)
+      case i ~ Some("desc") => (FieldIdent(None, i), DESC)
     }, ",") ^^ (SqlOrderBy(_))
 
   def limit: Parser[Int] = "limit" ~> numericLit ^^ (_.toInt)

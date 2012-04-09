@@ -11,4 +11,8 @@ class Context(val parent: Option[Context] = None) {
         relations.values.flatMap(_.columns).filter(_.name == name).headOption.orElse(
           parent.flatMap(_.lookupColumn(qual, name)))
     }
+
+  // HACK: don't use default toString(), so that built-in ast node's
+  // toString can be used for structural equality
+  override def toString = "Context"
 }
