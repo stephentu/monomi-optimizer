@@ -125,9 +125,24 @@ trait Generator extends Traversals with Transformers {
           (Some(Max(enc(f, Onions.OPE))), false)
 
         case Sum(f @ FieldIdent(_, _, sym, _), _, _) if !unagg && columnSupports(sym, Onions.HOM) =>
-          (Some(Max(enc(f, Onions.HOM))), false)          
+          (Some(AggCall("hom_add", Seq(enc(f, Onions.HOM)))), false)          
 
-        // TODO: avg
+        case Sum(expr, _, _) if !unagg && columnSupports(VirtualColumn(expr), Onions.HOM) =>
+          (Some(AggCall("hom_add", Seq(FieldIdent(None, "virtualColumn /*" + expr.sql + "*/")))), false)
+
+        case avg @ Avg(f @ FieldIdent(_, _, sym, _), _, _) if !unagg && columnSupports(sym, Onions.HOM) =>
+          val id = _generator.uniqueId()
+          projections += ExprProj(CountStar(), Some(id))
+          val aggCall = AggCall("hom_add", Seq(enc(f, Onions.HOM)))
+          conjunctions += Div(aggCall, FieldIdent(None, id))
+          (Some(aggCall), false)          
+
+        case avg @ Avg(expr, _, _) if !unagg && columnSupports(VirtualColumn(expr), Onions.HOM) =>
+          val id = _generator.uniqueId()
+          projections += ExprProj(CountStar(), Some(id))
+          val aggCall = AggCall("hom_add", Seq(FieldIdent(None, "virtualColumn /*" + expr.sql + "*/")))
+          conjunctions += Div(aggCall, FieldIdent(None, id))
+          (Some(aggCall), false)          
 
         case GroupConcat(f @ FieldIdent(_, _, sym, _), sep, _) =>
           // always support this regardless of unagg or not
@@ -340,16 +355,16 @@ trait Generator extends Traversals with Transformers {
 
     topDownTraversal(stmt)(wrapReturnTrue {
       case SelectStmt(p, _, f, g, o, _, ctx) =>
-        s += new OnionSet(Onions.Projection)
+        s += new OnionSet
         p.foreach(e => traverseContext(e, ctx, s.last))
 
-        s += new OnionSet(Onions.Filter)
+        s += new OnionSet
         f.foreach(e => traverseContext(e, ctx, s.last))
 
-        s += new OnionSet(Onions.GroupBy)
+        s += new OnionSet
         g.foreach(e => traverseContext(e, ctx, s.last))
 
-        s += new OnionSet(Onions.OrderBy)
+        s += new OnionSet
         o.foreach(e => traverseContext(e, ctx, s.last))
       case _ =>
     })

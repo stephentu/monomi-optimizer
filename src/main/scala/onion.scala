@@ -20,6 +20,18 @@ object Onions {
   case object OrderBy extends OnionSetType
 }
 
-class OnionSet(val tpe: Onions.OnionSetType) {
+class OnionSet {
   val opts = new HashMap[(String, Column), Int] // int is Onions bitmask
+  def merge(that: OnionSet): OnionSet = {
+    val merged = new OnionSet
+    merged.opts ++= opts
+    that.opts.foreach {
+      case (k, v) =>
+        merged.opts.get(k) match {
+          case Some(v0) => merged.opts.put(k, v | v0)
+          case None => merged.opts.put(k, v)
+        }
+    }
+    merged
+  }
 }

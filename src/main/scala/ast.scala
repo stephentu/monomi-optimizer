@@ -238,7 +238,7 @@ case class AggCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extend
   def copyWithContext(c: Context) = copy(ctx = c)
   def canGatherFields = args.foldLeft(true)(_&&_.canGatherFields)
   def gatherFields = args.flatMap(_.gatherFields)
-  def sql = Seq(name, "(", args.mkString(", "), ")").mkString("")
+  def sql = Seq(name, "(", args.map(_.sql).mkString(", "), ")").mkString("")
 }
 
 trait SqlFunction extends SqlExpr {
