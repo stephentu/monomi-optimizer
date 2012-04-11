@@ -27,3 +27,15 @@ class NameGenerator(prefix: String, reserved: String = "$") {
     ret
   }
 }
+
+object CollectionUtils {
+  def powerSet[T](s: Seq[T]): Seq[Seq[T]] = {
+    if (s.isEmpty) return Seq.empty
+    if (s.size == 1) return Seq(Seq(s.head), Seq.empty)
+    powerSet(s.tail).flatMap(x => {
+      Seq(Seq(s.head) ++ x, x)
+    })
+  }
+  def powerSetMinusEmpty[T](s: Seq[T]): Seq[Seq[T]] = 
+    powerSet(s).filterNot(_.isEmpty)
+}

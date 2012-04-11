@@ -62,8 +62,8 @@ trait Generator extends Traversals with Transformers {
         assert(e.canGatherFields)
 
         val fields = e.gatherFields
-        println("cannot answer: " + e.sql)
-        println("  * fields: " + fields)
+        //println("cannot answer: " + e.sql)
+        //println("  * fields: " + fields)
 
         // TODO: this seems too simplistic...
         val projs = fields.map(x => (x._1.name, x._1, x._2)).map { 
@@ -281,7 +281,13 @@ trait Generator extends Traversals with Transformers {
   }
 
   def generateCandidatePlans(stmt: SelectStmt, schema: Map[String, Relation]): Seq[PlanNode] = {
-    generateOnionSets(stmt, schema).map(o => generatePlanFromOnionSet(stmt, schema, o))
+    val o = generateOnionSets(stmt, schema)
+    val perms = CollectionUtils.powerSetMinusEmpty(o)
+    // merge all perms, then unique
+    val candidates = perms.map(p => OnionSet.merge(p)).toSet.toSeq
+    //println("size(candidates) = " + candidates.size)
+    //println("candidates = " + candidates)
+    candidates.map(o => generatePlanFromOnionSet(stmt, schema, o)).toSet.toSeq
   }
 
   def generateOnionSets(stmt: SelectStmt, schema: Map[String, Relation]): Seq[OnionSet] = {

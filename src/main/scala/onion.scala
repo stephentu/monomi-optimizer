@@ -1,4 +1,4 @@
-import scala.collection.mutable._
+import scala.collection.mutable.HashMap
 
 object Onions {
   final val DET = 0x1
@@ -20,6 +20,14 @@ object Onions {
   case object OrderBy extends OnionSetType
 }
 
+object OnionSet {
+  def merge(sets: Seq[OnionSet]): OnionSet = {
+    sets.foldLeft(new OnionSet) { 
+      case (acc, elem) => acc.merge(elem)
+    }
+  }
+}
+
 class OnionSet {
   val opts = new HashMap[(String, Column), Int] // int is Onions bitmask
   def merge(that: OnionSet): OnionSet = {
@@ -34,4 +42,5 @@ class OnionSet {
     }
     merged
   }
+  override def toString = "OnionSet(" + opts.toString + ")"
 }
