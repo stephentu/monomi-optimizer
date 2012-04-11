@@ -19,79 +19,250 @@ trait Generator extends Traversals with Transformers {
     // 4) order by
 
     // NOTE: assumes that all expressions are in disjunctive normal form (DNF)
-    
-    val newProjections = new ArrayBuffer[Column]
+
+    def columnSupports(c: Column, o: Int): Boolean = {
+      findOrigColumn(c)
+        .flatMap(x => onionSet.opts.get(x))
+        .map(y => (y & o) != 0).getOrElse(false)
+    }
+
+    var cur = stmt // the current statement, as we update it
+
+    val _generator = new NameGenerator("_projection")
+
+    //val newProjections = new ArrayBuffer[SqlProj]
+
     val newLocalFilters = new ArrayBuffer[SqlExpr]
 
+    // left is client group by, right is only client group filter
+    var newLocalGroupBy: Option[Either[SqlGroupBy, SqlExpr]] = None
+
+    val newLocalProjections = new ArrayBuffer[SqlExpr]
+
+    var newLocalOrderBy: Option[Seq[(FieldIdent, OrderType)]] = None
+
+    var newLocalLimit: Option[Int] = None
+
     def keepGoing = (None, true)
+    def answerWithoutModification(n: Node) = (Some(n.copyWithContext(null)), false)
 
     def enc(fi: FieldIdent, o: Int): FieldIdent = fi match {
       case FieldIdent(q, n, _, _) => FieldIdent(q.map(_ + "_enc"), n + "_" + Onions.str(o))
     }
 
-    def cannotAnswer(expr: SqlExpr) = {
-      newLocalFilters += expr      
-      (Some(IntLiteral(1)), false)
-    }
+    // rewrite expr into an expr which can be evaluated on the server,
+    // plus any additional projections,
+    // plus an optional client operation which must be applied locally for reconstruction
+    def rewriteExprForServer(expr: SqlExpr, unagg: Boolean): (SqlExpr, Option[(Seq[SqlProj], Option[SqlExpr])]) = {
+      val projections = new ArrayBuffer[SqlProj]
+      val conjunctions = new ArrayBuffer[SqlExpr]
 
-    val newFilter = stmt.filter.map(f => topDownTransformation(f) {
-      case Or(_, _, _) => keepGoing
-      case And(_, _, _) => keepGoing
+      def cannotAnswer(e: SqlExpr) = {
+        // filter out all fields
+        assert(e.canGatherFields)
 
-      case eq: EqualityLike =>
-        (eq.lhs, eq.rhs) match {
-          case (l: FieldIdent, r: FieldIdent) =>
-            // assume we can always handle this case
-            (Some(eq.copyWithChildren(enc(l, Onions.DET), enc(l, Onions.DET))), false)
-          case (l: FieldIdent, rhs) if rhs.isLiteral =>
-            (Some(eq.copyWithChildren(enc(l, Onions.DET), NullLiteral() /* TODO: encrypt */)), false)
+        val fields = e.gatherFields
+        println("cannot answer: " + e.sql)
+        println("  * fields: " + fields)
 
-          case (lhs, r: FieldIdent) if lhs.isLiteral =>
-            (Some(eq.copyWithChildren(NullLiteral() /* TODO: encrypt */, enc(r, Onions.DET))), false)
-
-          case _ => cannotAnswer(eq)
+        // TODO: this seems too simplistic...
+        val projs = fields.map(x => (x._1.name, x._1, x._2)).map { 
+          case (name, col, false) =>
+            ExprProj(FieldIdent(None, name, col), Some(_generator.uniqueId()))
+          case (name, col, true) =>
+            ExprProj(GroupConcat(FieldIdent(None, name, col), ","), Some(_generator.uniqueId()))
         }
 
-      case ieq: InequalityLike =>
-        (ieq.lhs, ieq.rhs) match {
-          case (l: FieldIdent, r: FieldIdent) =>
-            val ok = 
-              findOrigColumn(l.symbol).flatMap(l => findOrigColumn(r.symbol).map(r => (l, r))).map {
-                case (l, r) =>
-                  onionSet.opts.get(l).map(x => { 
-                    (x & Onions.OPE) != 0 && 
-                    onionSet.opts.get(r).map(y => (y & Onions.OPE) != 0).getOrElse(false) }).getOrElse(false)
-              }.getOrElse(false)
-            if (ok) (Some(ieq.copyWithChildren(enc(l, Onions.OPE), enc(r, Onions.OPE))), false)
-            else cannotAnswer(ieq)
+        projections ++= projs
 
-          case (l: FieldIdent, rhs) if rhs.isLiteral =>
-            val ok = 
-              findOrigColumn(l.symbol).flatMap(x => onionSet.opts.get(x)).map(y => (y & Onions.OPE) != 0).getOrElse(false)
-            if (ok) (Some(ieq.copyWithChildren(enc(l, Onions.OPE), NullLiteral())), false)
-            else cannotAnswer(ieq)
+        // TODO: rewrite query deal w/ the projections
+        conjunctions += e
 
-          case (lhs, r: FieldIdent) if lhs.isLiteral =>
-            val ok = 
-              findOrigColumn(r.symbol).flatMap(x => onionSet.opts.get(x)).map(y => (y & Onions.OPE) != 0).getOrElse(false)
-            if (ok) (Some(ieq.copyWithChildren(NullLiteral(), enc(r, Onions.OPE))), false)
-            else cannotAnswer(ieq)
+        (Some(IntLiteral(1)), false)
+      }
+
+      val newExpr = topDownTransformation(expr) {
+
+        case Or(_, _, _) => 
+          throw new Exception("TODO: don't assume clause is only conjuctive")
+        case And(_, _, _) => keepGoing
+
+        case eq: EqualityLike =>
+          (eq.lhs, eq.rhs) match {
+            case (l: FieldIdent, r: FieldIdent) =>
+              // assume we can always handle this case
+              // which might not be true (ie we might remove dets)
+              (Some(eq.copyWithChildren(enc(l, Onions.DET), enc(l, Onions.DET))), false)
+            case (l: FieldIdent, rhs) if rhs.isLiteral =>
+              (Some(eq.copyWithChildren(enc(l, Onions.DET), NullLiteral() /* TODO: encrypt */)), false)
+            case (lhs, r: FieldIdent) if lhs.isLiteral =>
+              (Some(eq.copyWithChildren(NullLiteral() /* TODO: encrypt */, enc(r, Onions.DET))), false)
+            case _ => cannotAnswer(eq)
+          }
+
+        case ieq: InequalityLike =>
+          (ieq.lhs, ieq.rhs) match {
+            case (l: FieldIdent, r: FieldIdent) 
+              if columnSupports(l.symbol, Onions.OPE) && 
+                 columnSupports(r.symbol, Onions.OPE) => 
+              (Some(ieq.copyWithChildren(enc(l, Onions.OPE), enc(r, Onions.OPE))), false)
+            case (l: FieldIdent, rhs) 
+              if columnSupports(l.symbol, Onions.OPE) && rhs.isLiteral =>
+              (Some(ieq.copyWithChildren(enc(l, Onions.OPE), NullLiteral())), false)
+            case (lhs, r: FieldIdent) 
+              if lhs.isLiteral && columnSupports(r.symbol, Onions.OPE) =>
+              (Some(ieq.copyWithChildren(NullLiteral(), enc(r, Onions.OPE))), false)
+            case _ => cannotAnswer(ieq)
+          }
+
+        case cs @ CountStar(_) if !unagg => 
+          answerWithoutModification(cs)
+
+        case Min(f @ FieldIdent(_, _, sym, _), _) if !unagg && columnSupports(sym, Onions.OPE) =>
+          (Some(Min(enc(f, Onions.OPE))), false)
+
+        case Max(f @ FieldIdent(_, _, sym, _), _) if !unagg && columnSupports(sym, Onions.OPE) =>
+          (Some(Max(enc(f, Onions.OPE))), false)
+
+        case Sum(f @ FieldIdent(_, _, sym, _), _, _) if !unagg && columnSupports(sym, Onions.HOM) =>
+          (Some(Max(enc(f, Onions.HOM))), false)          
+
+        // TODO: avg
+
+        case GroupConcat(f @ FieldIdent(_, _, sym, _), sep, _) =>
+          // always support this regardless of unagg or not
+          (Some(GroupConcat(enc(f, Onions.DET), sep)), false) 
+
+        case f: FieldIdent =>
+          (Some(enc(f, Onions.DET)), false)
+                   
+        case e: SqlExpr =>
+          // by default assume cannot answer
+          cannotAnswer(e)
+        
+        case e => throw new Exception("should only have exprs under where clause")
+      }.asInstanceOf[SqlExpr]
 
 
-          case _ => cannotAnswer(ieq)
-        }
-                 
-      case e: SqlExpr =>
-        // by default assume cannot answer
-        cannotAnswer(e)
-      
-      case e => throw new Exception("should only have exprs under where clause")
-
-    }.asInstanceOf[SqlExpr])
-
-    newLocalFilters.foldLeft( RemoteSql(stmt.copy(filter = newFilter)) : PlanNode ) {
-      case (acc, expr) => LocalFilter(expr, acc)
+      (newExpr, 
+       if (projections.isEmpty && conjunctions.isEmpty) None
+       else Some((
+         projections.toSeq, 
+         if (conjunctions.isEmpty) None else Some(conjunctions.reduceLeft((x: SqlExpr, y: SqlExpr) => {  
+            And(x, y) 
+         })))))
     }
+
+    // filters
+    cur = cur.filter.map(x => rewriteExprForServer(x, false)).map {
+      case (stmt, Some((projs, expr))) =>
+        val projsToAdd = 
+          if (cur.groupBy.isDefined) {
+            // need to group_concat the projections then
+            projs.map { 
+              case ExprProj(e, a, _) => ExprProj(GroupConcat(e, ","), a)
+            }
+          } else {
+            projs
+          }
+        expr.foreach(e => newLocalFilters += e)
+        cur.copy(projections = cur.projections ++ projsToAdd, filter = Some(stmt))
+      case (stmt, None) => 
+        cur.copy(filter = Some(stmt))
+    }.getOrElse(cur)
+
+    // group by
+    cur = {
+      // need to check if we can answer the having clause
+      val (projsToAdd, newGroupBy) = 
+        cur.groupBy.map(gb => gb.having.map(x => rewriteExprForServer(x, false)).map {
+          case (stmt, Some((projs, expr))) =>
+            newLocalGroupBy = expr.map(Right(_)) 
+            (projs, Some(gb.copy(having = Some(stmt))))
+          case (stmt, None) =>
+            (Seq.empty, Some(gb.copy(having = Some(stmt))))
+        }.getOrElse((Seq.empty, Some(gb)))).getOrElse((Seq.empty, None))
+
+      val newGroupBy0 = newGroupBy.map(gb => gb.copy(keys = gb.keys.map(_ + "_DET")))
+      cur.copy(projections = cur.projections ++ projsToAdd, groupBy = newGroupBy0) 
+    }
+
+    // projections
+    cur = {
+      var toProcess: Seq[SqlProj] = cur.projections
+      var finalProjs: Seq[SqlProj] = Seq.empty
+      while (!toProcess.isEmpty) {
+        val thisIter = toProcess
+        toProcess = Seq.empty
+        finalProjs = finalProjs ++  
+          thisIter
+            .map {
+              case ExprProj(e, a, _) =>
+                rewriteExprForServer(e, cur.groupBy.isDefined && !newLocalFilters.isEmpty) match {
+                  case (stmt, Some((projs, expr))) =>
+                    toProcess ++= projs
+                    expr.foreach(e => newLocalProjections += e)
+                    ExprProj(stmt, a)
+                  case (stmt, None) =>
+                    ExprProj(stmt, a)
+                }
+              case StarProj(_) => 
+                // TODO: the resolver phase should rewrite * to project all the fields,
+                // so we only have to handle ExprProj
+                throw new RuntimeException("unimpl")
+            }
+      }
+      cur.copy(projections = finalProjs)
+    }
+
+    // order by
+    cur = {
+      val newOrderBy = cur.orderBy.flatMap(o => {
+        if (newLocalFilters.isEmpty &&
+            newLocalGroupBy.isEmpty &&
+            o.keys.filter(k => !columnSupports(k._1.symbol, Onions.OPE)).isEmpty) {
+          // can support server side order by
+          Some(SqlOrderBy(o.keys.map(k => (enc(k._1, Onions.OPE), k._2))))
+        } else {
+          newLocalOrderBy = Some(o.keys)
+          None
+        }
+      })
+      cur.copy(orderBy = newOrderBy) 
+    }
+
+    // limit
+    cur = cur.copy(limit = cur.limit.flatMap(l => {
+      if (newLocalFilters.isEmpty &&
+          newLocalGroupBy.isEmpty &&
+          newLocalOrderBy.isEmpty) {
+        Some(l) 
+      } else {
+        newLocalLimit = Some(l)
+        None
+      }
+    }))
+
+    val stage1 =  
+      newLocalFilters.foldLeft( RemoteSql(cur) : PlanNode ) {
+        case (acc, expr) => LocalFilter(expr, acc)
+      }
+
+    val stage2 = 
+      newLocalGroupBy.map(x => x match {
+        case Left(_) => throw new RuntimeException("unimpl")
+        case Right(expr) => LocalGroupFilter(expr, stage1)
+      }).getOrElse(stage1)
+
+    val stage3 = 
+      newLocalProjections.foldLeft( stage2 ) {
+        case (acc, expr) => LocalTransform(expr, acc)
+      }
+
+    val stage4 = 
+      newLocalOrderBy.map(k => LocalOrderBy(k, stage3)).getOrElse(stage3)
+
+    newLocalLimit.map(l => LocalLimit(l, stage4)).getOrElse(stage4)
   }
 
   def generateCandidatePlans(stmt: SelectStmt, schema: Map[String, Relation]): Seq[PlanNode] = {

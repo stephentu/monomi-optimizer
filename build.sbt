@@ -4,3 +4,5 @@ libraryDependencies ++= Seq(
 )
 
 scalacOptions += "-deprecation"
+
+scalacOptions += "-unchecked"

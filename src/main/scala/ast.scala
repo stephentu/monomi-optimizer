@@ -3,6 +3,9 @@ trait Node {
 
   def copyWithContext(ctx: Context): Node
   def sql: String
+
+  // TODO: escape
+  protected def _q(s: String): String = "\"" + s + "\""
 }
 
 case class SelectStmt(projections: Seq[SqlProj], 
@@ -37,18 +40,22 @@ trait SqlExpr extends Node {
   def getPrecomputableRelation: Option[String] = {
     if (!canGatherFields) None
     val f = gatherFields
-    if (!f.filter(_.isInstanceOf[ExprColumn]).isEmpty) None
+
+    // TODO: this currently assume columns which reference expr columns are not
+    // precomputable
+    if (!f.filter(_._1.isInstanceOf[ExprColumn]).isEmpty) None
 
     def extractRelation(c: Column): String = c match {
       case TableColumn(_, _, relation) => relation
       case AliasedColumn(_, orig) => extractRelation(orig)
     }
 
-    val rxs = f.map(extractRelation).toSet
+    val rxs = f.map(x => extractRelation(x._1)).toSet
     if (rxs.size == 1) Some(rxs.head) else None
   }
   def canGatherFields: Boolean
-  def gatherFields: Seq[Column]
+  // (col, true if aggregate context false otherwise)
+  def gatherFields: Seq[(Column, Boolean)]
 }
 
 trait Binop extends SqlExpr {
@@ -69,46 +76,46 @@ trait Binop extends SqlExpr {
 case class Or(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
   val opStr = "or"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 case class And(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
   val opStr = "and"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 
 trait EqualityLike extends Binop
 case class Eq(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends EqualityLike {
   val opStr = "="
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 case class Neq(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends EqualityLike {
   val opStr = "<>"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 
 trait InequalityLike extends Binop
 case class Ge(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends InequalityLike {
   val opStr = "<="
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 case class Gt(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends InequalityLike {
   val opStr = "<"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 case class Le(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends InequalityLike {
   val opStr = ">="
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 case class Lt(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends InequalityLike {
   val opStr = ">"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 
 case class In(elem: SqlExpr, set: Either[Seq[SqlExpr], SelectStmt], negate: Boolean, ctx: Context = null) extends SqlExpr {
@@ -126,29 +133,29 @@ case class In(elem: SqlExpr, set: Either[Seq[SqlExpr], SelectStmt], negate: Bool
 case class Like(lhs: SqlExpr, rhs: SqlExpr, negate: Boolean, ctx: Context = null) extends Binop {
   val opStr = if (negate) "not like" else "like"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 
 case class Plus(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
   val opStr = "+"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 case class Minus(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
   val opStr = "-"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 
 case class Mult(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
   val opStr = "*"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 case class Div(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
   val opStr = "/"
   def copyWithContext(c: Context) = copy(ctx = c)
-  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs)
+  def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 
 trait Unop extends SqlExpr {
@@ -174,7 +181,7 @@ case class Exists(select: SelectStmt, ctx: Context = null) extends SqlExpr {
 case class FieldIdent(qualifier: Option[String], name: String, symbol: Column = null, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def canGatherFields = true
-  def gatherFields = Seq(symbol)
+  def gatherFields = Seq((symbol, false))
   def sql = Seq(qualifier, Some(name)).flatten.mkString(".")
 }
 case class Subselect(subquery: SelectStmt, ctx: Context = null) extends SqlExpr {
@@ -184,33 +191,54 @@ case class Subselect(subquery: SelectStmt, ctx: Context = null) extends SqlExpr 
   def sql = "(" + subquery + ")"
 }
 
-trait SqlAgg extends SqlExpr {
-  def canGatherFields = false
-  def gatherFields = throw new RuntimeException("not possible")
-}
+trait SqlAgg extends SqlExpr
 case class CountStar(ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = true
+  def gatherFields = Seq.empty
   def sql = "count(*)"
 }
 case class CountExpr(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = expr.canGatherFields
+  def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = Seq(Some("count("), if (distinct) Some("distinct ") else None, Some(expr.sql), Some(")")).flatten.mkString("")
 }
 case class Sum(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = expr.canGatherFields
+  def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = Seq(Some("sum("), if (distinct) Some("distinct ") else None, Some(expr.sql), Some(")")).flatten.mkString("")
 }
 case class Avg(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = expr.canGatherFields
+  def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = Seq(Some("avg("), if (distinct) Some("distinct ") else None, Some(expr.sql), Some(")")).flatten.mkString("")
 }
 case class Min(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = expr.canGatherFields
+  def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = "min(" + expr.sql + ")"
 }
 case class Max(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = expr.canGatherFields
+  def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = "max(" + expr.sql + ")"
+}
+case class GroupConcat(expr: SqlExpr, sep: String, ctx: Context = null) extends SqlAgg {
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = expr.canGatherFields
+  def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
+  def sql = Seq("group_concat(", Seq(expr.sql, _q(sep)).mkString(", "), ")").mkString("")
+}
+case class AggCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extends SqlAgg {
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = args.foldLeft(true)(_&&_.canGatherFields)
+  def gatherFields = args.flatMap(_.gatherFields)
+  def sql = Seq(name, "(", args.mkString(", "), ")").mkString("")
 }
 
 trait SqlFunction extends SqlExpr {
@@ -221,6 +249,7 @@ trait SqlFunction extends SqlExpr {
   def gatherFields = args.flatMap(_.gatherFields) 
   def sql = Seq(name, "(", args.map(_.sql) mkString ", ", ")") mkString ""
 }
+
 case class FunctionCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extends SqlFunction {
   def copyWithContext(c: Context) = copy(ctx = c)
 }

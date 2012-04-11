@@ -17,3 +17,13 @@ class ResultSetWrapper(rs: ResultSet) {
     buf.toSeq
   }
 }
+
+// NOT THREAD SAFE
+class NameGenerator(prefix: String, reserved: String = "$") {
+  private var _ctr: Long = 0L
+  def uniqueId(): String = {
+    val ret = prefix + reserved + _ctr
+    _ctr += 1
+    ret
+  }
+}
