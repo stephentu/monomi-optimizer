@@ -1,5 +1,5 @@
 import java.sql._
-import java.util._
+import java.util.Properties
 
 abstract trait Relation {
   val name: String
@@ -31,10 +31,10 @@ case class VirtualColumn(expr: SqlExpr) extends Column {
 }
 
 trait Schema {
-  def loadSchema(): Map[String, Relation]
+  def loadSchema(): Map[String, TableRelation]
 }
 
-class PgSchema(hostname: String, port: Int, db: String, props: Properties) {
+class PgSchema(hostname: String, port: Int, db: String, props: Properties) extends Schema {
   Class.forName("org.postgresql.Driver")
   private val conn = DriverManager.getConnection(
     "jdbc:postgresql://%s:%d/%s".format(hostname, port, db), props)
