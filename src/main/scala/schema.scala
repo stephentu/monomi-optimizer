@@ -1,37 +1,31 @@
 import java.sql._
 import java.util.Properties
 
-abstract trait Relation {
-  val name: String
-  val columns: Seq[Column]
-  def lookupColumn(name: String): Option[Column] = {
-    columns filter (_.name == name) headOption
+// these are the types of relations which can show up in a
+// FROM clause
+abstract trait Relation
+case class TableRelation(name: String) extends Relation
+case class SubqueryRelation(stmt: SelectStmt) extends Relation
+
+case class TableColumn(name: String, tpe: DataType) extends PrettyPrinters {
+  def scalaStr: String = 
+    "TableColumn(" + _q(name) + ", " + tpe.toString + ")"
+}
+
+class Definitions(val defns : Map[String, Seq[TableColumn]]) extends PrettyPrinters {
+  def lookup(table: String, col: String): Option[TableColumn] = {
+    defns.get(table).flatMap(_.filter(_.name == col).headOption)
   }
-}
-case class TableRelation(name: String, columns: Seq[Column]) extends Relation
-case class SubqueryRelation(name: String, columns: Seq[Column], stmt: SelectStmt) extends Relation
 
-abstract trait Column {
-  val name: String
-  val tpe: DataType
-}
-case class TableColumn(name: String, tpe: DataType, relation: String) extends Column
-case class AliasedColumn(name: String, orig: Column) extends Column {
-  val tpe = orig.tpe
-}
-case class ExprColumn(name: String, expr: SqlExpr) extends Column {
-  val tpe = UnknownType
-}
-case class VirtualColumn(expr: SqlExpr) extends Column {
-  val name = "<virtual>"
-  val tpe = UnknownType
-
-  assert(expr.getPrecomputableRelation.isDefined)
-  val relation: String = expr.getPrecomputableRelation.get
+  def scalaStr: String = {
+    "new Definitions(Map(" + (defns.map { case (k, v) =>
+      (_q(k), "Seq(" + v.map(_.scalaStr).mkString(", ") + ")")
+    }.map { case (k, v) => k + " -> " + v }.mkString(", ")) + "))"
+  }
 }
 
 trait Schema {
-  def loadSchema(): Map[String, TableRelation]
+  def loadSchema(): Definitions
 }
 
 class PgSchema(hostname: String, port: Int, db: String, props: Properties) extends Schema {
@@ -50,7 +44,7 @@ where table_catalog = ? and table_schema = 'public'
     val tables = r.map(_.getString(1))
     s.close()
 
-    tables.map(name => {
+    new Definitions(tables.map(name => {
       val s = conn.prepareStatement("""
 select 
   column_name, data_type, character_maximum_length, 
@@ -71,10 +65,10 @@ where table_schema = 'public' and table_name = ?
             assert(rs.getInt(4) % 8 == 0)
             IntType(rs.getInt(4) / 8)
           case e => sys.error("unknown type: " + e)
-        }, name)
+        })
       })
       s.close()
-      (name, TableRelation(name, columns))
-    }).toMap
+      (name, columns)
+    }).toMap)
   }
 }

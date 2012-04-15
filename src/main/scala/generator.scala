@@ -2,11 +2,19 @@ import scala.collection.mutable.ArrayBuffer
 
 trait Generator extends Traversals with Transformers {
 
-  private def findOrigColumn(c: Column): Option[(String, Column)] = c match {
-    case t @ TableColumn(_, _, rlxn) => Some((rlxn, t))
-    case AliasedColumn(_, orig) => findOrigColumn(orig)
-    case v @ VirtualColumn(expr) => Some((v.relation, v))
-    case _ => None
+  private def findOnionableExpr(e: SqlExpr): Option[(String, SqlExpr)] = {
+    val r = e.getPrecomputableRelation
+    if (r.isDefined) Some((r.get, e)) 
+    else e match {
+      // TODO: this special case currently doesn't help you
+      case FieldIdent(_, _, Symbol(relation, name, ctx), _) =>
+        assert(ctx.relations(relation).isInstanceOf[SubqueryRelation])
+        ctx
+          .relations(relation)
+          .asInstanceOf[SubqueryRelation]
+          .stmt.ctx.lookupProjection(name).flatMap(findOnionableExpr)
+      case _ => None
+    }
   }
 
   def generatePlanFromOnionSet(
@@ -20,10 +28,21 @@ trait Generator extends Traversals with Transformers {
 
     // NOTE: assumes that all expressions are in disjunctive normal form (DNF)
 
-    def columnSupports(c: Column, o: Int): Boolean = {
-      findOrigColumn(c)
-        .flatMap(x => onionSet.opts.get(x))
-        .map(y => (y & o) != 0).getOrElse(false)
+    def getSupportedExpr(e: SqlExpr, o: Int): Option[FieldIdent] = {
+      val e0 = findOnionableExpr(e)
+      e0.flatMap { x =>
+        val key = (
+          x._2.ctx.relations(x._1) match {
+            case TableRelation(x) => x
+            case _ => /* should not be here */
+              throw new Exception("failure")
+          },
+          x._2)
+        onionSet.opts.get(key).filter(y => (y._2 & o) != 0).map {
+          case (basename, _) =>
+            FieldIdent(Some(x._1), basename + "_" + Onions.str(o)) 
+        }
+      }
     }
 
     var cur = stmt // the current statement, as we update it
@@ -46,10 +65,6 @@ trait Generator extends Traversals with Transformers {
     def keepGoing = (None, true)
     def answerWithoutModification(n: Node) = (Some(n.copyWithContext(null)), false)
 
-    def enc(fi: FieldIdent, o: Int): FieldIdent = fi match {
-      case FieldIdent(q, n, _, _) => FieldIdent(q.map(_ + "_enc"), n + "_" + Onions.str(o))
-    }
-
     // rewrite expr into an expr which can be evaluated on the server,
     // plus any additional projections,
     // plus an optional client operation which must be applied locally for reconstruction
@@ -57,7 +72,7 @@ trait Generator extends Traversals with Transformers {
       val projections = new ArrayBuffer[SqlProj]
       val conjunctions = new ArrayBuffer[SqlExpr]
 
-      def cannotAnswer(e: SqlExpr) = {
+      def cannotAnswer(e: SqlExpr): (Option[Node], Boolean) = {
         // filter out all fields
         assert(e.canGatherFields)
 
@@ -65,12 +80,11 @@ trait Generator extends Traversals with Transformers {
         //println("cannot answer: " + e.sql)
         //println("  * fields: " + fields)
 
-        // TODO: this seems too simplistic...
-        val projs = fields.map(x => (x._1.name, x._1, x._2)).map { 
-          case (name, col, false) =>
-            ExprProj(FieldIdent(None, name, col), Some(_generator.uniqueId()))
-          case (name, col, true) =>
-            ExprProj(GroupConcat(FieldIdent(None, name, col), ","), Some(_generator.uniqueId()))
+        val projs = fields.map { 
+          case (f, false) =>
+            ExprProj(f, Some(_generator.uniqueId()))
+          case (f, true) =>
+            ExprProj(GroupConcat(f, ","), Some(_generator.uniqueId()))
         }
 
         projections ++= projs
@@ -89,71 +103,63 @@ trait Generator extends Traversals with Transformers {
 
         case eq: EqualityLike =>
           (eq.lhs, eq.rhs) match {
-            case (l: FieldIdent, r: FieldIdent) =>
-              // assume we can always handle this case
-              // which might not be true (ie we might remove dets)
-              (Some(eq.copyWithChildren(enc(l, Onions.DET), enc(l, Onions.DET))), false)
-            case (l: FieldIdent, rhs) if rhs.isLiteral =>
-              (Some(eq.copyWithChildren(enc(l, Onions.DET), NullLiteral() /* TODO: encrypt */)), false)
-            case (lhs, r: FieldIdent) if lhs.isLiteral =>
-              (Some(eq.copyWithChildren(NullLiteral() /* TODO: encrypt */, enc(r, Onions.DET))), false)
-            case _ => cannotAnswer(eq)
+            case (lhs, rhs) if rhs.isLiteral =>
+              getSupportedExpr(lhs, Onions.DET).map(fi => (Some(eq.copyWithChildren(fi, NullLiteral())), false)).getOrElse(cannotAnswer(eq))
+            case (lhs, rhs) if lhs.isLiteral =>
+              getSupportedExpr(rhs, Onions.DET).map(fi => (Some(eq.copyWithChildren(NullLiteral(), fi)), false)).getOrElse(cannotAnswer(eq))
+            case (lhs, rhs) =>
+              CollectionUtils.opt2(
+                getSupportedExpr(lhs, Onions.DET),
+                getSupportedExpr(rhs, Onions.DET))
+              .map {
+                case (lfi, rfi) =>
+                  (Some(eq.copyWithChildren(lfi, rfi)), false)
+              }.getOrElse(cannotAnswer(eq))
           }
 
         case ieq: InequalityLike =>
           (ieq.lhs, ieq.rhs) match {
-            case (l: FieldIdent, r: FieldIdent) 
-              if columnSupports(l.symbol, Onions.OPE) && 
-                 columnSupports(r.symbol, Onions.OPE) => 
-              (Some(ieq.copyWithChildren(enc(l, Onions.OPE), enc(r, Onions.OPE))), false)
-            case (l: FieldIdent, rhs) 
-              if columnSupports(l.symbol, Onions.OPE) && rhs.isLiteral =>
-              (Some(ieq.copyWithChildren(enc(l, Onions.OPE), NullLiteral())), false)
-            case (lhs, r: FieldIdent) 
-              if lhs.isLiteral && columnSupports(r.symbol, Onions.OPE) =>
-              (Some(ieq.copyWithChildren(NullLiteral(), enc(r, Onions.OPE))), false)
-            case _ => cannotAnswer(ieq)
+            case (lhs, rhs) if rhs.isLiteral =>
+              getSupportedExpr(lhs, Onions.OPE).map(fi => (Some(ieq.copyWithChildren(fi, NullLiteral())), false)).getOrElse(cannotAnswer(ieq))
+            case (lhs, rhs) if lhs.isLiteral =>
+              getSupportedExpr(rhs, Onions.OPE).map(fi => (Some(ieq.copyWithChildren(NullLiteral(), fi)), false)).getOrElse(cannotAnswer(ieq))
+            case (lhs, rhs) =>
+              CollectionUtils.opt2(
+                getSupportedExpr(lhs, Onions.OPE),
+                getSupportedExpr(rhs, Onions.OPE))
+              .map {
+                case (lfi, rfi) =>
+                  (Some(ieq.copyWithChildren(lfi, rfi)), false)
+              }.getOrElse(cannotAnswer(ieq))
           }
 
         case cs @ CountStar(_) if !unagg => 
           answerWithoutModification(cs)
 
-        case Min(f @ FieldIdent(_, _, sym, _), _) if !unagg && columnSupports(sym, Onions.OPE) =>
-          (Some(Min(enc(f, Onions.OPE))), false)
+        case m @ Min(f, _) if !unagg =>
+          getSupportedExpr(f, Onions.OPE).map(fi => (Some(Min(fi)), false)).getOrElse(cannotAnswer(m))
 
-        case Max(f @ FieldIdent(_, _, sym, _), _) if !unagg && columnSupports(sym, Onions.OPE) =>
-          (Some(Max(enc(f, Onions.OPE))), false)
+        case m @ Max(f, _) if !unagg =>
+          getSupportedExpr(f, Onions.OPE).map(fi => (Some(Max(fi)), false)).getOrElse(cannotAnswer(m))
 
-        case Sum(f @ FieldIdent(_, _, sym, _), _, _) if !unagg && columnSupports(sym, Onions.HOM) =>
-          (Some(AggCall("hom_add", Seq(enc(f, Onions.HOM)))), false)          
+        case s @ Sum(f, _, _) if !unagg =>
+          getSupportedExpr(f, Onions.HOM).map(fi => (Some(AggCall("hom_add", Seq(fi))), false)).getOrElse(cannotAnswer(s))
 
-        case Sum(expr, _, _) if !unagg && columnSupports(VirtualColumn(expr), Onions.HOM) =>
-          (Some(AggCall("hom_add", Seq(FieldIdent(None, "virtualColumn /*" + expr.sql + "*/")))), false)
+        case avg @ Avg(f, _, _) if !unagg =>
+          getSupportedExpr(f, Onions.HOM).map(fi => {
+            val id = _generator.uniqueId()
+            projections += ExprProj(CountStar(), Some(id))
+            val aggCall = AggCall("hom_add", Seq(fi))
+            conjunctions += Div(aggCall, FieldIdent(None, id))
+            (Some(aggCall), false)          
+          }).getOrElse(cannotAnswer(avg))
 
-        case avg @ Avg(f @ FieldIdent(_, _, sym, _), _, _) if !unagg && columnSupports(sym, Onions.HOM) =>
-          val id = _generator.uniqueId()
-          projections += ExprProj(CountStar(), Some(id))
-          val aggCall = AggCall("hom_add", Seq(enc(f, Onions.HOM)))
-          conjunctions += Div(aggCall, FieldIdent(None, id))
-          (Some(aggCall), false)          
-
-        case avg @ Avg(expr, _, _) if !unagg && columnSupports(VirtualColumn(expr), Onions.HOM) =>
-          val id = _generator.uniqueId()
-          projections += ExprProj(CountStar(), Some(id))
-          val aggCall = AggCall("hom_add", Seq(FieldIdent(None, "virtualColumn /*" + expr.sql + "*/")))
-          conjunctions += Div(aggCall, FieldIdent(None, id))
-          (Some(aggCall), false)          
-
-        case GroupConcat(f @ FieldIdent(_, _, sym, _), sep, _) =>
+        case gc @ GroupConcat(f, sep, _) =>
           // always support this regardless of unagg or not
-          (Some(GroupConcat(enc(f, Onions.DET), sep)), false) 
+          getSupportedExpr(f, Onions.DET).map(fi => (Some(GroupConcat(fi, sep)), false) ).getOrElse(cannotAnswer(gc))
 
-        case f: FieldIdent =>
-          (Some(enc(f, Onions.DET)), false)
-                   
         case e: SqlExpr =>
-          // by default assume cannot answer
-          cannotAnswer(e)
+          getSupportedExpr(e, Onions.DET).map(fi => (Some(fi), false)).getOrElse(cannotAnswer(e))
         
         case e => throw new Exception("should only have exprs under where clause")
       }.asInstanceOf[SqlExpr]
@@ -234,10 +240,15 @@ trait Generator extends Traversals with Transformers {
     cur = {
       val newOrderBy = cur.orderBy.flatMap(o => {
         if (newLocalFilters.isEmpty &&
-            newLocalGroupBy.isEmpty &&
-            o.keys.filter(k => !columnSupports(k._1.symbol, Onions.OPE)).isEmpty) {
-          // can support server side order by
-          Some(SqlOrderBy(o.keys.map(k => (enc(k._1, Onions.OPE), k._2))))
+            newLocalGroupBy.isEmpty) {
+
+          val mapped = o.keys.map(f => (getSupportedExpr(f._1, Onions.OPE), f._2))
+          if (mapped.map(_._1).flatten.size == mapped.size) {
+            // can support server side order by
+            Some(SqlOrderBy(mapped.map(f => (f._1.get, f._2))))
+          } else {
+            None
+          }
         } else {
           newLocalOrderBy = Some(o.keys)
           None
@@ -300,59 +311,54 @@ trait Generator extends Traversals with Transformers {
     }
 
     def traverseContext(start: Node, ctx: Context, onionSet: OnionSet) = {
-      def add1(sym: Column, o: Int) =
-        findOrigColumn(sym).foreach(x => {
-          onionSet.opts.put(x, onionSet.opts.getOrElse(x, 0) | o)})
+      def add1(sym: SqlExpr, o: Int) =
+        findOnionableExpr(sym).foreach { case (r, e) => onionSet.add(r, e, o) }
 
-      def add2(symL: Column, symR: Column, o: Int) = 
-        findOrigColumn(symL).flatMap(l => findOrigColumn(symR).map(r => (l, r))).foreach {
-          case (l, r) =>
-            onionSet.opts.put(l, onionSet.opts.getOrElse(l, 0) | o)
-            onionSet.opts.put(r, onionSet.opts.getOrElse(r, 0) | o)
+      def add2(symL: SqlExpr, symR: SqlExpr, o: Int) = 
+        CollectionUtils.opt2(
+          findOnionableExpr(symL),
+          findOnionableExpr(symR))
+        .foreach {
+          case ((l0, l1), (r0, r1)) =>
+            onionSet.add(l0, l1, o)
+            onionSet.add(r0, r1, o)
         }
 
       topDownTraverseContext(start, ctx)(wrapReturnTrue {
         case ieq: InequalityLike =>
           (ieq.lhs, ieq.rhs) match {
-            case (FieldIdent(_, _, symL, _), FieldIdent(_, _, symR, _)) =>
-              add2(symL, symR, Onions.OPE)
-            case (FieldIdent(_, _, symL, _), rhs) if rhs.isLiteral =>
-              add1(symL, Onions.OPE)
-            case (lhs, FieldIdent(_, _, symR, _)) if lhs.isLiteral =>
-              add1(symR, Onions.OPE)
-            case _ =>
+            case (lhs, rhs) if rhs.isLiteral =>
+              add1(lhs, Onions.OPE)
+            case (lhs, rhs) if lhs.isLiteral =>
+              add1(rhs, Onions.OPE)
+            case (lhs, rhs) =>
+              add2(lhs, rhs, Onions.OPE)
           }
 
-        case Like(FieldIdent(_, _, symL, _), FieldIdent(_, _, symR, _), _, _) =>
-          add2(symL, symR, Onions.SWP)
-        case Like(FieldIdent(_, _, symL, _), rhs, _, _) if rhs.isLiteral =>
-          add1(symL, Onions.SWP)
-        case Like(lhs, FieldIdent(_, _, symR, _), _, _) if lhs.isLiteral =>
-          add1(symR, Onions.SWP)
+        case Like(lhs, rhs, _, _) if rhs.isLiteral =>
+          add1(lhs, Onions.SWP)
+        case Like(lhs, rhs, _, _) if lhs.isLiteral =>
+          add1(rhs, Onions.SWP)
+        case Like(lhs, rhs, _, _) =>
+          add2(lhs, rhs, Onions.SWP)
 
-        case Min(FieldIdent(_, _, sym, _), _) =>
-          add1(sym, Onions.OPE)
-        case Max(FieldIdent(_, _, sym, _), _) =>
-          add1(sym, Onions.OPE)
+        case Min(expr, _) =>
+          add1(expr, Onions.OPE)
+        case Max(expr, _) =>
+          add1(expr, Onions.OPE)
 
-        case Sum(FieldIdent(_, _, sym, _), _, _) =>
-          add1(sym, Onions.HOM)
-        case Sum(expr, _, _) if !expr.isLiteral =>
-          expr.getPrecomputableRelation.foreach(x => add1(VirtualColumn(expr), Onions.HOM))
+        case Sum(expr, _, _) =>
+          add1(expr, Onions.HOM)
 
-        case Avg(FieldIdent(_, _, sym, _), _, _) =>
-          add1(sym, Onions.HOM)
-        case Avg(expr, _, _) if !expr.isLiteral =>
-          expr.getPrecomputableRelation.foreach(x => add1(VirtualColumn(expr), Onions.HOM))
+        case Avg(expr, _, _) =>
+          add1(expr, Onions.HOM)
 
         case SqlOrderBy(keys, _) =>
-          keys.foreach(k => add1(k._1.symbol, Onions.OPE))
-
-        // TODO: consider pre-computation for any general expression which
-        // can be computed by only looking at a row within a single table 
-        // (no cross table pre-computation)
-
-        case _ =>
+          CollectionUtils.optSeq(keys.map(k => findOnionableExpr(k._1))).foreach { _ => 
+            keys.foreach(k => add1(k._1, Onions.OPE))
+          }
+        case e: SqlExpr =>
+          add1(e, Onions.DET)
           
       })
     }

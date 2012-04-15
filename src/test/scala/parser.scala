@@ -1,11 +1,7 @@
 import org.specs2.mutable._
 
-class SQLParserSpec extends Specification {
-
-  "SQLParser" should {
-    "parse query1" in {
-      val parser = new SQLParser
-      val r = parser.parse("""
+object Queries {
+  val q1 = """
 select
   l_returnflag,
   l_linestatus,
@@ -26,8 +22,17 @@ group by
   l_linestatus
 order by
   l_returnflag,
-  l_linestatus;""")
+  l_linestatus;"""
 
+
+}
+
+class SQLParserSpec extends Specification {
+
+  "SQLParser" should {
+    "parse query1" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q1)
       r should beSome
     }
 

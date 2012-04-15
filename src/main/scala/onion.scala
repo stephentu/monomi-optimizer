@@ -12,12 +12,6 @@ object Onions {
     case HOM => "HOM"
     case SWP => "SWP"
   }
-
-  sealed abstract trait OnionSetType
-  case object Projection extends OnionSetType
-  case object Filter extends OnionSetType 
-  case object GroupBy extends OnionSetType
-  case object OrderBy extends OnionSetType
 }
 
 object OnionSet {
@@ -29,14 +23,35 @@ object OnionSet {
 }
 
 class OnionSet {
-  val opts = new HashMap[(String, Column), Int] // int is Onions bitmask
+  private val _gen = new NameGenerator("_virtual")
+
+  // string is enc name, int is Onions bitmask
+  val opts = new HashMap[(String, SqlExpr), (String, Int)] 
+
+  def add(relation: String, expr: SqlExpr, o: Int): Unit = {
+    val relation0 = expr.ctx.relations(relation)
+    assert(relation0.isInstanceOf[TableRelation])
+
+    val key = ((relation0.asInstanceOf[TableRelation].name, expr))
+    opts.get(key) match {
+      case Some((v1, v2)) => 
+        opts.put(key, (v1, v2 | o))
+      case None =>
+        opts.put(key, (expr match {
+          // TODO: not general enough
+          case FieldIdent(qual, name, _, _) => name
+          case _ => _gen.uniqueId()
+          }, o))
+    }
+  }
+
   def merge(that: OnionSet): OnionSet = {
     val merged = new OnionSet
     merged.opts ++= opts
     that.opts.foreach {
-      case (k, v) =>
+      case (k, v @ (v1, v2)) =>
         merged.opts.get(k) match {
-          case Some(v0) => merged.opts.put(k, v | v0)
+          case Some((ov1, ov2)) => merged.opts.put(k, (ov1, ov2 | v2))
           case None => merged.opts.put(k, v)
         }
     }

@@ -1,11 +1,10 @@
-trait Node {
+trait Node extends PrettyPrinters {
   val ctx: Context
 
   def copyWithContext(ctx: Context): Node
-  def sql: String
 
-  // TODO: escape
-  protected def _q(s: String): String = "\"" + s + "\""
+  // emit sql repr of node
+  def sql: String
 }
 
 case class SelectStmt(projections: Seq[SqlProj], 
@@ -36,26 +35,33 @@ case class StarProj(ctx: Context = null) extends SqlProj {
 }
 
 trait SqlExpr extends Node {
+  def getType: DataType = UnknownType
   def isLiteral: Boolean = false
+
+  // relation name applies to this node's ctx
   def getPrecomputableRelation: Option[String] = {
-    if (!canGatherFields) None
+    if (!canGatherFields) return None
     val f = gatherFields
+    if (f.isEmpty) return None
 
-    // TODO: this currently assume columns which reference expr columns are not
-    // precomputable
-    if (!f.filter(_._1.isInstanceOf[ExprColumn]).isEmpty) None
+    // check agg contexts all consistent:
+    if (f.map(_._2).toSet.size > 1) return None
 
-    def extractRelation(c: Column): String = c match {
-      case TableColumn(_, _, relation) => relation
-      case AliasedColumn(_, orig) => extractRelation(orig)
+    // make sure all relations are consistent
+    val rlxns = f.map(_._1.symbol.relation).toSet
+    if (rlxns.size > 1) return None
+
+    // now check if the relation is not a subquery
+    ctx.relations(rlxns.head) match {
+      case _: TableRelation => Some(rlxns.head)
+      case _ => None
     }
-
-    val rxs = f.map(x => extractRelation(x._1)).toSet
-    if (rxs.size == 1) Some(rxs.head) else None
   }
+
   def canGatherFields: Boolean
+
   // (col, true if aggregate context false otherwise)
-  def gatherFields: Seq[(Column, Boolean)]
+  def gatherFields: Seq[(FieldIdent, Boolean)]
 }
 
 trait Binop extends SqlExpr {
@@ -178,10 +184,10 @@ case class Exists(select: SelectStmt, ctx: Context = null) extends SqlExpr {
   def sql = Seq("exists", "(", select.sql, ")") mkString " "
 }
 
-case class FieldIdent(qualifier: Option[String], name: String, symbol: Column = null, ctx: Context = null) extends SqlExpr {
+case class FieldIdent(qualifier: Option[String], name: String, symbol: Symbol = null, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def canGatherFields = true
-  def gatherFields = Seq((symbol, false))
+  def gatherFields = Seq((this, false))
   def sql = Seq(qualifier, Some(name)).flatten.mkString(".")
 }
 case class Subselect(subquery: SelectStmt, ctx: Context = null) extends SqlExpr {

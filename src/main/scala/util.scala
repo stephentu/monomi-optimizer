@@ -38,4 +38,20 @@ object CollectionUtils {
   }
   def powerSetMinusEmpty[T](s: Seq[T]): Seq[Seq[T]] = 
     powerSet(s).filterNot(_.isEmpty)
+
+  def opt2[T](t0: Option[T], t1: Option[T]): Option[(T, T)] = {
+    if (t0.isDefined) {
+      t1.map(x => (t0.get, x)) 
+    } else None
+  }
+
+  def optSeq[T](s: Seq[Option[T]]): Option[Seq[T]] = {
+    val s0 = s.flatten
+    if (s0.size == s.size) Some(s0) else None
+  }
+}
+
+trait PrettyPrinters {
+  // TODO: escape
+  protected def _q(s: String): String = "\"" + s + "\""
 }
