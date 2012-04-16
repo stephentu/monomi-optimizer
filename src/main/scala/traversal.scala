@@ -48,7 +48,7 @@ trait Traversals {
       case UnaryMinus(e, _) => recur(e)
       case SubqueryRelationAST(s, _, _) => recur(s)
       case JoinRelation(l, r, _, c, _) => recur(l); recur(r); recur(c)
-      case SqlGroupBy(_, h, _) => h.map(recur)
+      case SqlGroupBy(k, h, _) => k.map(recur); h.map(recur)
       case SqlOrderBy(k, _) => k.map(x => recur(x._1))
       case _ => 
     }

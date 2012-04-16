@@ -185,7 +185,7 @@ case class Exists(select: SelectStmt, ctx: Context = null) extends SqlExpr {
 }
 
 case class FieldIdent(qualifier: Option[String], name: String, symbol: Symbol = null, ctx: Context = null) extends SqlExpr {
-  def copyWithContext(c: Context) = copy(ctx = c)
+  def copyWithContext(c: Context) = copy(symbol = null, ctx = c)
   def canGatherFields = true
   def gatherFields = Seq((this, false))
   def sql = Seq(qualifier, Some(name)).flatten.mkString(".")
@@ -368,11 +368,11 @@ sealed abstract trait OrderType
 case object ASC extends OrderType
 case object DESC extends OrderType
 
-case class SqlGroupBy(keys: Seq[String], having: Option[SqlExpr], ctx: Context = null) extends Node {
+case class SqlGroupBy(keys: Seq[SqlExpr], having: Option[SqlExpr], ctx: Context = null) extends Node {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq(Some("group by"), Some(keys mkString ", "), having.map(e => "having " + e.sql)).flatten.mkString(" ")
+  def sql = Seq(Some("group by"), Some(keys.map(_.sql).mkString(", ")), having.map(e => "having " + e.sql)).flatten.mkString(" ")
 }
-case class SqlOrderBy(keys: Seq[(FieldIdent, OrderType)], ctx: Context = null) extends Node {
+case class SqlOrderBy(keys: Seq[(SqlExpr, OrderType)], ctx: Context = null) extends Node {
   def copyWithContext(c: Context) = copy(ctx = c)
   def sql = Seq("order by", keys map (x => x._1.sql + " " + x._2.toString) mkString ", ") mkString " "
 }

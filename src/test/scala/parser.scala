@@ -24,21 +24,7 @@ order by
   l_returnflag,
   l_linestatus;"""
 
-
-}
-
-class SQLParserSpec extends Specification {
-
-  "SQLParser" should {
-    "parse query1" in {
-      val parser = new SQLParser
-      val r = parser.parse(Queries.q1)
-      r should beSome
-    }
-
-    "parse query2" in {
-      val parser = new SQLParser
-      val r = parser.parse("""
+  val q2 = """
 select
   s_acctbal,
   s_name,
@@ -83,7 +69,22 @@ order by
   s_name,
   p_partkey
 limit 100;
-""")    
+"""
+
+}
+
+class SQLParserSpec extends Specification {
+
+  "SQLParser" should {
+    "parse query1" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q1)
+      r should beSome
+    }
+
+    "parse query2" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q2)
       r should beSome
     }
 

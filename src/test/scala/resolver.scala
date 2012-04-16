@@ -11,5 +11,12 @@ class ResolverSpec extends Specification {
       val s0 = resolver.resolve(r.get, TestSchema.definition)
       s0.ctx.projections.size must_== 10
     }
+
+    "resolve query2" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q2)
+      val s0 = resolver.resolve(r.get, TestSchema.definition)
+      s0.ctx.projections.size must_== 8
+    }
   }
 }

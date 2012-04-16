@@ -26,13 +26,18 @@ class OnionSet {
   private val _gen = new NameGenerator("_virtual")
 
   // string is enc name, int is Onions bitmask
-  val opts = new HashMap[(String, SqlExpr), (String, Int)] 
+  private val opts = new HashMap[(String, Either[String, SqlExpr]), (String, Int)] 
+
+  private def mkKey(relation: String, expr: SqlExpr) = {
+    val TableRelation(name) = expr.ctx.relations(relation)
+    ((name, expr match {
+      case FieldIdent(_, n, _, _) => Left(n)
+      case _ => Right(expr.copyWithContext(null).asInstanceOf[SqlExpr]) 
+    }))
+  }
 
   def add(relation: String, expr: SqlExpr, o: Int): Unit = {
-    val relation0 = expr.ctx.relations(relation)
-    assert(relation0.isInstanceOf[TableRelation])
-
-    val key = ((relation0.asInstanceOf[TableRelation].name, expr))
+    val key = mkKey(relation, expr)
     opts.get(key) match {
       case Some((v1, v2)) => 
         opts.put(key, (v1, v2 | o))
@@ -43,6 +48,11 @@ class OnionSet {
           case _ => _gen.uniqueId()
           }, o))
     }
+  }
+
+  def lookup(relation: String, expr: SqlExpr): Option[(String, Int)] = {
+    val key = mkKey(relation, expr)
+    opts.get(key)
   }
 
   def merge(that: OnionSet): OnionSet = {
@@ -57,5 +67,26 @@ class OnionSet {
     }
     merged
   }
+
+  def complete(d: Definitions): OnionSet = {
+    val m = new OnionSet
+    m.opts ++= opts
+    d.defns.foreach {
+      case (relation, columns) =>
+        columns.foreach(tc => {
+          val key = (relation, Left(tc.name))
+          m.opts.get(key) match {
+            case Some((v1, v2)) =>
+              if ((v2 & Onions.DET) == 0 &&
+                  (v2 & Onions.OPE) == 0) {
+                m.opts.put(key, (v1, v2 | Onions.DET))
+              }
+            case None => m.opts.put(key, (tc.name, Onions.DET))
+          }
+        })
+    }
+    m
+  }
+
   override def toString = "OnionSet(" + opts.toString + ")"
 }

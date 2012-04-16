@@ -200,14 +200,14 @@ class SQLParser extends StandardTokenParsers {
   def filter: Parser[SqlExpr] = "where" ~> expr
 
   def groupBy: Parser[SqlGroupBy] = 
-    "group" ~> "by" ~> rep1sep(ident, ",") ~ opt("having" ~> expr) ^^ {
+    "group" ~> "by" ~> rep1sep(expr, ",") ~ opt("having" ~> expr) ^^ {
       case k ~ h => SqlGroupBy(k, h)
     }
 
   def orderBy: Parser[SqlOrderBy] = 
-    "order" ~> "by" ~> rep1sep( ident ~ opt("asc" | "desc") ^^ { 
-      case i ~ (Some("asc") | None) => (FieldIdent(None, i), ASC)
-      case i ~ Some("desc") => (FieldIdent(None, i), DESC)
+    "order" ~> "by" ~> rep1sep( expr ~ opt("asc" | "desc") ^^ { 
+      case i ~ (Some("asc") | None) => (i, ASC)
+      case i ~ Some("desc") => (i, DESC)
     }, ",") ^^ (SqlOrderBy(_))
 
   def limit: Parser[Int] = "limit" ~> numericLit ^^ (_.toInt)

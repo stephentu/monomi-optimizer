@@ -45,6 +45,10 @@ object CollectionUtils {
     } else None
   }
 
+  def optOr2[T](t0: Option[T], t1: Option[T]): Option[T] = {
+    if (t0.isDefined) t0 else t1
+  }
+
   def optSeq[T](s: Seq[Option[T]]): Option[Seq[T]] = {
     val s0 = s.flatten
     if (s0.size == s.size) Some(s0) else None

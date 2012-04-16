@@ -17,8 +17,7 @@ trait Generator extends Traversals with Transformers {
     }
   }
 
-  def generatePlanFromOnionSet(
-    stmt: SelectStmt, schema: Map[String, Relation], onionSet: OnionSet): PlanNode = {
+  def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode = {
 
     // order is
     // 1) where clause (filter)
@@ -30,15 +29,10 @@ trait Generator extends Traversals with Transformers {
 
     def getSupportedExpr(e: SqlExpr, o: Int): Option[FieldIdent] = {
       val e0 = findOnionableExpr(e)
+      println("e = " + e)
+      println("e0 = " + e0)
       e0.flatMap { x =>
-        val key = (
-          x._2.ctx.relations(x._1) match {
-            case TableRelation(x) => x
-            case _ => /* should not be here */
-              throw new Exception("failure")
-          },
-          x._2)
-        onionSet.opts.get(key).filter(y => (y._2 & o) != 0).map {
+        onionSet.lookup(x._1, x._2).filter(y => (y._2 & o) != 0).map {
           case (basename, _) =>
             FieldIdent(Some(x._1), basename + "_" + Onions.str(o)) 
         }
@@ -58,7 +52,7 @@ trait Generator extends Traversals with Transformers {
 
     val newLocalProjections = new ArrayBuffer[SqlExpr]
 
-    var newLocalOrderBy: Option[Seq[(FieldIdent, OrderType)]] = None
+    var newLocalOrderBy: Option[Seq[(SqlExpr, OrderType)]] = None
 
     var newLocalLimit: Option[Int] = None
 
@@ -159,7 +153,10 @@ trait Generator extends Traversals with Transformers {
           getSupportedExpr(f, Onions.DET).map(fi => (Some(GroupConcat(fi, sep)), false) ).getOrElse(cannotAnswer(gc))
 
         case e: SqlExpr =>
-          getSupportedExpr(e, Onions.DET).map(fi => (Some(fi), false)).getOrElse(cannotAnswer(e))
+          CollectionUtils.optOr2(
+            getSupportedExpr(e, Onions.DET),
+            getSupportedExpr(e, Onions.OPE))
+          .map(fi => (Some(fi), false)).getOrElse(cannotAnswer(e))
         
         case e => throw new Exception("should only have exprs under where clause")
       }.asInstanceOf[SqlExpr]
@@ -204,7 +201,13 @@ trait Generator extends Traversals with Transformers {
             (Seq.empty, Some(gb.copy(having = Some(stmt))))
         }.getOrElse((Seq.empty, Some(gb)))).getOrElse((Seq.empty, None))
 
-      val newGroupBy0 = newGroupBy.map(gb => gb.copy(keys = gb.keys.map(_ + "_DET")))
+      val newGroupBy0 = newGroupBy.map(gb => gb.copy(keys = {
+        gb.keys.map(k => 
+          CollectionUtils.optOr2(
+            getSupportedExpr(k, Onions.DET),
+            getSupportedExpr(k, Onions.OPE))
+          .getOrElse(throw new Exception("should not happen")))
+      }))
       cur.copy(projections = cur.projections ++ projsToAdd, groupBy = newGroupBy0) 
     }
 
@@ -247,6 +250,7 @@ trait Generator extends Traversals with Transformers {
             // can support server side order by
             Some(SqlOrderBy(mapped.map(f => (f._1.get, f._2))))
           } else {
+            newLocalOrderBy = Some(o.keys)
             None
           }
         } else {
@@ -291,17 +295,20 @@ trait Generator extends Traversals with Transformers {
     newLocalLimit.map(l => LocalLimit(l, stage4)).getOrElse(stage4)
   }
 
-  def generateCandidatePlans(stmt: SelectStmt, schema: Map[String, Relation]): Seq[PlanNode] = {
-    val o = generateOnionSets(stmt, schema)
+  def generateCandidatePlans(stmt: SelectStmt): Seq[PlanNode] = {
+    val o = generateOnionSets(stmt)
     val perms = CollectionUtils.powerSetMinusEmpty(o)
     // merge all perms, then unique
     val candidates = perms.map(p => OnionSet.merge(p)).toSet.toSeq
-    //println("size(candidates) = " + candidates.size)
+    println("size(candidates) = " + candidates.size)
     //println("candidates = " + candidates)
-    candidates.map(o => generatePlanFromOnionSet(stmt, schema, o)).toSet.toSeq
+    def fillOnionSet(o: OnionSet): OnionSet = {
+      o.complete(stmt.ctx.defns)
+    }
+    candidates.map(fillOnionSet).map(o => generatePlanFromOnionSet(stmt, o)).toSet.toSeq
   }
 
-  def generateOnionSets(stmt: SelectStmt, schema: Map[String, Relation]): Seq[OnionSet] = {
+  def generateOnionSets(stmt: SelectStmt): Seq[OnionSet] = {
 
     def topDownTraverseContext(start: Node, ctx: Context)(f: Node => Boolean) = {
       topDownTraversal(start) {
@@ -311,20 +318,25 @@ trait Generator extends Traversals with Transformers {
     }
 
     def traverseContext(start: Node, ctx: Context, onionSet: OnionSet) = {
-      def add1(sym: SqlExpr, o: Int) =
-        findOnionableExpr(sym).foreach { case (r, e) => onionSet.add(r, e, o) }
+      def add1(sym: SqlExpr, o: Int): Boolean =
+        findOnionableExpr(sym).map { 
+          case (r, e) => onionSet.add(r, e, o); true }.getOrElse(false)
 
-      def add2(symL: SqlExpr, symR: SqlExpr, o: Int) = 
+      def add2(symL: SqlExpr, symR: SqlExpr, o: Int): Boolean = 
         CollectionUtils.opt2(
           findOnionableExpr(symL),
           findOnionableExpr(symR))
-        .foreach {
+        .map {
           case ((l0, l1), (r0, r1)) =>
             onionSet.add(l0, l1, o)
             onionSet.add(r0, r1, o)
-        }
+            true
+        }.getOrElse(false)
 
-      topDownTraverseContext(start, ctx)(wrapReturnTrue {
+      def negate(f: Node => Boolean): Node => Boolean = 
+        (n: Node) => !f(n)
+
+      topDownTraverseContext(start, ctx)(negate {
         case ieq: InequalityLike =>
           (ieq.lhs, ieq.rhs) match {
             case (lhs, rhs) if rhs.isLiteral =>
@@ -354,12 +366,15 @@ trait Generator extends Traversals with Transformers {
           add1(expr, Onions.HOM)
 
         case SqlOrderBy(keys, _) =>
-          CollectionUtils.optSeq(keys.map(k => findOnionableExpr(k._1))).foreach { _ => 
+          CollectionUtils.optSeq(keys.map(k => findOnionableExpr(k._1))).map { _ => 
             keys.foreach(k => add1(k._1, Onions.OPE))
-          }
-        case e: SqlExpr =>
-          add1(e, Onions.DET)
-          
+            true
+          }.getOrElse(false)
+
+        //case e: SqlExpr =>
+        //  add1(e, Onions.DET)
+
+        case _ => false
       })
     }
 
