@@ -142,7 +142,7 @@ trait Generator extends Traversals with Transformers {
     var newLocalLimit: Option[Int] = None
 
     // these correspond 1 to 1 with the original projections
-    val projPosMaps = new ArrayBuffer[(Int, Int, Option[(ClientComputation, Map[SqlProj, Int])])]
+    val projPosMaps = new ArrayBuffer[Either[(Int, Int), (ClientComputation, Map[SqlProj, Int])]]
 
     // these correspond 1 to 1 with the new projections in the encrypted
     // re-written query
@@ -607,18 +607,14 @@ trait Generator extends Traversals with Transformers {
               ProjCtx(onion) 
             }
           rewriteExprForServer(e, ctx) match {
-            case (stmt, o, comps) =>
-              // stmt first
+            case (_, _, Some(comps)) =>
+              val m = processClientComputation(comps)
+              projPosMaps += Right((comps, m))
+
+            case (s, o, None) =>
               val stmtIdx = finalProjs.size
-              finalProjs += ((ExprProj(stmt, a), o))
-
-              // client comp
-              val c0 = comps.map { c => 
-                val m = processClientComputation(c)
-                (c, m)
-              }
-
-              projPosMaps += ((stmtIdx, o, c0))
+              finalProjs += ((ExprProj(s, a), o))
+              projPosMaps += Left((stmtIdx, o))
           }
         case StarProj(_) => throw new RuntimeException("TODO: implement me")
       }
@@ -682,11 +678,11 @@ trait Generator extends Traversals with Transformers {
     // 1) do all remaining decryptions to answer all the projections
     val m = (
       projPosMaps.flatMap { 
-        case (_, _, Some((_, m))) => Some(m.values)
+        case Right((_, m)) => Some(m.values)
         case _ => None
       }.foldLeft(Seq.empty : Seq[Int])(_++_) ++ {
         projPosMaps.flatMap {
-          case (p, o, None) if o != 0 =>
+          case Left((p, o)) if o != 0 =>
             Some(p)
           case _ => None
         }
@@ -697,10 +693,10 @@ trait Generator extends Traversals with Transformers {
 
     // 2) now do a final transformation
     val trfms = projPosMaps.map {
-      case (_, _, Some((comp, mapping))) =>
+      case Right((comp, mapping)) =>
         assert(comp.subqueries.isEmpty)
         Right(comp.mkSqlExpr(mapping))
-      case (p, _, None) => Left(p)
+      case Left((p, _)) => Left(p)
     }
 
     val s1 = LocalTransform(trfms, s0)
