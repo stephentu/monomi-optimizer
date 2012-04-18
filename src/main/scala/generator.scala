@@ -2,24 +2,36 @@ import scala.collection.mutable.ArrayBuffer
 
 trait Generator extends Traversals with Transformers {
 
-  private def findOnionableExpr(e: SqlExpr): Option[(String, SqlExpr)] = {
+  // the return value is:
+  // (relation name in e's ctx, global table name, expr out of the global table)
+  private def findOnionableExpr(e: SqlExpr): Option[(String, String, SqlExpr)] = {
     val r = e.getPrecomputableRelation
-    if (r.isDefined) Some((r.get, e)) 
-    else e match {
-      // TODO: this special case currently doesn't help you
-      case FieldIdent(_, _, Symbol(relation, name, ctx), _) =>
-        assert(ctx.relations(relation).isInstanceOf[SubqueryRelation])
-        ctx
-          .relations(relation)
-          .asInstanceOf[SubqueryRelation]
-          .stmt.ctx.lookupProjection(name).flatMap(findOnionableExpr)
-      case _ => None
+    if (r.isDefined) {
+      // canonicalize the expr
+      val e0 = topDownTransformation(e) {
+        case FieldIdent(_, name, _, _) => (Some(FieldIdent(None, name)), false)
+        case x => (Some(x.copyWithContext(null)), true)
+      }.asInstanceOf[SqlExpr]
+      Some((r.get._1, r.get._2, e0)) 
+    } else {
+      None
+      //e match {
+      //  // TODO: this special case currently doesn't help you
+      //  case FieldIdent(_, _, Symbol(relation, name, ctx), _) =>
+      //    assert(ctx.relations(relation).isInstanceOf[SubqueryRelation])
+      //    ctx
+      //      .relations(relation)
+      //      .asInstanceOf[SubqueryRelation]
+      //      .stmt.ctx.lookupProjection(name).flatMap(findOnionableExpr)
+      //  case _ => None
+      //}
     }
   }
 
+  def encTblName(t: String) = t + "_enc"
+
   def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode =
     generatePlanFromOnionSet0(stmt, onionSet, PreserveOriginal)
-
 
   abstract trait EncContext
   case object PreserveOriginal extends EncContext
@@ -58,10 +70,11 @@ trait Generator extends Traversals with Transformers {
       val e0 = findOnionableExpr(e)
       //println("e = " + e)
       //println("e0 = " + e0)
-      e0.flatMap { x =>
-        onionSet.lookup(x._1, x._2).filter(y => (y._2 & o) != 0).map {
+      e0.flatMap { case (r, t, x) =>
+        onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).map {
           case (basename, _) =>
-            FieldIdent(Some(x._1), basename + "_" + Onions.str(o)) 
+            val qual = if (r == t) encTblName(t) else r
+            FieldIdent(Some(qual), basename + "_" + Onions.str(o)) 
         }
       }
     }
@@ -379,6 +392,19 @@ trait Generator extends Traversals with Transformers {
               }.getOrElse(cannotAnswer(ieq))
           }
 
+        // TODO: handle subqueries
+        case like @ Like(lhs, rhs, n, _) =>
+          onionRetVal.set(mkOnionRetVal(0))
+          (lhs, rhs) match {
+            case (lhs, rhs) if rhs.isLiteral =>
+              getSupportedExpr(lhs, Onions.SWP).map(fi => (Some(FunctionCall("searchSWP", Seq(fi, NullLiteral(), NullLiteral()))), false)).getOrElse(cannotAnswer(like))
+            case (lhs, rhs) if lhs.isLiteral =>
+              getSupportedExpr(rhs, Onions.SWP).map(fi => (Some(FunctionCall("searchSWP", Seq(fi, NullLiteral(), NullLiteral()))), false)).getOrElse(cannotAnswer(like))
+            case (lhs, rhs) =>
+              // TODO: can we handle this?
+              cannotAnswer(like)
+          }
+
         case cs @ CountStar(_) if rewriteCtx.aggsValid => 
           onionRetVal.set(mkOnionRetVal(0))
           answerWithoutModification(cs)
@@ -658,7 +684,7 @@ trait Generator extends Traversals with Transformers {
       projPosMaps.flatMap { 
         case (_, _, Some((_, m))) => Some(m.values)
         case _ => None
-      }.reduceLeft(_++_) ++ {
+      }.foldLeft(Seq.empty : Seq[Int])(_++_) ++ {
         projPosMaps.flatMap {
           case (p, o, None) if o != 0 =>
             Some(p)
@@ -742,16 +768,19 @@ trait Generator extends Traversals with Transformers {
 
       def add1(sym: SqlExpr, o: Int): Boolean =
         findOnionableExpr(sym).map { 
-          case (r, e) => workingSet.foreach(_.add(r, e, o)); true }.getOrElse(false)
+          case (_, t, e) => 
+            workingSet.foreach(_.add(t, e, o))
+            true 
+        }.getOrElse(false)
 
       def add2(symL: SqlExpr, symR: SqlExpr, o: Int): Boolean = 
         CollectionUtils.opt2(
           findOnionableExpr(symL),
           findOnionableExpr(symR))
         .map {
-          case ((l0, l1), (r0, r1)) =>
-            workingSet.foreach(_.add(l0, l1, o))
-            workingSet.foreach(_.add(r0, r1, o))
+          case ((_, t0, e0), (_, t1, e1)) =>
+            workingSet.foreach(_.add(t0, e0, o))
+            workingSet.foreach(_.add(t1, e1, o))
             true
         }.getOrElse(false)
 
@@ -759,6 +788,14 @@ trait Generator extends Traversals with Transformers {
         (n: Node) => !f(n)
 
       topDownTraverseContext(start, ctx)(negate {
+
+        case eq: EqualityLike =>
+          (eq.lhs, eq.rhs) match {
+            case (lhs, rhs) if !lhs.isLiteral && !rhs.isLiteral =>
+              add2(lhs, rhs, Onions.DET)
+            case _ => false
+          }
+
         case ieq: InequalityLike =>
           (ieq.lhs, ieq.rhs) match {
             case (lhs, rhs) if rhs.isLiteral =>

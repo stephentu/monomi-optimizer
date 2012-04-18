@@ -38,8 +38,9 @@ trait SqlExpr extends Node {
   def getType: DataType = UnknownType
   def isLiteral: Boolean = false
 
-  // relation name applies to this node's ctx
-  def getPrecomputableRelation: Option[String] = {
+  // return value is:
+  // ( (table) relation name for this node's ctx, global table name )
+  def getPrecomputableRelation: Option[(String, String)] = {
     if (!canGatherFields) return None
     val f = gatherFields
     if (f.isEmpty) return None
@@ -47,14 +48,31 @@ trait SqlExpr extends Node {
     // check agg contexts all consistent:
     if (f.map(_._2).toSet.size > 1) return None
 
-    // make sure all relations are consistent
-    val rlxns = f.map(_._1.symbol.relation).toSet
-    if (rlxns.size > 1) return None
+    // for precomputation, we require:
+    // 1) all field ctxs are the same
+    // 2) all field relations are the same
+
+    // if fctx != ctx, then fctx *must* be a parent of ctx
+    val fctx = {
+      val s = f.map(_._1.symbol.ctx).toSet
+      if (s.size > 1) None else Some(s.head)
+    }
+
+    val rlxns = {
+      val s = f.map(_._1.symbol.relation).toSet
+      if (s.size > 1) None else Some(s.head)
+    }
 
     // now check if the relation is not a subquery
-    ctx.relations(rlxns.head) match {
-      case _: TableRelation => Some(rlxns.head)
-      case _ => None
+    fctx.flatMap { f => rlxns.map(r => (f, r)) } flatMap { 
+      case (c, r) => 
+        if (!c.relations.contains(r)) {
+          println("bad expr = " + this)
+        }
+        c.relations(r) match {
+          case TableRelation(n) => Some((r, n))
+          case _ => None
+        }
     }
   }
 

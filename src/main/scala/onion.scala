@@ -30,13 +30,13 @@ class OnionSet {
   private val opts = new HashMap[(String, Either[String, SqlExpr]), (String, Int)] 
 
   private def mkKey(relation: String, expr: SqlExpr) = {
-    val TableRelation(name) = expr.ctx.relations(relation)
-    ((name, expr match {
+    ((relation, expr match {
       case FieldIdent(_, n, _, _) => Left(n)
       case _ => Right(expr.copyWithContext(null).asInstanceOf[SqlExpr]) 
     }))
   }
 
+  // relation is global table name
   def add(relation: String, expr: SqlExpr, o: Int): Unit = {
     val key = mkKey(relation, expr)
     opts.get(key) match {
@@ -44,16 +44,15 @@ class OnionSet {
         opts.put(key, (v1, v2 | o))
       case None =>
         opts.put(key, (expr match {
-          // TODO: not general enough
-          case FieldIdent(qual, name, _, _) => name
+          case FieldIdent(_, name, _, _) => name
           case _ => _gen.uniqueId()
           }, o))
     }
   }
 
+  // relation is global table name
   def lookup(relation: String, expr: SqlExpr): Option[(String, Int)] = {
-    val key = mkKey(relation, expr)
-    opts.get(key)
+    opts.get(mkKey(relation, expr))
   }
 
   def merge(that: OnionSet): OnionSet = {
