@@ -97,7 +97,7 @@ trait Generator extends Traversals with Transformers {
           this.subqueries ++ that.subqueries)
       }
 
-      def mkSqlExprForFilterNode(mappings: Map[SqlProj, Int]): SqlExpr = {
+      def mkSqlExpr(mappings: Map[SqlProj, Int]): SqlExpr = {
         val pmap = projections.toMap
         val smap = subqueries.zipWithIndex.map { case ((s, p), i) => (s, (p, i)) }.toMap
         topDownTransformation(conjunction) {
@@ -128,7 +128,7 @@ trait Generator extends Traversals with Transformers {
 
     var newLocalLimit: Option[Int] = None
 
-    val projPosMaps = new ArrayBuffer[(Int, Option[(ClientComputation, Map[SqlProj, Int])])]
+    val projPosMaps = new ArrayBuffer[(Int, Int, Option[(ClientComputation, Map[SqlProj, Int])])]
 
     def answerWithoutModification(n: Node) = (Some(n.copyWithContext(null)), false)
 
@@ -482,9 +482,9 @@ trait Generator extends Traversals with Transformers {
           .getOrElse(throw new RuntimeException("TODO: currently cannot support non-field keys")))
           .map {
             case Left(fi) => 
-              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.DET)), Seq.empty)
-            case Right(fi) =>
               ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.OPE)), Seq.empty)
+            case Right(fi) =>
+              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.DET)), Seq.empty)
           }
         }
         None
@@ -540,10 +540,24 @@ trait Generator extends Traversals with Transformers {
         localGroupByPosMaps += processClientComputation(c)
       }
 
+      newLocalOrderBy.foreach { c =>
+        localOrderByPosMaps += processClientComputation(c)
+      }
+
       cur.projections.foreach {
         case ExprProj(e, a, _) =>
-          rewriteExprForServer(e, cur.groupBy.isDefined && !newLocalFilters.isEmpty) match {
-            case (stmt, comps) =>
+          val onion = encContext match {
+            case SingleEncProj(o) => o
+            case _ => Onions.ALL
+          }
+          val ctx = 
+            if (cur.groupBy.isDefined && !newLocalFilters.isEmpty) {
+              ProjCtx(onion) 
+            } else {
+              ProjUnaggCtx(onion)
+            }
+          rewriteExprForServer(e, ctx) match {
+            case (stmt, o, comps) =>
               // stmt first
               val stmtIdx = finalProjs.size
               finalProjs += ExprProj(stmt, a)
@@ -554,7 +568,7 @@ trait Generator extends Traversals with Transformers {
                 (c, m)
               }
 
-              projPosMaps += ((stmtIdx, c0))
+              projPosMaps += ((stmtIdx, o, c0))
           }
         case StarProj(_) => throw new RuntimeException("TODO: implement me")
       }
@@ -562,32 +576,81 @@ trait Generator extends Traversals with Transformers {
       cur.copy(projections = finalProjs.toSeq)
     }
 
+    def wrapDecryptionNode(p: PlanNode, m: Seq[Int]) = {
+      val td = p.tupleDesc
+      val s = m.values.flatMap { pos =>
+        if (td(pos).isDefined) Some(pos) else None
+      }
+      LocalDecrypt(s, p) 
+    }
 
+    def wrapDecryptionNode(p: PlanNode, m: Map[SqlProj, Int]) = 
+      wrapDecryptionNode(p, m.values)
+
+    val tdesc = 
+      projPosMaps.map(p => if (p._2 == 0) None else Some(p._2))
     val stage1 =  
-      newLocalFilters.zip(localFilterPosMaps).foldLeft( RemoteSql(cur) : PlanNode ) {
+      newLocalFilters.zip(localFilterPosMaps).foldLeft( RemoteSql(cur, tdesc) : PlanNode ) {
         case (acc, (comp, mapping)) => 
-          LocalFilter(comp.mkSqlExprForFilterNode(mapping),
-                      acc, 
+          LocalFilter(comp.mkSqlExpr(mapping),
+                      wrapDecryptionNode(acc, mapping), 
                       comp.subqueries.map(_._2))
       }
 
     val stage2 = 
       newLocalGroupBy.zip(localGroupByPosMaps).foldLeft( stage1 : PlanNode ) {
         case (acc, (comp, mapping)) => 
-          LocalGroupFilter(comp.mkSqlExprForFilterNode(mapping),
-                           acc, 
+          LocalGroupFilter(comp.mkSqlExpr(mapping),
+                           wrapDecryptionNode(acc, mapping), 
                            comp.subqueries.map(_._2))
       }
 
-    val stage3 = 
-      newLocalProjections.foldLeft( stage2 ) {
-        case (acc, expr) => LocalTransform(expr, acc)
+    val stage3 = {
+      // TODO: an optimization- if all columns are OPE, then don't need to decrypt
+
+      // TODO: this is an oversimplification
+      if (!newLocalOrderBy.isEmpty) {
+        assert(newLocalOrderBy.size == stmt.orderBy.get.keys.size)
+        val pos = newLocalOrderBy.zip(localOrderByPosMaps).map {
+          case (comp, mapping) =>
+            assert(mapping.size == 1) // TODO: assume for now
+            assert(comp.projections.size == 1)
+            mapping.values.head
+        }
+        LocalOrderBy(
+          pos.zip(stmt.orderBy.get.keys).map { case (p, (_, t)) => (p, t) },
+          LocalDecrypt(pos, stage2))
+      } else {
+        stage2
       }
+    }
 
     val stage4 = 
-      newLocalOrderBy.map(k => LocalOrderBy(k, stage3)).getOrElse(stage3)
+      newLocalLimit.map(l => LocalLimit(l, stage3)).getOrElse(stage3)
 
-    newLocalLimit.map(l => LocalLimit(l, stage4)).getOrElse(stage4)
+    // final stage
+    // 1) do all remaining decryptions to answer all the projections
+    val m = 
+      projPosMaps.flatMap { 
+        case (_, _, Some((_, m))) => Some(m.values)
+        case _ => None
+      }.reduceLeft(_++_) ++ {
+        projPosMaps.flatMap {
+          case (p, o, None) if o != 0 =>
+            Some(p)
+          case _ => None
+        }
+      }
+
+    val s0 = if (m.isEmpty) stage4 else wrapDecryptionNode(stage4, m)
+
+    // 2) now do a final transformation
+    LocalTransform(projPosMaps.map {
+      case (_, _, Some((comp, mapping))) =>
+        assert(comp.subqueries.isEmpty)
+        Right(comp.mkSqlExpr(mapping))
+      case (p, _, None) => Left(p)
+    }, s0)
   }
 
   def generateCandidatePlans(stmt: SelectStmt): Seq[PlanNode] = {

@@ -5,6 +5,7 @@ object Onions {
   final val OPE = 0x1 << 1
   final val HOM = 0x1 << 2
   final val SWP = 0x1 << 3
+  final val ALL = 0x7FFFFFFF
 
   def str(o: Int): String = o match {
     case DET => "DET"
