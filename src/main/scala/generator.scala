@@ -2,6 +2,27 @@ import scala.collection.mutable.ArrayBuffer
 
 trait Generator extends Traversals with Transformers {
 
+  private def topDownTraverseContext(start: Node, ctx: Context)(f: Node => Boolean) = {
+    topDownTraversal(start) {
+      case e if e.ctx == ctx => f(e)
+      case _ => false
+    }
+  }
+
+  private def isSingleAggGroupStmt(stmt: SelectStmt): Boolean = {
+    if (stmt.groupBy.isDefined) return false
+    var found = false
+    stmt.projections.foreach { p =>
+      topDownTraverseContext(p, stmt.ctx) {
+        case _: SqlAgg => 
+          found = true
+          false
+        case _ => !found
+      }
+    }
+    found
+  }
+
   // the return value is:
   // (relation name in e's ctx, global table name, expr out of the global table)
   private def findOnionableExpr(e: SqlExpr): Option[(String, String, SqlExpr)] = {
@@ -54,7 +75,8 @@ trait Generator extends Traversals with Transformers {
     stmt: SelectStmt, onionSet: OnionSet, encContext: EncContext): PlanNode = {
 
     encContext match { 
-      case SingleEncProj(_) => assert(stmt.ctx.projections.size == 1) 
+      case SingleEncProj(_) => 
+        assert(stmt.ctx.projections.size == 1 && isSingleAggGroupStmt(stmt)) 
       case _ =>
     }
 
@@ -89,8 +111,9 @@ trait Generator extends Traversals with Transformers {
        /* additional encrypted projections needed for conjunction. the tuple is as follows:
         *   ( (original) expr from the client expr which will be replaced with proj,
         *     the actual projection to append to the *server side* query,
-        *     the encryption onion which is being projected from the server side query ) */
-       projections: Seq[(SqlExpr, SqlProj, Int)], 
+        *     the encryption onion which is being projected from the server side query,
+        *     whether or not the proj is in vector ctx ) */
+       projections: Seq[(SqlExpr, SqlProj, Int, Boolean)], 
 
        /* additional subqueries needed for conjunction. the tuple is as follows:
         *   ( (original) subselect form conjunction which will be replaced with PlanNode,
@@ -146,7 +169,7 @@ trait Generator extends Traversals with Transformers {
 
     // these correspond 1 to 1 with the new projections in the encrypted
     // re-written query
-    val finalProjs = new ArrayBuffer[(SqlProj, Int)]
+    val finalProjs = new ArrayBuffer[(SqlProj, Int, Boolean)]
 
     def answerWithoutModification(n: Node) = (Some(n.copyWithContext(null)), false)
 
@@ -220,7 +243,7 @@ trait Generator extends Traversals with Transformers {
 
       val cannotAnswerExpr = (Some(IntLiteral(1)), false)
 
-      def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, Int)] = {
+      def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, Int, Boolean)] = {
         // filter out all fields
         assert(e.canGatherFields)
         val fields = e.gatherFields
@@ -235,10 +258,10 @@ trait Generator extends Traversals with Transformers {
         fields.map { 
           case (f, false) =>
             val (ft, o) = translateField(f)
-            (f, ExprProj(ft, Some(_generator.uniqueId())), o)
+            (f, ExprProj(ft, Some(_generator.uniqueId())), o, false)
           case (f, true) =>
             val (ft, o) = translateField(f)
-            (f, ExprProj(GroupConcat(ft, ","), Some(_generator.uniqueId())), o)
+            (f, ExprProj(GroupConcat(ft, ","), Some(_generator.uniqueId())), o, true)
         }
       }
 
@@ -303,6 +326,8 @@ trait Generator extends Traversals with Transformers {
               val p1 = 
                 e1.map(_ =>
                   generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.OPE)))
+
+              println("p1 = " + p1)
 
               p0 match {
                 case Some(RemoteSql(q0, _)) =>
@@ -431,8 +456,8 @@ trait Generator extends Traversals with Transformers {
             val expr1 = FieldIdent(None, id1)
 
             val projs = Seq(
-              (expr0, ExprProj(AggCall("hom_add", Seq(fi)), None), Onions.HOM), 
-              (expr1, ExprProj(CountStar(), None), 0))
+              (expr0, ExprProj(AggCall("hom_add", Seq(fi)), None), Onions.HOM, false), 
+              (expr1, ExprProj(CountStar(), None), 0, false))
 
             mergeConjunctions(
               ClientComputation(
@@ -442,10 +467,6 @@ trait Generator extends Traversals with Transformers {
             cannotAnswerExpr
           }).getOrElse(cannotAnswer(avg))
 
-//        case gc @ GroupConcat(f, sep, _) =>
-//          // always support this regardless of unagg or not
-//          getSupportedExpr(f, Onions.DET).map(fi => (Some(GroupConcat(fi, sep)), false) ).getOrElse(cannotAnswer(gc))
-//
         case e: SqlExpr =>
 
           def handleProj(onion: Int) = {
@@ -492,9 +513,9 @@ trait Generator extends Traversals with Transformers {
             comps.map { 
               case cc @ ClientComputation(_, p, _) =>
                 cc.copy(projections = p.map {
-                  case (expr, ExprProj(e, a, _), o) => 
+                  case (expr, ExprProj(e, a, _), o, _) => 
                     // TODO: this isn't quite right
-                    (expr, ExprProj(GroupConcat(e, ","), a), o)
+                    (expr, ExprProj(GroupConcat(e, ","), a), o, true)
                 })
             }
           } else {
@@ -535,9 +556,9 @@ trait Generator extends Traversals with Transformers {
             getSupportedExpr(f, Onions.DET))
           .getOrElse(throw new RuntimeException("TODO: currently cannot support non-field keys")) match {
             case Left(fi) => 
-              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.OPE)), Seq.empty)
+              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.OPE, false)), Seq.empty)
             case Right(fi) =>
-              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.DET)), Seq.empty)
+              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.DET, false)), Seq.empty)
           }
         }
         None
@@ -575,9 +596,9 @@ trait Generator extends Traversals with Transformers {
     // projections
     cur = {
       def processClientComputation(comp: ClientComputation): Map[SqlProj, Int] = {
-        comp.projections.map { case (_, p, o) =>
+        comp.projections.map { case (_, p, o, v) =>
           val i = finalProjs.size
-          finalProjs += ((p, o))
+          finalProjs += ((p, o, v))
           (p, i)
         }.toMap
       }
@@ -613,7 +634,7 @@ trait Generator extends Traversals with Transformers {
 
             case (s, o, None) =>
               val stmtIdx = finalProjs.size
-              finalProjs += ((ExprProj(s, a), o))
+              finalProjs += ((ExprProj(s, a), o, false))
               projPosMaps += Left((stmtIdx, o))
           }
         case StarProj(_) => throw new RuntimeException("TODO: implement me")
@@ -625,7 +646,7 @@ trait Generator extends Traversals with Transformers {
     def wrapDecryptionNodeSeq(p: PlanNode, m: Seq[Int]): PlanNode = {
       val td = p.tupleDesc
       val s = m.flatMap { pos =>
-        if (td(pos).isDefined) Some(pos) else None
+        if (td(pos)._1.isDefined) Some(pos) else None
       }.toSeq
       LocalDecrypt(s, p) 
     }
@@ -634,7 +655,7 @@ trait Generator extends Traversals with Transformers {
       wrapDecryptionNodeSeq(p, m.values.toSeq)
 
     val tdesc = 
-      finalProjs.map(p => if (p._2 == 0) None else Some(p._2))
+      finalProjs.map(p => if (p._2 == 0) ((None, p._3)) else ((Some(p._2), p._3)))
     val stage1 =  
       newLocalFilters.zip(localFilterPosMaps).foldLeft( RemoteSql(cur, tdesc) : PlanNode ) {
         case (acc, (comp, mapping)) => 
@@ -708,13 +729,16 @@ trait Generator extends Traversals with Transformers {
         assert(s1.tupleDesc.size == 1)
         // special case if stage4 is usuable
         val s4td = stage4.tupleDesc
-        if (s4td.size == 1 && s4td.head.map(_ == o).getOrElse(false)) {
+        if (s4td.size == 1 && 
+            !s4td.head._2 &&
+            s4td.head._1.map(_ == o).getOrElse(false)) {
           stage4
         } else {
+          // TODO: assert s1 doesn't leave in vector context
           s1.tupleDesc(0) match {
-            case Some(o0) if o0 == o => s1
+            case (Some(o0), _) if o0 == o => s1
 
-            case Some(o0) =>
+            case (Some(o0), _) =>
               // decrypt -> encrypt
               LocalEncrypt(
                 Seq((0, o)), 
@@ -722,7 +746,7 @@ trait Generator extends Traversals with Transformers {
                   Seq(0),
                   s1))
 
-            case None =>
+            case (None, _) =>
               // encrypt
               LocalEncrypt(
                 Seq((0, o)),
@@ -747,12 +771,6 @@ trait Generator extends Traversals with Transformers {
 
   def generateOnionSets(stmt: SelectStmt): Seq[OnionSet] = {
 
-    def topDownTraverseContext(start: Node, ctx: Context)(f: Node => Boolean) = {
-      topDownTraversal(start) {
-        case e if e.ctx == ctx => f(e)
-        case _ => false
-      }
-    }
 
     def traverseContext(
       start: Node, 

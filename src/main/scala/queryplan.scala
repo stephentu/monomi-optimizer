@@ -1,6 +1,8 @@
 trait PlanNode {
   // actual useful stuff
-  def tupleDesc: Seq[Option[Int]]
+
+  // ( enc info, true if in vector ctx, false otherwise )
+  def tupleDesc: Seq[(Option[Int], Boolean)]
 
   // printing stuff
   def pretty: String = pretty0(0)
@@ -12,7 +14,7 @@ trait PlanNode {
   def indent(lvl: Int) = " " * (lvl * 4)
   def endl: String = "\n"
 }
-case class RemoteSql(stmt: SelectStmt, projs: Seq[Option[Int]]) extends PlanNode {
+case class RemoteSql(stmt: SelectStmt, projs: Seq[(Option[Int], Boolean)]) extends PlanNode {
   def tupleDesc = projs
   def pretty0(lvl: Int) = "* RemoteSql(sql = " + stmt.sql + ", projs = " + projs + ")"
 }
@@ -29,7 +31,8 @@ case class LocalTransform(trfms: Seq[Either[Int, SqlExpr]], child: PlanNode) ext
     val td = child.tupleDesc
     trfms.map {
       case Left(pos) => td(pos)
-      case Right(_) => None
+      // TODO: allow for transforms to not remove vector context
+      case Right(_) => (None, false)
     }
   }
   def pretty0(lvl: Int) = 
@@ -62,10 +65,10 @@ case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
 case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
   def tupleDesc = {
     val td = child.tupleDesc
-    assert(positions.filter(p => !td(p).isDefined).isEmpty)
+    assert(positions.filter(p => !td(p)._1.isDefined).isEmpty)
     val p0 = positions.toSet
     td.zipWithIndex.map { 
-      case (Some(_), i) if p0.contains(i) => None
+      case ((Some(_), c), i) if p0.contains(i) => (None, c)
       case (e, _) => e
     }
   }
@@ -79,10 +82,10 @@ case class LocalEncrypt(
   child: PlanNode) extends PlanNode {
   def tupleDesc = {
     val td = child.tupleDesc
-    assert(positions.filter { case (p, _) => td(p).isDefined }.isEmpty)
+    assert(positions.filter { case (p, _) => td(p)._1.isDefined }.isEmpty)
     val p0 = positions.toMap
     td.zipWithIndex.map { 
-      case (None, i) if p0.contains(i) => Some(p0(i))
+      case ((None, c), i) if p0.contains(i) => (Some(p0(i)), c)
       case (e, _) => e
     }
   }

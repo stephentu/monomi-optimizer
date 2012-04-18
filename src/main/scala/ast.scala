@@ -212,7 +212,7 @@ case class Subselect(subquery: SelectStmt, ctx: Context = null) extends SqlExpr 
   def copyWithContext(c: Context) = copy(ctx = c)
   def canGatherFields = false
   def gatherFields = throw new RuntimeException("not possible")
-  def sql = "(" + subquery + ")"
+  def sql = "(" + subquery.sql + ")"
 }
 
 trait SqlAgg extends SqlExpr
