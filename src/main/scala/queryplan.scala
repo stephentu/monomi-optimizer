@@ -14,7 +14,7 @@ trait PlanNode {
 }
 case class RemoteSql(stmt: SelectStmt, projs: Seq[Option[Int]]) extends PlanNode {
   def tupleDesc = projs
-  def pretty0(lvl: Int) = "* RemoteSql(sql = " + stmt.sql + ")"
+  def pretty0(lvl: Int) = "* RemoteSql(sql = " + stmt.sql + ", projs = " + projs + ")"
 }
 case class LocalFilter(expr: SqlExpr, child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
   def tupleDesc = child.tupleDesc
@@ -51,7 +51,7 @@ case class LocalGroupFilter(filter: SqlExpr, child: PlanNode, subqueries: Seq[Pl
 case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extends PlanNode {
   def tupleDesc = child.tupleDesc 
   def pretty0(lvl: Int) = 
-    "* LocalOrderBy(keys = " + sortKeys.map(_._1.toString).mkString(", ") + ")" + childPretty(lvl, child)
+    "* LocalOrderBy(keys = " + sortKeys.map(_._1.toString).toSeq + ")" + childPretty(lvl, child)
 }
 case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
   def tupleDesc = child.tupleDesc

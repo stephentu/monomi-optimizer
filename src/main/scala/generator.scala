@@ -128,7 +128,12 @@ trait Generator extends Traversals with Transformers {
 
     var newLocalLimit: Option[Int] = None
 
+    // these correspond 1 to 1 with the original projections
     val projPosMaps = new ArrayBuffer[(Int, Int, Option[(ClientComputation, Map[SqlProj, Int])])]
+
+    // these correspond 1 to 1 with the new projections in the encrypted
+    // re-written query
+    val finalProjs = new ArrayBuffer[(SqlProj, Int)]
 
     def answerWithoutModification(n: Node) = (Some(n.copyWithContext(null)), false)
 
@@ -420,16 +425,21 @@ trait Generator extends Traversals with Transformers {
           def handleProj(onion: Int) = {
             val d = getSupportedExpr(e, Onions.DET)
             val o = getSupportedExpr(e, Onions.OPE)
-            assert(d.isDefined || o.isDefined)
             // try to honor the given onions first
             if ((onion & Onions.DET) != 0 && d.isDefined) {
+              onionRetVal.set(mkOnionRetVal(Onions.DET))
               (Some(d.get), false)
             } else if ((onion & Onions.OPE) != 0 && o.isDefined) {
+              onionRetVal.set(mkOnionRetVal(Onions.OPE))
               (Some(o.get), false)
             } else if (d.isDefined) {
+              onionRetVal.set(mkOnionRetVal(Onions.DET))
               (Some(d.get), false)
-            } else {
+            } else if (o.isDefined) {
+              onionRetVal.set(mkOnionRetVal(Onions.OPE))
               (Some(o.get), false)
+            } else {
+              cannotAnswer(e)
             }
           }
 
@@ -538,13 +548,10 @@ trait Generator extends Traversals with Transformers {
 
     // projections
     cur = {
-      val finalProjs = new ArrayBuffer[SqlProj]
-       
-      def processClientComputation(comp: ClientComputation): 
-        Map[SqlProj, Int] = {
-        comp.projections.map { case (_, p, _) =>
+      def processClientComputation(comp: ClientComputation): Map[SqlProj, Int] = {
+        comp.projections.map { case (_, p, o) =>
           val i = finalProjs.size
-          finalProjs += p
+          finalProjs += ((p, o))
           (p, i)
         }.toMap
       }
@@ -569,15 +576,15 @@ trait Generator extends Traversals with Transformers {
           }
           val ctx = 
             if (cur.groupBy.isDefined && !newLocalFilters.isEmpty) {
-              ProjCtx(onion) 
-            } else {
               ProjUnaggCtx(onion)
+            } else {
+              ProjCtx(onion) 
             }
           rewriteExprForServer(e, ctx) match {
             case (stmt, o, comps) =>
               // stmt first
               val stmtIdx = finalProjs.size
-              finalProjs += ExprProj(stmt, a)
+              finalProjs += ((ExprProj(stmt, a), o))
 
               // client comp
               val c0 = comps.map { c => 
@@ -590,14 +597,14 @@ trait Generator extends Traversals with Transformers {
         case StarProj(_) => throw new RuntimeException("TODO: implement me")
       }
 
-      cur.copy(projections = finalProjs.toSeq)
+      cur.copy(projections = finalProjs.map(_._1).toSeq)
     }
 
     def wrapDecryptionNodeSeq(p: PlanNode, m: Seq[Int]): PlanNode = {
       val td = p.tupleDesc
       val s = m.flatMap { pos =>
         if (td(pos).isDefined) Some(pos) else None
-      }
+      }.toSeq
       LocalDecrypt(s, p) 
     }
 
@@ -605,7 +612,7 @@ trait Generator extends Traversals with Transformers {
       wrapDecryptionNodeSeq(p, m.values.toSeq)
 
     val tdesc = 
-      projPosMaps.map(p => if (p._2 == 0) None else Some(p._2))
+      finalProjs.map(p => if (p._2 == 0) None else Some(p._2))
     val stage1 =  
       newLocalFilters.zip(localFilterPosMaps).foldLeft( RemoteSql(cur, tdesc) : PlanNode ) {
         case (acc, (comp, mapping)) => 
@@ -670,28 +677,35 @@ trait Generator extends Traversals with Transformers {
       case (p, _, None) => Left(p)
     }
 
+    val s1 = LocalTransform(trfms, s0)
+
     encContext match {
-      case PreserveOriginal =>
-        if (trfms.isEmpty) stage4 else LocalTransform(trfms, stage4)
-      case PreserveCardinality => stage4
+      case PreserveOriginal => s1
+      case PreserveCardinality => stage4 // don't care about projections
       case SingleEncProj(o) =>
-        assert(stage4.tupleDesc.size == 1)
-        stage4.tupleDesc(0) match {
-          case Some(o0) if o0 == o => stage4
+        assert(s1.tupleDesc.size == 1)
+        // special case if stage4 is usuable
+        val s4td = stage4.tupleDesc
+        if (s4td.size == 1 && s4td.head.map(_ == o).getOrElse(false)) {
+          stage4
+        } else {
+          s1.tupleDesc(0) match {
+            case Some(o0) if o0 == o => s1
 
-          case Some(o0) =>
-            // decrypt -> encrypt
-            LocalEncrypt(
-              Seq((0, o)), 
-              LocalDecrypt(
-                Seq(0),
-                stage4))
+            case Some(o0) =>
+              // decrypt -> encrypt
+              LocalEncrypt(
+                Seq((0, o)), 
+                LocalDecrypt(
+                  Seq(0),
+                  s1))
 
-          case None =>
-            // encrypt
-            LocalEncrypt(
-              Seq((0, o)),
-              stage4)
+            case None =>
+              // encrypt
+              LocalEncrypt(
+                Seq((0, o)),
+                s1)
+          }
         }
     }
   }
