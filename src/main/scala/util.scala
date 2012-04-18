@@ -50,8 +50,8 @@ object CollectionUtils {
   }
 
   def optOrEither2[T0, T1](t0: Option[T0], t1: Option[T1]): Option[Either[T0, T1]] = {
-    if (t0.isDefined) Some(Left(t0)) 
-    else if (t1.isDefined) Some(Right(t1))
+    if (t0.isDefined) Some(Left(t0.get)) 
+    else if (t1.isDefined) Some(Right(t1.get))
     else None
   }
 

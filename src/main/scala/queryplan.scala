@@ -18,30 +18,38 @@ case class RemoteSql(stmt: SelectStmt, projs: Seq[Option[Int]]) extends PlanNode
 }
 case class LocalFilter(expr: SqlExpr, child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
   def tupleDesc = child.tupleDesc
-  def pretty0(lvl: Int) = 
-    "* LocalFilter(filter = " + expr.sql + ")" 
-      + childPretty(lvl, child) 
-      + subqueries.map(c => childPretty(lvl, c)).mkString("")
+  def pretty0(lvl: Int) = { 
+    "* LocalFilter(filter = " + expr.sql + ")" + 
+      childPretty(lvl, child) + 
+      subqueries.map(c => childPretty(lvl, c)).mkString("")
+  }
 }
-case class LocalTransform(transformations: Seq[Either[Int, SqlExpr]], child: PlanNode) extends PlanNode {
+case class LocalTransform(trfms: Seq[Either[Int, SqlExpr]], child: PlanNode) extends PlanNode {
   def tupleDesc = {
-    
-
+    val td = child.tupleDesc
+    trfms.map {
+      case Left(pos) => td(pos)
+      case Right(_) => None
+    }
   }
   def pretty0(lvl: Int) = 
-    "* LocalTransform(transformation = " + transformations + ")" + childPretty(lvl, child)
+    "* LocalTransform(transformation = " + trfms + ")" + childPretty(lvl, child)
 }
 case class LocalGroupBy(keys: Seq[SqlExpr], filter: Option[SqlExpr], child: PlanNode) extends PlanNode {
+  def tupleDesc = throw new RuntimeException("unimpl")
   def pretty0(lvl: Int) = 
     "* LocalGroupBy(keys = " + keys.map(_.sql).mkString(", ") + ", group_filter = " + filter.map(_.sql).getOrElse("none") + ")" + childPretty(lvl, child)
 }
 case class LocalGroupFilter(filter: SqlExpr, child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
-  def pretty0(lvl: Int) =
-    "* LocalGroupFilter(filter = " + filter.sql + ")" 
-      + childPretty(lvl, child)
-      + subqueries.map(c => childPretty(lvl, c)).mkString("")
+  def tupleDesc = child.tupleDesc 
+  def pretty0(lvl: Int) = {
+    "* LocalGroupFilter(filter = " + filter.sql + ")" + 
+      childPretty(lvl, child) + 
+      subqueries.map(c => childPretty(lvl, c)).mkString("")
+  }
 }
 case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extends PlanNode {
+  def tupleDesc = child.tupleDesc 
   def pretty0(lvl: Int) = 
     "* LocalOrderBy(keys = " + sortKeys.map(_._1.toString).mkString(", ") + ")" + childPretty(lvl, child)
 }
@@ -58,14 +66,26 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
     val p0 = positions.toSet
     td.zipWithIndex.map { 
       case (Some(_), i) if p0.contains(i) => None
-      case e => e
+      case (e, _) => e
     }
   }
   def pretty0(lvl: Int) = 
     "* LocalDecrypt(positions = " + positions + ")" + childPretty(lvl, child)
 }
 
-case class LocalEncrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
+case class LocalEncrypt(
+  /* (tuple pos to enc, onion to enc) */
+  positions: Seq[(Int, Int)], 
+  child: PlanNode) extends PlanNode {
+  def tupleDesc = {
+    val td = child.tupleDesc
+    assert(positions.filter { case (p, _) => td(p).isDefined }.isEmpty)
+    val p0 = positions.toMap
+    td.zipWithIndex.map { 
+      case (None, i) if p0.contains(i) => Some(p0(i))
+      case (e, _) => e
+    }
+  }
   def pretty0(lvl: Int) = 
     "* LocalEncrypt(positions = " + positions + ")" + childPretty(lvl, child)
 }

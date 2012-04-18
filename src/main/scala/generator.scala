@@ -18,7 +18,7 @@ trait Generator extends Traversals with Transformers {
   }
 
   def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode =
-    generatePlanFromOnionSet0(stmt, onionSet, true)
+    generatePlanFromOnionSet0(stmt, onionSet, PreserveOriginal)
 
 
   abstract trait EncContext
@@ -98,9 +98,9 @@ trait Generator extends Traversals with Transformers {
       }
 
       def mkSqlExpr(mappings: Map[SqlProj, Int]): SqlExpr = {
-        val pmap = projections.toMap
-        val smap = subqueries.zipWithIndex.map { case ((s, p), i) => (s, (p, i)) }.toMap
-        topDownTransformation(conjunction) {
+        val pmap = projections.map(x => (x._1, x._2)).toMap
+        val smap = subqueries.zipWithIndex.map { case ((s, p, _), i) => (s, (p, i)) }.toMap
+        topDownTransformation(expr) {
           case s: Subselect =>
             (Some(SubqueryPosition(smap(s)._2)), false)
 
@@ -137,9 +137,9 @@ trait Generator extends Traversals with Transformers {
     }
     case object FilterCtx extends RewriteContext
     case object GroupByKeyCtx extends RewriteContext
-    case object GroupByHavingCtx extends RewriteContext { def aggsValid = true }
+    case object GroupByHavingCtx extends RewriteContext { override def aggsValid = true }
     case object OrderByKeyCtx extends RewriteContext
-    case class ProjCtx(o: Int) extends RewriteContext { def aggsValid = true }
+    case class ProjCtx(o: Int) extends RewriteContext { override def aggsValid = true }
     case class ProjUnaggCtx(o: Int) extends RewriteContext
 
     // rewrite expr under rewriteCtx, breaking up the computation of expr into
@@ -210,8 +210,7 @@ trait Generator extends Traversals with Transformers {
           CollectionUtils.optOrEither2(
             getSupportedExpr(e, Onions.DET),
             getSupportedExpr(e, Onions.OPE))
-          .getOrElse(throw new Exception("should not happen"))
-          .map { 
+          .getOrElse(throw new Exception("should not happen")) match { 
             case Left(e) => (e, Onions.DET)
             case Right(e) => (e, Onions.OPE)
           }
@@ -251,10 +250,14 @@ trait Generator extends Traversals with Transformers {
                       generatePlanFromOnionSet0(q, onionSet, SingleEncProj(Onions.OPE)))
                 val sp0 = subPlans.map(x => if (x.isInstanceOf[RemoteSql]) Some(x) else None)
                 CollectionUtils.optOr2(sp0(0), sp0(1)).map {
-                  case RemoteSql(qp) =>
+                  case RemoteSql(qp, _) =>
                     (Some(eq.copyWithChildren(Subselect(qp), NullLiteral())), false)
                 }.getOrElse {
-                  mergeConjunctions(ClientComputation(eq, Seq.empty, Seq((ss, sp0(0)))))
+                  mergeConjunctions(
+                    ClientComputation(
+                      eq, 
+                      Seq.empty, 
+                      Seq((ss, generatePlanFromOnionSet0(q, onionSet, PreserveOriginal), PreserveOriginal))))
                   cannotAnswerExpr
                 }
               case _ => 
@@ -284,18 +287,18 @@ trait Generator extends Traversals with Transformers {
                   generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.OPE)))
 
               p0 match {
-                case Some(RemoteSql(q0)) =>
-                  (Some(eq.copyWithChildren(e0, Subselect(q0))), false)
+                case Some(RemoteSql(q0, _)) =>
+                  (Some(eq.copyWithChildren(e0.get, Subselect(q0))), false)
                 case _ =>
                   p1 match {
-                    case Some(RemoteSql(q1)) =>
-                      (Some(eq.copyWithChildren(e1, Subselect(q1))), false)
+                    case Some(RemoteSql(q1, _)) =>
+                      (Some(eq.copyWithChildren(e1.get, Subselect(q1))), false)
                     case _ =>
                       mergeConjunctions(
                         ClientComputation(
                           eq, 
                           mkProjections(expr),
-                          Seq((ss, p0.orElse(p1).getOrElse(generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.DET)))))))
+                          Seq((ss, generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveOriginal), PreserveOriginal))))
                       cannotAnswerExpr
                   }
               }
@@ -313,14 +316,20 @@ trait Generator extends Traversals with Transformers {
 
                 // try spDETs first, then spOPEs
                 (spDETs(0), spDETs(1)) match {
-                  case (RemoteSql(q0p), RemoteSql(q1p)) =>
+                  case (RemoteSql(q0p, _), RemoteSql(q1p, _)) =>
                     (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
                   case _ =>
                     (spOPEs(0), spOPEs(1)) match {
-                      case (RemoteSql(q0p), RemoteSql(q1p)) =>
+                      case (RemoteSql(q0p, _), RemoteSql(q1p, _)) =>
                         (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
                       case _ =>
-                        mergeConjunctions(ClientComputation(eq, mkProjections(lhs) ++ mkProjections(rhs), Seq((ss0, spDETs(0)), (ss1, spDETs(1)))))
+                        mergeConjunctions(
+                          ClientComputation(
+                            eq, 
+                            Seq.empty, 
+                            Seq(
+                              (ss0, generatePlanFromOnionSet0(q0, onionSet, PreserveOriginal), PreserveOriginal), 
+                              (ss1, generatePlanFromOnionSet0(q1, onionSet, PreserveOriginal), PreserveOriginal))))
                         cannotAnswerExpr
                     }
                 }
@@ -386,10 +395,17 @@ trait Generator extends Traversals with Transformers {
           getSupportedExpr(f, Onions.HOM).map(fi => {
             val id0 = _generator.uniqueId()
             val id1 = _generator.uniqueId()
-            val projs = Seq(AggCall("hom_add", Seq(fi)), ExprProj(CountStar(), Some(id1)))
+
+            val expr0 = FieldIdent(None, id0)
+            val expr1 = FieldIdent(None, id1)
+
+            val projs = Seq(
+              (expr0, ExprProj(AggCall("hom_add", Seq(fi)), None), Onions.HOM), 
+              (expr1, ExprProj(CountStar(), None), 0))
+
             mergeConjunctions(
               ClientComputation(
-                Div(FieldIdent(None, id0), FieldIdent(None, id1)),
+                Div(expr0, expr1),
                 projs,
                 Seq.empty))
             cannotAnswerExpr
@@ -401,14 +417,14 @@ trait Generator extends Traversals with Transformers {
 //
         case e: SqlExpr =>
 
-          def handleProj(o: Int) = {
+          def handleProj(onion: Int) = {
             val d = getSupportedExpr(e, Onions.DET)
             val o = getSupportedExpr(e, Onions.OPE)
             assert(d.isDefined || o.isDefined)
             // try to honor the given onions first
-            if ((o & Onions.DET) && d.isDefined) {
+            if ((onion & Onions.DET) != 0 && d.isDefined) {
               (Some(d.get), false)
-            } else if ((o & Onions.OPE) && o.isDefined) {
+            } else if ((onion & Onions.OPE) != 0 && o.isDefined) {
               (Some(o.get), false)
             } else if (d.isDefined) {
               (Some(d.get), false)
@@ -436,11 +452,13 @@ trait Generator extends Traversals with Transformers {
       case (stmt, _, comps) =>
         val comps0 = 
           if (cur.groupBy.isDefined) {
-            // need to group_concat the projections then
+            // need to group_concat the projections then, because we have a groupBy context
             comps.map { 
               case cc @ ClientComputation(_, p, _) =>
                 cc.copy(projections = p.map {
-                  case ExprProj(e, a, _) => ExprProj(GroupConcat(e, ","), a)
+                  case (expr, ExprProj(e, a, _), o) => 
+                    // TODO: this isn't quite right
+                    (expr, ExprProj(GroupConcat(e, ","), a), o)
                 })
             }
           } else {
@@ -475,12 +493,11 @@ trait Generator extends Traversals with Transformers {
     cur = {
       def handleUnsupported(o: SqlOrderBy) = {
         // TODO: general client side comp
-        newLocalOrderBy ++= o.keys.map { f => 
+        newLocalOrderBy ++= o.keys.map { case (f, _) => 
           CollectionUtils.optOrEither2(
             getSupportedExpr(f, Onions.OPE),
             getSupportedExpr(f, Onions.DET))
-          .getOrElse(throw new RuntimeException("TODO: currently cannot support non-field keys")))
-          .map {
+          .getOrElse(throw new RuntimeException("TODO: currently cannot support non-field keys")) match {
             case Left(fi) => 
               ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.OPE)), Seq.empty)
             case Right(fi) =>
@@ -525,7 +542,7 @@ trait Generator extends Traversals with Transformers {
        
       def processClientComputation(comp: ClientComputation): 
         Map[SqlProj, Int] = {
-        comp.projections.map { p =>
+        comp.projections.map { case (_, p, _) =>
           val i = finalProjs.size
           finalProjs += p
           (p, i)
@@ -576,16 +593,16 @@ trait Generator extends Traversals with Transformers {
       cur.copy(projections = finalProjs.toSeq)
     }
 
-    def wrapDecryptionNode(p: PlanNode, m: Seq[Int]) = {
+    def wrapDecryptionNodeSeq(p: PlanNode, m: Seq[Int]): PlanNode = {
       val td = p.tupleDesc
-      val s = m.values.flatMap { pos =>
+      val s = m.flatMap { pos =>
         if (td(pos).isDefined) Some(pos) else None
       }
       LocalDecrypt(s, p) 
     }
 
-    def wrapDecryptionNode(p: PlanNode, m: Map[SqlProj, Int]) = 
-      wrapDecryptionNode(p, m.values)
+    def wrapDecryptionNodeMap(p: PlanNode, m: Map[SqlProj, Int]): PlanNode = 
+      wrapDecryptionNodeSeq(p, m.values.toSeq)
 
     val tdesc = 
       projPosMaps.map(p => if (p._2 == 0) None else Some(p._2))
@@ -593,7 +610,7 @@ trait Generator extends Traversals with Transformers {
       newLocalFilters.zip(localFilterPosMaps).foldLeft( RemoteSql(cur, tdesc) : PlanNode ) {
         case (acc, (comp, mapping)) => 
           LocalFilter(comp.mkSqlExpr(mapping),
-                      wrapDecryptionNode(acc, mapping), 
+                      wrapDecryptionNodeMap(acc, mapping), 
                       comp.subqueries.map(_._2))
       }
 
@@ -601,7 +618,7 @@ trait Generator extends Traversals with Transformers {
       newLocalGroupBy.zip(localGroupByPosMaps).foldLeft( stage1 : PlanNode ) {
         case (acc, (comp, mapping)) => 
           LocalGroupFilter(comp.mkSqlExpr(mapping),
-                           wrapDecryptionNode(acc, mapping), 
+                           wrapDecryptionNodeMap(acc, mapping), 
                            comp.subqueries.map(_._2))
       }
 
@@ -630,7 +647,7 @@ trait Generator extends Traversals with Transformers {
 
     // final stage
     // 1) do all remaining decryptions to answer all the projections
-    val m = 
+    val m = (
       projPosMaps.flatMap { 
         case (_, _, Some((_, m))) => Some(m.values)
         case _ => None
@@ -641,16 +658,42 @@ trait Generator extends Traversals with Transformers {
           case _ => None
         }
       }
+    ).toSeq
 
-    val s0 = if (m.isEmpty) stage4 else wrapDecryptionNode(stage4, m)
+    val s0 = if (m.isEmpty) stage4 else wrapDecryptionNodeSeq(stage4, m)
 
     // 2) now do a final transformation
-    LocalTransform(projPosMaps.map {
+    val trfms = projPosMaps.map {
       case (_, _, Some((comp, mapping))) =>
         assert(comp.subqueries.isEmpty)
         Right(comp.mkSqlExpr(mapping))
       case (p, _, None) => Left(p)
-    }, s0)
+    }
+
+    encContext match {
+      case PreserveOriginal =>
+        if (trfms.isEmpty) stage4 else LocalTransform(trfms, stage4)
+      case PreserveCardinality => stage4
+      case SingleEncProj(o) =>
+        assert(stage4.tupleDesc.size == 1)
+        stage4.tupleDesc(0) match {
+          case Some(o0) if o0 == o => stage4
+
+          case Some(o0) =>
+            // decrypt -> encrypt
+            LocalEncrypt(
+              Seq((0, o)), 
+              LocalDecrypt(
+                Seq(0),
+                stage4))
+
+          case None =>
+            // encrypt
+            LocalEncrypt(
+              Seq((0, o)),
+              stage4)
+        }
+    }
   }
 
   def generateCandidatePlans(stmt: SelectStmt): Seq[PlanNode] = {
