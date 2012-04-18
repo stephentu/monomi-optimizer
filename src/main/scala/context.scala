@@ -10,6 +10,14 @@ class Context(val parent: Either[Definitions, Context]) {
   val relations = new HashMap[String, Relation]
   val projections = new ArrayBuffer[ProjectionType]
 
+  def isParentOf(that: Context): Boolean = {
+    var cur = that.parent.right.toOption.orNull
+    while (cur ne null) {
+      if (cur eq this) return true
+    }
+    false
+  }
+
   // lookups first one
   def lookupProjection(name: String): Option[SqlExpr] = {
     projections.flatMap {

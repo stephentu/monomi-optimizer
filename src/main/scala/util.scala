@@ -49,6 +49,12 @@ object CollectionUtils {
     if (t0.isDefined) t0 else t1
   }
 
+  def optOrEither2[T0, T1](t0: Option[T0], t1: Option[T1]): Option[Either[T0, T1]] = {
+    if (t0.isDefined) Some(Left(t0)) 
+    else if (t1.isDefined) Some(Right(t1))
+    else None
+  }
+
   def optSeq[T](s: Seq[Option[T]]): Option[Seq[T]] = {
     val s0 = s.flatten
     if (s0.size == s.size) Some(s0) else None

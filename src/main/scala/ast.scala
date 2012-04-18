@@ -376,3 +376,25 @@ case class SqlOrderBy(keys: Seq[(SqlExpr, OrderType)], ctx: Context = null) exte
   def copyWithContext(c: Context) = copy(ctx = c)
   def sql = Seq("order by", keys map (x => x._1.sql + " " + x._2.toString) mkString ", ") mkString " "
 }
+
+// synthetic nodes
+
+case class TuplePosition(pos: Int, ctx: Context = null) extends SqlExpr {
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = false
+  def gatherFields = throw new RuntimeException("error")
+  def sql = "pos$" + pos
+}
+
+case class DependentFieldPlaceholder(placeholder: FieldIdent, ctx: Context = null) 
+  extends LiteralExpr {
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def sql = "<placeholder>"
+}
+
+case class SubqueryPosition(pos: Int, ctx: Context = null) extends SqlExpr {
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = false
+  def gatherFields = throw new RuntimeException("error")
+  def sql = "subquery$" + pos
+}

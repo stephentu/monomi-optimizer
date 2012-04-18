@@ -88,5 +88,27 @@ class OnionSet {
     m
   }
 
+  // deep copy
+  def copy: OnionSet = {
+    val cpy = new OnionSet 
+    opts.foreach {
+      case (k @ (relation, Left(name)), v) =>
+        cpy.opts.put(k, v)
+      case ((relation, Right(expr)), v) =>
+        cpy.opts.put((relation, Right(expr.copyWithContext(null).asInstanceOf[SqlExpr])), v)
+    }
+    cpy
+  }
+
   override def toString = "OnionSet(" + opts.toString + ")"
+}
+
+// this is a necessary evil until we rework the transformers api
+// not thread safe
+class SetOnce[T] {
+  private var _value: Option[T] = None
+  def set(v: T): Unit = {
+    if (!_value.isDefined) _value = Some(v)
+  }
+  def get: Option[T] = _value 
 }

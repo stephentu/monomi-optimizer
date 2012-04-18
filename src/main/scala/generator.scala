@@ -17,7 +17,34 @@ trait Generator extends Traversals with Transformers {
     }
   }
 
-  def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode = {
+  def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode =
+    generatePlanFromOnionSet0(stmt, onionSet, true)
+
+
+  abstract trait EncContext
+  case object PreserveOriginal extends EncContext
+  case object PreserveCardinality extends EncContext
+  case class SingleEncProj(onion: Int) extends EncContext
+
+  // if encContext is PreserveOriginal, then the plan node generated faithfully
+  // recreates the original statement- that is, the result set has the same
+  // (unencrypted) type as the result set of stmt.
+  //
+  // if encContext is PreserveCardinality, then this function is free to generate
+  // plans which only preserve the *cardinality* of the original statement. the
+  // result set, however, is potentially left encrypted. this is useful for generating
+  // plans such as subqueries to EXISTS( ... ) calls
+  // 
+  // if encContext is SingleEncProj, then stmt is expected to have exactly one
+  // projection (this is asserted)- and plan node is written so it returns the
+  // single projection encrypted with the onion given by SingleEncProj
+  private def generatePlanFromOnionSet0(
+    stmt: SelectStmt, onionSet: OnionSet, encContext: EncContext): PlanNode = {
+
+    encContext match { 
+      case SingleEncProj(_) => assert(stmt.ctx.projections.size == 1) 
+      case _ =>
+    }
 
     // order is
     // 1) where clause (filter)
@@ -29,8 +56,8 @@ trait Generator extends Traversals with Transformers {
 
     def getSupportedExpr(e: SqlExpr, o: Int): Option[FieldIdent] = {
       val e0 = findOnionableExpr(e)
-      println("e = " + e)
-      println("e0 = " + e0)
+      //println("e = " + e)
+      //println("e0 = " + e0)
       e0.flatMap { x =>
         onionSet.lookup(x._1, x._2).filter(y => (y._2 & o) != 0).map {
           case (basename, _) =>
@@ -39,79 +66,290 @@ trait Generator extends Traversals with Transformers {
       }
     }
 
+    val keepGoing = (None, true)
+    
+    // ClientComputations leave the result of the expr un-encrypted
+    case class ClientComputation
+      (/* a client side expr for evaluation locally */
+       expr: SqlExpr, 
+
+       /* additional encrypted projections needed for conjunction. the tuple is as follows:
+        *   ( (original) expr from the client expr which will be replaced with proj,
+        *     the actual projection to append to the *server side* query,
+        *     the encryption onion which is being projected from the server side query ) */
+       projections: Seq[(SqlExpr, SqlProj, Int)], 
+
+       /* additional subqueries needed for conjunction. the tuple is as follows:
+        *   ( (original) subselect form conjunction which will be replaced with PlanNode,
+        *     the PlanNode to execute,
+        *     the EncContext the PlanNode was generated with 
+        *       (tells about the type of tuples coming from PlanNode) )
+        */
+       subqueries: Seq[(Subselect, PlanNode, EncContext)] 
+      ) {
+
+      /** Assumes both ClientComputations are conjunctions, and merges them into a single
+       * computation */
+      def mergeConjunctions(that: ClientComputation): ClientComputation = {
+        ClientComputation(
+          And(this.expr, that.expr),
+          this.projections ++ that.projections,
+          this.subqueries ++ that.subqueries)
+      }
+
+      def mkSqlExprForFilterNode(mappings: Map[SqlProj, Int]): SqlExpr = {
+        val pmap = projections.toMap
+        val smap = subqueries.zipWithIndex.map { case ((s, p), i) => (s, (p, i)) }.toMap
+        topDownTransformation(conjunction) {
+          case s: Subselect =>
+            (Some(SubqueryPosition(smap(s)._2)), false)
+
+          case e: SqlExpr =>
+            pmap.get(e).map { p => (Some(TuplePosition(mappings(p))), false) }.getOrElse(keepGoing)
+
+          case _ => keepGoing
+
+        }.asInstanceOf[SqlExpr]
+      }
+    }
+
     var cur = stmt // the current statement, as we update it
 
     val _generator = new NameGenerator("_projection")
 
-    //val newProjections = new ArrayBuffer[SqlProj]
+    val newLocalFilters = new ArrayBuffer[ClientComputation]
+    val localFilterPosMaps = new ArrayBuffer[Map[SqlProj, Int]]
 
-    val newLocalFilters = new ArrayBuffer[SqlExpr]
+    val newLocalGroupBy = new ArrayBuffer[ClientComputation]
+    val localGroupByPosMaps = new ArrayBuffer[Map[SqlProj, Int]]
 
-    // left is client group by, right is only client group filter
-    var newLocalGroupBy: Option[Either[SqlGroupBy, SqlExpr]] = None
-
-    val newLocalProjections = new ArrayBuffer[SqlExpr]
-
-    var newLocalOrderBy: Option[Seq[(SqlExpr, OrderType)]] = None
+    val newLocalOrderBy = new ArrayBuffer[ClientComputation]
+    val localOrderByPosMaps = new ArrayBuffer[Map[SqlProj, Int]]
 
     var newLocalLimit: Option[Int] = None
 
-    def keepGoing = (None, true)
+    val projPosMaps = new ArrayBuffer[(Int, Option[(ClientComputation, Map[SqlProj, Int])])]
+
     def answerWithoutModification(n: Node) = (Some(n.copyWithContext(null)), false)
 
-    // rewrite expr into an expr which can be evaluated on the server,
-    // plus any additional projections,
-    // plus an optional client operation which must be applied locally for reconstruction
-    def rewriteExprForServer(expr: SqlExpr, unagg: Boolean): (SqlExpr, Option[(Seq[SqlProj], Option[SqlExpr])]) = {
-      val projections = new ArrayBuffer[SqlProj]
-      val conjunctions = new ArrayBuffer[SqlExpr]
+    abstract trait RewriteContext {
+      def aggsValid: Boolean = false
+    }
+    case object FilterCtx extends RewriteContext
+    case object GroupByKeyCtx extends RewriteContext
+    case object GroupByHavingCtx extends RewriteContext { def aggsValid = true }
+    case object OrderByKeyCtx extends RewriteContext
+    case class ProjCtx(o: Int) extends RewriteContext { def aggsValid = true }
+    case class ProjUnaggCtx(o: Int) extends RewriteContext
 
-      def cannotAnswer(e: SqlExpr): (Option[Node], Boolean) = {
+    // rewrite expr under rewriteCtx, breaking up the computation of expr into
+    // a server side component and an (optional) client side computation. the
+    // semantics of this function depend on the rewriteCtx:
+    //
+    // 1) if rewriteCtx is a boolean context (FilterCtx, GroupByHavingCtx), then
+    //    there are two cases:
+    //      A) if there *is no* ClientComputation returned, then the returned 
+    //         server expr evaluates to the equivalent value as expr does,
+    //         in a boolean context. Thus, it can be used as a drop in replacement
+    //         in the re-written query. 
+    //      B) if there *is* a ClientComputation returned, then the returned
+    //         server expr will select a strict superset of tuples which the
+    //         original expr would have selected. the returned expr should still
+    //         be included in the re-written query, but by itself it does not
+    //         filter out all the necessary tuples as the original predicate.
+    //    in both cases, the 2nd parameter returned is 0
+    // 
+    // 2) if rewriteCtx is a projection context (ProjCtx, ProjUnaggCtx), then 
+    //    there are two cases:
+    //      A) if there *is no* ClientComputation returned, then the returned
+    //         server side expr is guaranteed to contain the original expr in
+    //         an encrypted form. the onion type is indicated by the second
+    //         parameter. A best effort is made to return the column in one
+    //         of the onions given by the RewriteContext, but this is not 
+    //         always possible. A 0 for the second param indicates that the
+    //         projection is already in decrypted from (for instance, if the
+    //         projection was (expr = const))
+    //      B) if there *is* a ClientComputation returned, then the returned
+    //         server side expr is meaningless, and can thus be omitted from
+    //         the re-written query (it should really be Option[SqlExpr]).
+    //         also, the 2nd returned parameter is 0. the projected expr
+    //         can be obtained by evaluating the ClientComputation as a 
+    //         LocalTransform. The result of the ClientComputation will leave
+    //         the expr in its original, *decrypted* state.
+    //
+    // 3) if rewriteCtx is a key context (GroupByKeyCtx, OrderByKeyCtx), then
+    //    this case is currently un-implemented
+
+    def rewriteExprForServer(expr: SqlExpr, rewriteCtx: RewriteContext): 
+      (SqlExpr, Int, Option[ClientComputation]) = {
+
+      var conjunctions: Option[ClientComputation] = None
+
+      def mergeConjunctions(that: ClientComputation) = {
+        conjunctions match {
+          case Some(thiz) => conjunctions = Some(thiz mergeConjunctions that)
+          case None => conjunctions = Some(that)
+        }
+      }
+
+      def mkOnionRetVal(o: Int) = rewriteCtx match {
+        case FilterCtx | GroupByHavingCtx => 0
+        case ProjCtx(_) | ProjUnaggCtx(_) => o
+        case _ => throw new RuntimeException("TODO: impl")
+      }
+
+      val onionRetVal = new SetOnce[Int] // TODO: FIX THIS HACK
+
+      val cannotAnswerExpr = (Some(IntLiteral(1)), false)
+
+      def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, Int)] = {
         // filter out all fields
         assert(e.canGatherFields)
-
         val fields = e.gatherFields
-        //println("cannot answer: " + e.sql)
-        //println("  * fields: " + fields)
-
-        val projs = fields.map { 
+        def translateField(e: SqlExpr) = 
+          CollectionUtils.optOrEither2(
+            getSupportedExpr(e, Onions.DET),
+            getSupportedExpr(e, Onions.OPE))
+          .getOrElse(throw new Exception("should not happen"))
+          .map { 
+            case Left(e) => (e, Onions.DET)
+            case Right(e) => (e, Onions.OPE)
+          }
+        fields.map { 
           case (f, false) =>
-            ExprProj(f, Some(_generator.uniqueId()))
+            val (ft, o) = translateField(f)
+            (f, ExprProj(ft, Some(_generator.uniqueId())), o)
           case (f, true) =>
-            ExprProj(GroupConcat(f, ","), Some(_generator.uniqueId()))
+            val (ft, o) = translateField(f)
+            (f, ExprProj(GroupConcat(ft, ","), Some(_generator.uniqueId())), o)
         }
+      }
 
-        projections ++= projs
-
+      def cannotAnswer(e: SqlExpr): (Option[Node], Boolean) = {
         // TODO: rewrite query deal w/ the projections
-        conjunctions += e
-
-        (Some(IntLiteral(1)), false)
+        mergeConjunctions(ClientComputation(e, mkProjections(e), Seq.empty))
+        cannotAnswerExpr
       }
 
       val newExpr = topDownTransformation(expr) {
 
         case Or(_, _, _) => 
           throw new Exception("TODO: don't assume clause is only conjuctive")
-        case And(_, _, _) => keepGoing
+        case And(_, _, _) => 
+          onionRetVal.set(mkOnionRetVal(0))
+          keepGoing
 
         case eq: EqualityLike =>
-          (eq.lhs, eq.rhs) match {
-            case (lhs, rhs) if rhs.isLiteral =>
-              getSupportedExpr(lhs, Onions.DET).map(fi => (Some(eq.copyWithChildren(fi, NullLiteral())), false)).getOrElse(cannotAnswer(eq))
-            case (lhs, rhs) if lhs.isLiteral =>
-              getSupportedExpr(rhs, Onions.DET).map(fi => (Some(eq.copyWithChildren(NullLiteral(), fi)), false)).getOrElse(cannotAnswer(eq))
-            case (lhs, rhs) =>
-              CollectionUtils.opt2(
-                getSupportedExpr(lhs, Onions.DET),
-                getSupportedExpr(rhs, Onions.DET))
-              .map {
-                case (lfi, rfi) =>
-                  (Some(eq.copyWithChildren(lfi, rfi)), false)
-              }.getOrElse(cannotAnswer(eq))
+          onionRetVal.set(mkOnionRetVal(0))
+          def handleOneLiteral(lhs: SqlExpr, rhs: SqlExpr) = {
+            assert(!lhs.isLiteral)
+            assert(rhs.isLiteral)
+            lhs match {
+              case ss @ Subselect(q, _) =>
+                val subPlans = 
+                  Seq(generatePlanFromOnionSet0(q, onionSet, SingleEncProj(Onions.DET)),
+                      generatePlanFromOnionSet0(q, onionSet, SingleEncProj(Onions.OPE)))
+                val sp0 = subPlans.map(x => if (x.isInstanceOf[RemoteSql]) Some(x) else None)
+                CollectionUtils.optOr2(sp0(0), sp0(1)).map {
+                  case RemoteSql(qp) =>
+                    (Some(eq.copyWithChildren(Subselect(qp), NullLiteral())), false)
+                }.getOrElse {
+                  mergeConjunctions(ClientComputation(eq, Seq.empty, Seq((ss, sp0(0)))))
+                  cannotAnswerExpr
+                }
+              case _ => 
+                CollectionUtils.optOr2(
+                  getSupportedExpr(lhs, Onions.DET),
+                  getSupportedExpr(lhs, Onions.OPE))
+                .map(fi => (Some(eq.copyWithChildren(fi, NullLiteral())), false))
+                .getOrElse(cannotAnswer(eq))
+            }
+          }
+          def handleNoLiteral(lhs: SqlExpr, rhs: SqlExpr) = {
+            assert(!lhs.isLiteral)
+            assert(!rhs.isLiteral)
+
+            def handleOne(ss: Subselect, expr: SqlExpr) = {
+              assert(!expr.isInstanceOf[Subselect])
+
+              val e0 = getSupportedExpr(expr, Onions.DET)
+              val e1 = getSupportedExpr(expr, Onions.OPE)
+
+              val p0 = 
+                e0.map(_ =>
+                  generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.DET)))
+
+              val p1 = 
+                e1.map(_ =>
+                  generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.OPE)))
+
+              p0 match {
+                case Some(RemoteSql(q0)) =>
+                  (Some(eq.copyWithChildren(e0, Subselect(q0))), false)
+                case _ =>
+                  p1 match {
+                    case Some(RemoteSql(q1)) =>
+                      (Some(eq.copyWithChildren(e1, Subselect(q1))), false)
+                    case _ =>
+                      mergeConjunctions(
+                        ClientComputation(
+                          eq, 
+                          mkProjections(expr),
+                          Seq((ss, p0.orElse(p1).getOrElse(generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.DET)))))))
+                      cannotAnswerExpr
+                  }
+              }
+            }
+
+            (lhs, rhs) match {
+              case (ss0 @ Subselect(q0, _), ss1 @ Subselect(q1, _)) =>
+                // try both DETs or both OPEs
+                val spDETs = 
+                  Seq(generatePlanFromOnionSet0(q0, onionSet, SingleEncProj(Onions.DET)),
+                      generatePlanFromOnionSet0(q1, onionSet, SingleEncProj(Onions.DET)))
+                val spOPEs = 
+                  Seq(generatePlanFromOnionSet0(q0, onionSet, SingleEncProj(Onions.OPE)),
+                      generatePlanFromOnionSet0(q1, onionSet, SingleEncProj(Onions.OPE)))
+
+                // try spDETs first, then spOPEs
+                (spDETs(0), spDETs(1)) match {
+                  case (RemoteSql(q0p), RemoteSql(q1p)) =>
+                    (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
+                  case _ =>
+                    (spOPEs(0), spOPEs(1)) match {
+                      case (RemoteSql(q0p), RemoteSql(q1p)) =>
+                        (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
+                      case _ =>
+                        mergeConjunctions(ClientComputation(eq, mkProjections(lhs) ++ mkProjections(rhs), Seq((ss0, spDETs(0)), (ss1, spDETs(1)))))
+                        cannotAnswerExpr
+                    }
+                }
+              case (ss @ Subselect(_, _), _) => handleOne(ss, rhs)
+              case (_, ss @ Subselect(_, _)) => handleOne(ss, lhs)
+              case _ =>
+                CollectionUtils.optOr2(
+                  CollectionUtils.opt2(
+                    getSupportedExpr(lhs, Onions.DET),
+                    getSupportedExpr(rhs, Onions.DET)),
+                  CollectionUtils.opt2(
+                    getSupportedExpr(lhs, Onions.OPE),
+                    getSupportedExpr(rhs, Onions.OPE)))
+                .map {
+                  case (lfi, rfi) =>
+                    (Some(eq.copyWithChildren(lfi, rfi)), false)
+                }.getOrElse(cannotAnswer(eq))
+            }
           }
 
+          (eq.lhs, eq.rhs) match {
+            case (lhs, rhs) if rhs.isLiteral => handleOneLiteral(lhs, rhs)
+            case (lhs, rhs) if lhs.isLiteral => handleOneLiteral(rhs, lhs)
+            case (lhs, rhs) => handleNoLiteral(lhs, rhs)
+          }
+
+        // TODO: handle subqueries
         case ieq: InequalityLike =>
+          onionRetVal.set(mkOnionRetVal(0))
           (ieq.lhs, ieq.rhs) match {
             case (lhs, rhs) if rhs.isLiteral =>
               getSupportedExpr(lhs, Onions.OPE).map(fi => (Some(ieq.copyWithChildren(fi, NullLiteral())), false)).getOrElse(cannotAnswer(ieq))
@@ -127,135 +365,142 @@ trait Generator extends Traversals with Transformers {
               }.getOrElse(cannotAnswer(ieq))
           }
 
-        case cs @ CountStar(_) if !unagg => 
+        case cs @ CountStar(_) if rewriteCtx.aggsValid => 
+          onionRetVal.set(mkOnionRetVal(0))
           answerWithoutModification(cs)
 
-        case m @ Min(f, _) if !unagg =>
+        case m @ Min(f, _) if rewriteCtx.aggsValid =>
+          onionRetVal.set(mkOnionRetVal(Onions.OPE))
           getSupportedExpr(f, Onions.OPE).map(fi => (Some(Min(fi)), false)).getOrElse(cannotAnswer(m))
 
-        case m @ Max(f, _) if !unagg =>
+        case m @ Max(f, _) if rewriteCtx.aggsValid =>
+          onionRetVal.set(mkOnionRetVal(Onions.OPE))
           getSupportedExpr(f, Onions.OPE).map(fi => (Some(Max(fi)), false)).getOrElse(cannotAnswer(m))
 
-        case s @ Sum(f, _, _) if !unagg =>
+        case s @ Sum(f, _, _) if rewriteCtx.aggsValid =>
+          onionRetVal.set(mkOnionRetVal(Onions.HOM))
           getSupportedExpr(f, Onions.HOM).map(fi => (Some(AggCall("hom_add", Seq(fi))), false)).getOrElse(cannotAnswer(s))
 
-        case avg @ Avg(f, _, _) if !unagg =>
+        case avg @ Avg(f, _, _) if rewriteCtx.aggsValid =>
+          onionRetVal.set(mkOnionRetVal(0))
           getSupportedExpr(f, Onions.HOM).map(fi => {
-            val id = _generator.uniqueId()
-            projections += ExprProj(CountStar(), Some(id))
-            val aggCall = AggCall("hom_add", Seq(fi))
-            conjunctions += Div(aggCall, FieldIdent(None, id))
-            (Some(aggCall), false)          
+            val id0 = _generator.uniqueId()
+            val id1 = _generator.uniqueId()
+            val projs = Seq(AggCall("hom_add", Seq(fi)), ExprProj(CountStar(), Some(id1)))
+            mergeConjunctions(
+              ClientComputation(
+                Div(FieldIdent(None, id0), FieldIdent(None, id1)),
+                projs,
+                Seq.empty))
+            cannotAnswerExpr
           }).getOrElse(cannotAnswer(avg))
 
-        case gc @ GroupConcat(f, sep, _) =>
-          // always support this regardless of unagg or not
-          getSupportedExpr(f, Onions.DET).map(fi => (Some(GroupConcat(fi, sep)), false) ).getOrElse(cannotAnswer(gc))
-
+//        case gc @ GroupConcat(f, sep, _) =>
+//          // always support this regardless of unagg or not
+//          getSupportedExpr(f, Onions.DET).map(fi => (Some(GroupConcat(fi, sep)), false) ).getOrElse(cannotAnswer(gc))
+//
         case e: SqlExpr =>
-          CollectionUtils.optOr2(
-            getSupportedExpr(e, Onions.DET),
-            getSupportedExpr(e, Onions.OPE))
-          .map(fi => (Some(fi), false)).getOrElse(cannotAnswer(e))
+
+          def handleProj(o: Int) = {
+            val d = getSupportedExpr(e, Onions.DET)
+            val o = getSupportedExpr(e, Onions.OPE)
+            assert(d.isDefined || o.isDefined)
+            // try to honor the given onions first
+            if ((o & Onions.DET) && d.isDefined) {
+              (Some(d.get), false)
+            } else if ((o & Onions.OPE) && o.isDefined) {
+              (Some(o.get), false)
+            } else if (d.isDefined) {
+              (Some(d.get), false)
+            } else {
+              (Some(o.get), false)
+            }
+          }
+
+          rewriteCtx match {
+            case FilterCtx | GroupByHavingCtx =>
+              throw new RuntimeException("TODO: need to evaluate in boolean context")
+            case ProjCtx(o) => handleProj(o)
+            case ProjUnaggCtx(o) => handleProj(o)
+            case _ => throw new RuntimeException("TODO: impl")
+          }
         
-        case e => throw new Exception("should only have exprs under where clause")
+        case e => throw new Exception("should only have exprs under expr clause")
       }.asInstanceOf[SqlExpr]
 
-
-      (newExpr, 
-       if (projections.isEmpty && conjunctions.isEmpty) None
-       else Some((
-         projections.toSeq, 
-         if (conjunctions.isEmpty) None else Some(conjunctions.reduceLeft((x: SqlExpr, y: SqlExpr) => {  
-            And(x, y) 
-         })))))
+      (newExpr, onionRetVal.get.getOrElse(0), conjunctions)
     }
 
     // filters
-    cur = cur.filter.map(x => rewriteExprForServer(x, false)).map {
-      case (stmt, Some((projs, expr))) =>
-        val projsToAdd = 
+    cur = cur.filter.map(x => rewriteExprForServer(x, FilterCtx)).map {
+      case (stmt, _, comps) =>
+        val comps0 = 
           if (cur.groupBy.isDefined) {
             // need to group_concat the projections then
-            projs.map { 
-              case ExprProj(e, a, _) => ExprProj(GroupConcat(e, ","), a)
+            comps.map { 
+              case cc @ ClientComputation(_, p, _) =>
+                cc.copy(projections = p.map {
+                  case ExprProj(e, a, _) => ExprProj(GroupConcat(e, ","), a)
+                })
             }
           } else {
-            projs
+            comps
           }
-        expr.foreach(e => newLocalFilters += e)
-        cur.copy(projections = cur.projections ++ projsToAdd, filter = Some(stmt))
-      case (stmt, None) => 
+        comps0.foreach(c => newLocalFilters += c)
         cur.copy(filter = Some(stmt))
     }.getOrElse(cur)
 
     // group by
     cur = {
       // need to check if we can answer the having clause
-      val (projsToAdd, newGroupBy) = 
-        cur.groupBy.map(gb => gb.having.map(x => rewriteExprForServer(x, false)).map {
-          case (stmt, Some((projs, expr))) =>
-            newLocalGroupBy = expr.map(Right(_)) 
-            (projs, Some(gb.copy(having = Some(stmt))))
-          case (stmt, None) =>
-            (Seq.empty, Some(gb.copy(having = Some(stmt))))
-        }.getOrElse((Seq.empty, Some(gb)))).getOrElse((Seq.empty, None))
+      val newGroupBy = 
+        cur.groupBy.map(gb => gb.having.map(x => rewriteExprForServer(x, GroupByHavingCtx)).map {
+          case (stmt, _, comps) =>
+            comps.foreach(c => newLocalGroupBy += c)
+            gb.copy(having = Some(stmt))
+        }.getOrElse(gb))
 
+      // now check the keys
       val newGroupBy0 = newGroupBy.map(gb => gb.copy(keys = {
-        gb.keys.map(k => 
+        gb.keys.map(k =>
           CollectionUtils.optOr2(
             getSupportedExpr(k, Onions.DET),
             getSupportedExpr(k, Onions.OPE))
-          .getOrElse(throw new Exception("should not happen")))
+          .getOrElse(throw new RuntimeException("TODO: currently cannot support non-field keys")))
       }))
-      cur.copy(projections = cur.projections ++ projsToAdd, groupBy = newGroupBy0) 
-    }
-
-    // projections
-    cur = {
-      var toProcess: Seq[SqlProj] = cur.projections
-      var finalProjs: Seq[SqlProj] = Seq.empty
-      while (!toProcess.isEmpty) {
-        val thisIter = toProcess
-        toProcess = Seq.empty
-        finalProjs = finalProjs ++  
-          thisIter
-            .map {
-              case ExprProj(e, a, _) =>
-                rewriteExprForServer(e, cur.groupBy.isDefined && !newLocalFilters.isEmpty) match {
-                  case (stmt, Some((projs, expr))) =>
-                    toProcess ++= projs
-                    expr.foreach(e => newLocalProjections += e)
-                    ExprProj(stmt, a)
-                  case (stmt, None) =>
-                    ExprProj(stmt, a)
-                }
-              case StarProj(_) => 
-                // TODO: the resolver phase should rewrite * to project all the fields,
-                // so we only have to handle ExprProj
-                throw new RuntimeException("unimpl")
-            }
-      }
-      cur.copy(projections = finalProjs)
+      cur.copy(groupBy = newGroupBy0) 
     }
 
     // order by
     cur = {
+      def handleUnsupported(o: SqlOrderBy) = {
+        // TODO: general client side comp
+        newLocalOrderBy ++= o.keys.map { f => 
+          CollectionUtils.optOrEither2(
+            getSupportedExpr(f, Onions.OPE),
+            getSupportedExpr(f, Onions.DET))
+          .getOrElse(throw new RuntimeException("TODO: currently cannot support non-field keys")))
+          .map {
+            case Left(fi) => 
+              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.DET)), Seq.empty)
+            case Right(fi) =>
+              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.OPE)), Seq.empty)
+          }
+        }
+        None
+      }
       val newOrderBy = cur.orderBy.flatMap(o => {
         if (newLocalFilters.isEmpty &&
             newLocalGroupBy.isEmpty) {
-
           val mapped = o.keys.map(f => (getSupportedExpr(f._1, Onions.OPE), f._2))
           if (mapped.map(_._1).flatten.size == mapped.size) {
             // can support server side order by
             Some(SqlOrderBy(mapped.map(f => (f._1.get, f._2))))
           } else {
-            newLocalOrderBy = Some(o.keys)
-            None
+            handleUnsupported(o)
           }
         } else {
-          newLocalOrderBy = Some(o.keys)
-          None
+          handleUnsupported(o)
         }
       })
       cur.copy(orderBy = newOrderBy) 
@@ -273,16 +518,66 @@ trait Generator extends Traversals with Transformers {
       }
     }))
 
+
+    // projections
+    cur = {
+      val finalProjs = new ArrayBuffer[SqlProj]
+       
+      def processClientComputation(comp: ClientComputation): 
+        Map[SqlProj, Int] = {
+        comp.projections.map { p =>
+          val i = finalProjs.size
+          finalProjs += p
+          (p, i)
+        }.toMap
+      }
+
+      newLocalFilters.foreach { c =>
+        localFilterPosMaps += processClientComputation(c)
+      }
+
+      newLocalGroupBy.foreach { c =>
+        localGroupByPosMaps += processClientComputation(c)
+      }
+
+      cur.projections.foreach {
+        case ExprProj(e, a, _) =>
+          rewriteExprForServer(e, cur.groupBy.isDefined && !newLocalFilters.isEmpty) match {
+            case (stmt, comps) =>
+              // stmt first
+              val stmtIdx = finalProjs.size
+              finalProjs += ExprProj(stmt, a)
+
+              // client comp
+              val c0 = comps.map { c => 
+                val m = processClientComputation(c)
+                (c, m)
+              }
+
+              projPosMaps += ((stmtIdx, c0))
+          }
+        case StarProj(_) => throw new RuntimeException("TODO: implement me")
+      }
+
+      cur.copy(projections = finalProjs.toSeq)
+    }
+
+
     val stage1 =  
-      newLocalFilters.foldLeft( RemoteSql(cur) : PlanNode ) {
-        case (acc, expr) => LocalFilter(expr, acc)
+      newLocalFilters.zip(localFilterPosMaps).foldLeft( RemoteSql(cur) : PlanNode ) {
+        case (acc, (comp, mapping)) => 
+          LocalFilter(comp.mkSqlExprForFilterNode(mapping),
+                      acc, 
+                      comp.subqueries.map(_._2))
       }
 
     val stage2 = 
-      newLocalGroupBy.map(x => x match {
-        case Left(_) => throw new RuntimeException("unimpl")
-        case Right(expr) => LocalGroupFilter(expr, stage1)
-      }).getOrElse(stage1)
+      newLocalGroupBy.zip(localGroupByPosMaps).foldLeft( stage1 : PlanNode ) {
+        case (acc, (comp, mapping)) => 
+          LocalGroupFilter(comp.mkSqlExprForFilterNode(mapping),
+                           acc, 
+                           comp.subqueries.map(_._2))
+      }
 
     val stage3 = 
       newLocalProjections.foldLeft( stage2 ) {
@@ -317,10 +612,17 @@ trait Generator extends Traversals with Transformers {
       }
     }
 
-    def traverseContext(start: Node, ctx: Context, onionSet: OnionSet) = {
+    def traverseContext(
+      start: Node, 
+      ctx: Context, 
+      bootstrap: Seq[OnionSet],
+      selectFn: (SelectStmt, Seq[OnionSet]) => Seq[OnionSet]): Seq[OnionSet] = {
+
+      var workingSet : Seq[OnionSet] = bootstrap
+
       def add1(sym: SqlExpr, o: Int): Boolean =
         findOnionableExpr(sym).map { 
-          case (r, e) => onionSet.add(r, e, o); true }.getOrElse(false)
+          case (r, e) => workingSet.foreach(_.add(r, e, o)); true }.getOrElse(false)
 
       def add2(symL: SqlExpr, symR: SqlExpr, o: Int): Boolean = 
         CollectionUtils.opt2(
@@ -328,8 +630,8 @@ trait Generator extends Traversals with Transformers {
           findOnionableExpr(symR))
         .map {
           case ((l0, l1), (r0, r1)) =>
-            onionSet.add(l0, l1, o)
-            onionSet.add(r0, r1, o)
+            workingSet.foreach(_.add(l0, l1, o))
+            workingSet.foreach(_.add(r0, r1, o))
             true
         }.getOrElse(false)
 
@@ -371,31 +673,38 @@ trait Generator extends Traversals with Transformers {
             true
           }.getOrElse(false)
 
+        case ss : SelectStmt =>
+          workingSet = selectFn(ss, workingSet)
+          true
+
         //case e: SqlExpr =>
         //  add1(e, Onions.DET)
 
         case _ => false
       })
+
+      workingSet
     }
 
-    val s = new ArrayBuffer[OnionSet]
+    def buildForSelectStmt(stmt: SelectStmt, bootstrap: Seq[OnionSet]): Seq[OnionSet] = {
+      val SelectStmt(p, _, f, g, o, _, ctx) = stmt
+      val s0 = {
+        var workingSet = bootstrap.map(_.copy)
+        p.foreach { e =>
+          workingSet = traverseContext(e, ctx, workingSet, buildForSelectStmt)
+        }
+        workingSet
+      }
+      
+      val s1 = f.map(e => traverseContext(e, ctx, bootstrap.map(_.copy), buildForSelectStmt))
 
-    topDownTraversal(stmt)(wrapReturnTrue {
-      case SelectStmt(p, _, f, g, o, _, ctx) =>
-        s += new OnionSet
-        p.foreach(e => traverseContext(e, ctx, s.last))
+      val s2 = g.map(e => traverseContext(e, ctx, bootstrap.map(_.copy), buildForSelectStmt))
 
-        s += new OnionSet
-        f.foreach(e => traverseContext(e, ctx, s.last))
+      val s3 = o.map(e => traverseContext(e, ctx, bootstrap.map(_.copy), buildForSelectStmt))
 
-        s += new OnionSet
-        g.foreach(e => traverseContext(e, ctx, s.last))
+      s0 ++ s1.getOrElse(Seq.empty) ++ s2.getOrElse(Seq.empty) ++ s3.getOrElse(Seq.empty)
+    }
 
-        s += new OnionSet
-        o.foreach(e => traverseContext(e, ctx, s.last))
-      case _ =>
-    })
-
-    s.toSeq
+    buildForSelectStmt(stmt, Seq(new OnionSet))
   }
 }
