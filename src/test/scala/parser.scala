@@ -71,27 +71,7 @@ order by
 limit 100;
 """
 
-}
-
-class SQLParserSpec extends Specification {
-
-  "SQLParser" should {
-    "parse query1" in {
-      val parser = new SQLParser
-      val r = parser.parse(Queries.q1)
-      r should beSome
-    }
-
-    "parse query2" in {
-      val parser = new SQLParser
-      val r = parser.parse(Queries.q2)
-      r should beSome
-    }
-
-    "parse query3" in {
-      val parser = new SQLParser
-      val r = parser.parse(
-"""
+  val q3 = """
 select
   l_orderkey,
   sum(l_extendedprice * (1 - l_discount)) as revenue,
@@ -115,14 +95,9 @@ order by
   revenue desc,
   o_orderdate
 limit 10;
-""")
-      r should beSome
-    }
-
-    "parse query4" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q4 = """
 select
   o_orderpriority,
   count(*) as order_count
@@ -144,14 +119,9 @@ group by
   o_orderpriority
 order by
   o_orderpriority;
-""")
-      r should beSome
-    }
-
-    "parse query5" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q5 = """
 select
   n_name,
   sum(l_extendedprice * (1 - l_discount)) as revenue
@@ -176,14 +146,9 @@ group by
   n_name
 order by
   revenue desc;
-""")
-      r should beSome
-    }
-
-    "parse query6" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q6 = """
 select
   sum(l_extendedprice * l_discount) as revenue
 from
@@ -193,14 +158,9 @@ where
   and l_shipdate < date '1999-01-01' + interval '1' year
   and l_discount between 2 - 0.01 and 2 + 0.01
   and l_quantity < 3;
-""")
-      r should beSome
-    }
-
-    "parse query7" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+  
+  val q7 = """
 select
   supp_nation,
   cust_nation,
@@ -240,14 +200,9 @@ order by
   supp_nation,
   cust_nation,
   l_year;
-""")
-      r should beSome
-    }
-
-    "parse query8" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q8 = """
 select
   o_year,
   sum(case
@@ -285,14 +240,9 @@ group by
   o_year
 order by
   o_year;
-""")
-      r should beSome
-    }
-
-    "parse query9" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q9 = """
 select
   nation,
   o_year,
@@ -325,14 +275,9 @@ group by
 order by
   nation,
   o_year desc;
-""")
-      r should beSome
-    }
-
-    "parse query10" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q10 = """
 select
   c_custkey,
   c_name,
@@ -364,14 +309,9 @@ group by
   c_comment
 order by
   revenue desc
-""")
-      r should beSome
-    }
-
-    "parse query11" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q11 = """
 select
   ps_partkey,
   sum(ps_supplycost * ps_availqty) as value
@@ -399,14 +339,9 @@ group by
     )
 order by
   value desc;
-""")
-      r should beSome
-    }
-
-    "parse query12" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q12 = """
 select
   l_shipmode,
   sum(case
@@ -435,14 +370,9 @@ group by
   l_shipmode
 order by
   l_shipmode;
-""")
-      r should beSome
-    }
-
-    "parse query13" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q13 = """
 select
   c_count,
   count(*) as custdist
@@ -463,14 +393,9 @@ group by
 order by
   custdist desc,
   c_count desc;
-""")
-      r should beSome
-    }
-
-    "parse query14" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q14 = """
 select
   100.00 * sum(case
     when p_type like 'PROMO%'
@@ -484,14 +409,9 @@ where
   l_partkey = p_partkey
   and l_shipdate >= date '1999-01-01'
   and l_shipdate < date '1999-01-01' + interval '1' month;
-""")
-      r should beSome
-    }
-
-    "parse query16" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q16 = """
 select
   p_brand,
   p_type,
@@ -522,14 +442,9 @@ order by
   p_brand,
   p_type,
   p_size;
-""")
-      r should beSome
-    }
-
-    "parse query17" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+  
+  val q17 = """
 select
   sum(l_extendedprice) / 7.0 as avg_yearly
 from
@@ -547,14 +462,9 @@ where
     where
       l_partkey = p_partkey
   );
-""")
-      r should beSome
-    }
-
-    "parse query18" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+  
+  val q18 = """
 select
   c_name,
   c_custkey,
@@ -588,14 +498,9 @@ order by
   o_totalprice desc,
   o_orderdate
 limit 100;
-""")
-      r should beSome
-    }
-
-    "parse query19" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q19 = """
 select
   sum(l_extendedprice* (1 - l_discount)) as revenue
 from
@@ -631,14 +536,9 @@ where
     and l_shipmode in ('AIR', 'AIR REG')
     and l_shipinstruct = 'DELIVER IN PERSON'
   );
-""")
-      r should beSome
-    }
-
-    "parse query20" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q20 = """
 select
   s_name,
   s_address
@@ -676,14 +576,9 @@ where
   and n_name = 'foo'
 order by
   s_name;
-""")
-      r should beSome
-    }
-
-    "parse query21" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q21 = """
 select
   s_name,
   count(*) as numwait
@@ -724,14 +619,9 @@ order by
   numwait desc,
   s_name
 limit 100;
-""")
-      r should beSome
-    }
-
-    "parse query22" in {
-      val parser = new SQLParser
-      val r = parser.parse(
 """
+
+  val q22 = """
 select
   cntrycode,
   count(*) as numcust,
@@ -769,7 +659,135 @@ group by
   cntrycode
 order by
   cntrycode;
-""")
+"""
+}
+
+class SQLParserSpec extends Specification {
+
+  "SQLParser" should {
+    "parse query1" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q1)
+      r should beSome
+    }
+
+    "parse query2" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q2)
+      r should beSome
+    }
+
+    "parse query3" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q3) 
+      r should beSome
+    }
+
+    "parse query4" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q4)
+      r should beSome
+    }
+
+    "parse query5" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q5)
+      r should beSome
+    }
+
+    "parse query6" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q6)
+      r should beSome
+    }
+
+    "parse query7" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q7)
+      r should beSome
+    }
+
+    "parse query8" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q8)
+      r should beSome
+    }
+
+    "parse query9" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q9)
+      r should beSome
+    }
+
+    "parse query10" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q10)
+      r should beSome
+    }
+
+    "parse query11" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q11)
+      r should beSome
+    }
+
+    "parse query12" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q12)
+      r should beSome
+    }
+
+    "parse query13" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q13)
+      r should beSome
+    }
+
+    "parse query14" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q14)
+      r should beSome
+    }
+
+    "parse query16" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q16)
+      r should beSome
+    }
+
+    "parse query17" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q17)
+      r should beSome
+    }
+
+    "parse query18" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q18)
+      r should beSome
+    }
+
+    "parse query19" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q19)
+      r should beSome
+    }
+
+    "parse query20" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q20)
+      r should beSome
+    }
+
+    "parse query21" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q21)
+      r should beSome
+    }
+
+    "parse query22" in {
+      val parser = new SQLParser
+      val r = parser.parse(Queries.q22)
       r should beSome
     }
   }
