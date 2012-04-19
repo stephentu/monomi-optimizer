@@ -90,8 +90,6 @@ trait Generator extends Traversals with Transformers {
 
     def getSupportedExpr(e: SqlExpr, o: Int): Option[FieldIdent] = {
       val e0 = findOnionableExpr(e)
-      //println("e = " + e)
-      //println("e0 = " + e0)
       e0.flatMap { case (r, t, x) =>
         onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).map {
           case (basename, _) =>

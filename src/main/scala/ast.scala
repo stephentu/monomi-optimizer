@@ -48,6 +48,10 @@ trait SqlExpr extends Node {
     // check agg contexts all consistent:
     if (!f.filter(_._2).isEmpty) return None
 
+    // check all fields are not projection references
+    // TODO: we *could* allow this later, as an optimization
+    if (!f.filter(_._1.symbol.isInstanceOf[ProjectionSymbol]).isEmpty) return None
+
     // for precomputation, we require:
     // 1) all field ctxs are the same
     // 2) all field relations are the same
@@ -59,7 +63,7 @@ trait SqlExpr extends Node {
     }
 
     val rlxns = {
-      val s = f.map(_._1.symbol.relation).toSet
+      val s = f.map(_._1.symbol.asInstanceOf[ColumnSymbol].relation).toSet
       if (s.size > 1) None else Some(s.head)
     }
 

@@ -20,13 +20,11 @@ trait Resolver extends Transformers with Traversals {
         }
       case e => 
         (Some(e.copyWithContext(parent.map(_.ctx).getOrElse(throw new RuntimeException("should have ctx")))), true)
-    })
+    }).asInstanceOf[SelectStmt]
 
     // build contexts up
     topDownTraversal(n1)(wrapReturnTrue {
       case s @ SelectStmt(projections, relations, _, _, _, _, ctx) => 
-
-        //println(s)
 
         def checkName(name: String, alias: Option[String], ctx: Context): String = {
           val name0 = alias.getOrElse(name)
@@ -39,8 +37,8 @@ trait Resolver extends Transformers with Traversals {
         def processRelation(r: SqlRelation): Unit = r match {
           case TableRelationAST(name, alias, _) => 
 
-            println("processing: " + name)
-            println(ctx.relations)
+            //println("processing: " + name)
+            //println(ctx.relations)
 
             // check name
             val name0 = checkName(name, alias, ctx)
@@ -83,13 +81,28 @@ trait Resolver extends Transformers with Traversals {
     })
 
     // resolve field idents
-    topDownTransformation(n1) {
-      case f @ FieldIdent(qual, name, _, ctx) =>
-        val cols = ctx.lookupColumn(qual, name)
-        if (cols.isEmpty) throw new ResolutionException("no such column: " + f.sql)
-        if (cols.size > 1) throw new ResolutionException("ambiguous reference: " + f.sql)
-        (Some(FieldIdent(qual, name, cols.head, ctx)), true)
-      case _ => (None, true)
-    }.asInstanceOf[SelectStmt]
+    def resolveFIs(ss: SelectStmt): SelectStmt = {
+      def visit[N <: Node](n: N, allowProjs: Boolean): N = {
+        topDownTransformation(n) {
+          case f @ FieldIdent(qual, name, _, ctx) =>
+            val cols = ctx.lookupColumn(qual, name, allowProjs)
+            if (cols.isEmpty) throw new ResolutionException("no such column: " + f.sql)
+            if (cols.size > 1) throw new ResolutionException("ambiguous reference: " + f.sql)
+            (Some(FieldIdent(qual, name, cols.head, ctx)), false)
+          case ss: SelectStmt =>
+            (Some(resolveFIs(ss)), false)
+          case _ => (None, true)
+        }.asInstanceOf[N]
+      }
+      val SelectStmt(p, r, f, g, o, _, _) = ss
+      ss.copy(
+        projections = p.map(p0 => visit(p0, false)),
+        relations = r.map(_.map(r0 => visit(r0, false))),
+        filter = f.map(f0 => visit(f0, false)),
+        groupBy = g.map(g0 => g0.copy(keys = g0.keys.map(k => visit(k, true)), having = g0.having.map(h => visit(h, false)))),
+        orderBy = o.map(o0 => visit(o0, true)))
+    }
+
+    resolveFIs(n1)
   }
 }
