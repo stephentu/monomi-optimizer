@@ -46,7 +46,7 @@ trait SqlExpr extends Node {
     if (f.isEmpty) return None
 
     // check agg contexts all consistent:
-    if (f.map(_._2).toSet.size > 1) return None
+    if (!f.filter(_._2).isEmpty) return None
 
     // for precomputation, we require:
     // 1) all field ctxs are the same

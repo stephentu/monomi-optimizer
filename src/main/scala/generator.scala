@@ -771,7 +771,6 @@ trait Generator extends Traversals with Transformers {
 
   def generateOnionSets(stmt: SelectStmt): Seq[OnionSet] = {
 
-
     def traverseContext(
       start: Node, 
       ctx: Context, 
@@ -801,11 +800,29 @@ trait Generator extends Traversals with Transformers {
       def negate(f: Node => Boolean): Node => Boolean = 
         (n: Node) => !f(n)
 
+      // TODO: this is kind of hacky, we shouldn't have to special case this
+      def specialCaseExprOpSubselect(expr: SqlExpr, subselectAgg: SqlAgg) = {
+        if (!expr.isLiteral) {
+          subselectAgg match {
+            case Min(expr0, _) =>
+              add2(expr, expr0, Onions.OPE)
+            case Max(expr0, _) =>
+              add2(expr, expr0, Onions.OPE)
+            case _ =>
+          }
+        }
+        false // keep going
+      }
+
       topDownTraverseContext(start, ctx)(negate {
 
         case eq: EqualityLike =>
           (eq.lhs, eq.rhs) match {
-            case (lhs, rhs) if !lhs.isLiteral && !rhs.isLiteral =>
+            case (lhs, Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _)) =>
+              specialCaseExprOpSubselect(lhs, expr)
+            case (Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _), rhs) =>
+              specialCaseExprOpSubselect(rhs, expr)
+            case (lhs, rhs) =>
               add2(lhs, rhs, Onions.DET)
             case _ => false
           }
@@ -816,6 +833,10 @@ trait Generator extends Traversals with Transformers {
               add1(lhs, Onions.OPE)
             case (lhs, rhs) if lhs.isLiteral =>
               add1(rhs, Onions.OPE)
+            case (lhs, Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _)) =>
+              specialCaseExprOpSubselect(lhs, expr)
+            case (Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _), rhs) =>
+              specialCaseExprOpSubselect(rhs, expr)
             case (lhs, rhs) =>
               add2(lhs, rhs, Onions.OPE)
           }

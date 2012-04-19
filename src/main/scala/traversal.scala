@@ -6,12 +6,24 @@ trait Traversals {
     topDownTraversalWithParent(n)( (p: Option[Node], c: Node) => f(c) )
 
   def topDownTraversalWithParent(n: Node)(f: (Option[Node], Node) => Boolean): Unit =
-    topDownTraversal0(None, n)(f)
+    topDownTraversal0(None, n)((n: Node) => (), f, (n: Node) => ())
 
-  def topDownTraversal0(p: Option[Node], n: Node)(f: (Option[Node], Node) => Boolean): Unit = {
-    if (!f(p, n)) return
-    def recur(n0: Node) = topDownTraversal0(Some(n), n0)(f)
-    n match {
+  def topDownTraversalPrePost[A0, A1](n: Node)(preVisit: Node => A0, visit: Node => Boolean, postVisit: Node => A1): Unit = 
+   topDownTraversalPrePostWithParent(n)(preVisit, (p: Option[Node], c: Node) => visit(c), postVisit)
+
+  def topDownTraversalPrePostWithParent[A0, A1](n: Node)(preVisit: Node => A0, visit: (Option[Node], Node) => Boolean, postVisit: Node => A1): Unit = 
+   topDownTraversal0(None, n)(preVisit, visit, postVisit)
+
+  private def topDownTraversal0[A0, A1](p: Option[Node], n: Node)(preVisit: Node => A0, visit: (Option[Node], Node) => Boolean, postVisit: Node => A1): Unit = {
+
+    preVisit(n)
+    if (!visit(p, n)) {
+      postVisit(n)
+      return
+    }
+
+    def recur(n0: Node) = topDownTraversal0(Some(n), n0)(preVisit, visit, postVisit)
+    val ret = n match {
       case SelectStmt(p, r, f, g, o, _, _) =>
         p.map(recur); r.map(_.map(recur)); f.map(recur); g.map(recur); o.map(recur)
       case ExprProj(e, _, _) => recur(e)
@@ -52,5 +64,7 @@ trait Traversals {
       case SqlOrderBy(k, _) => k.map(x => recur(x._1))
       case _ => 
     }
+    postVisit(n)
+    ret
   }
 }
