@@ -45,7 +45,7 @@ trait SqlExpr extends Node {
     val f = gatherFields
     if (f.isEmpty) return None
 
-    // check agg contexts all consistent:
+    // check no agg contexts
     if (!f.filter(_._2).isEmpty) return None
 
     // check all fields are not projection references

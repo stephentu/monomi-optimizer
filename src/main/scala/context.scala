@@ -14,7 +14,7 @@ case class ColumnSymbol(relation: String, column: String, ctx: Context) extends 
 case class ProjectionSymbol(name: String, ctx: Context) extends Symbol
 
 abstract trait ProjectionType
-case class NamedProjection(name: String, expr: SqlExpr) extends ProjectionType
+case class NamedProjection(name: String, expr: SqlExpr, pos: Int) extends ProjectionType
 case object WildcardProjection extends ProjectionType
 
 class Context(val parent: Either[Definitions, Context]) {
@@ -39,7 +39,7 @@ class Context(val parent: Either[Definitions, Context]) {
 
   private def lookupProjection0(name: String, allowWildcard: Boolean): Option[SqlExpr] = {
     projections.flatMap {
-      case NamedProjection(n0, expr) if n0 == name => Some(expr)
+      case NamedProjection(n0, expr, _) if n0 == name => Some(expr)
       case WildcardProjection if allowWildcard =>
         def lookupRelation(r: Relation): Option[SqlExpr] = r match {
           case TableRelation(t) =>
@@ -48,7 +48,7 @@ class Context(val parent: Either[Definitions, Context]) {
             })
           case SubqueryRelation(s) =>
             s.ctx.projections.flatMap {
-              case NamedProjection(n0, expr) if n0 == name => Some(expr)
+              case NamedProjection(n0, expr, _) if n0 == name => Some(expr)
                 
               case WildcardProjection =>
                 assert(allowWildcard)
@@ -85,7 +85,7 @@ class Context(val parent: Either[Definitions, Context]) {
         defns.lookup(t, name).map(tc => ColumnSymbol(topLevel, name, this)).toSeq
       case SubqueryRelation(s) =>
         s.ctx.projections.flatMap {
-          case NamedProjection(n0, expr) if n0 == name => 
+          case NamedProjection(n0, expr, _) if n0 == name => 
             Seq(ColumnSymbol(topLevel, name, this))
           case WildcardProjection =>
             s.ctx.lookupColumn0(None, name, inProjScope, Some(topLevel))

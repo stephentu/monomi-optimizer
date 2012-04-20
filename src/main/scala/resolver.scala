@@ -66,12 +66,12 @@ trait Resolver extends Transformers with Traversals {
         relations.map(_.foreach(processRelation))
 
         var seenWildcard = false
-        projections.foreach {
-          case ExprProj(f @ FieldIdent(qual, name, _, _), alias, _) =>
-            ctx.projections += NamedProjection(alias.getOrElse(name), f)
-          case ExprProj(expr, alias, _) => 
-            ctx.projections += NamedProjection(alias.getOrElse("$unknown$"), expr)
-          case StarProj(_) if !seenWildcard =>
+        projections.zipWithIndex.foreach {
+          case (ExprProj(f @ FieldIdent(qual, name, _, _), alias, _), idx) =>
+            ctx.projections += NamedProjection(alias.getOrElse(name), f, idx)
+          case (ExprProj(expr, alias, _), idx) => 
+            ctx.projections += NamedProjection(alias.getOrElse("$unknown$"), expr, idx)
+          case (StarProj(_), _) if !seenWildcard =>
             ctx.projections += WildcardProjection
             seenWildcard = true
           case _ =>
@@ -103,6 +103,22 @@ trait Resolver extends Transformers with Traversals {
         orderBy = o.map(o0 => visit(o0, true)))
     }
 
-    resolveFIs(n1)
+    val res = resolveFIs(n1)
+
+    def fixContextProjections(ss: SelectStmt): Unit = {
+      val x = ss.ctx.projections.map {
+        case n @ NamedProjection(_, _, pos) =>
+          n.copy(expr = ss.projections(pos).asInstanceOf[ExprProj].expr)
+        case e => e
+      }
+      ss.ctx.projections.clear
+      ss.ctx.projections ++= x
+    }
+
+    topDownTraversal(res)(wrapReturnTrue {
+      case ss: SelectStmt => fixContextProjections(ss)
+      case _ =>
+    })
+    res
   }
 }

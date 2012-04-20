@@ -23,13 +23,23 @@ trait Generator extends Traversals with Transformers {
     found
   }
 
+  private def resolveAliases(e: SqlExpr): SqlExpr = {
+    topDownTransformation(e) {
+      case FieldIdent(_, _, ProjectionSymbol(name, ctx), _) =>
+        val expr1 = ctx.lookupProjection(name).get
+        (Some(resolveAliases(expr1)), false)
+      case x => (None, true)
+    }.asInstanceOf[SqlExpr]
+  }
+
   // the return value is:
   // (relation name in e's ctx, global table name, expr out of the global table)
   private def findOnionableExpr(e: SqlExpr): Option[(String, String, SqlExpr)] = {
-    val r = e.getPrecomputableRelation
+    val ep = resolveAliases(e)
+    val r = ep.getPrecomputableRelation
     if (r.isDefined) {
       // canonicalize the expr
-      val e0 = topDownTransformation(e) {
+      val e0 = topDownTransformation(ep) {
         case FieldIdent(_, name, _, _) => (Some(FieldIdent(None, name)), false)
         case x => (Some(x.copyWithContext(null)), true)
       }.asInstanceOf[SqlExpr]
@@ -134,16 +144,19 @@ trait Generator extends Traversals with Transformers {
       def mkSqlExpr(mappings: Map[SqlProj, Int]): SqlExpr = {
         val pmap = projections.map(x => (x._1, x._2)).toMap
         val smap = subqueries.zipWithIndex.map { case ((s, p, _), i) => (s, (p, i)) }.toMap
-        topDownTransformation(expr) {
-          case s: Subselect =>
-            (Some(SubqueryPosition(smap(s)._2)), false)
 
-          case e: SqlExpr =>
-            pmap.get(e).map { p => (Some(TuplePosition(mappings(p))), false) }.getOrElse(keepGoing)
+        def testExpr(expr0: SqlExpr): Option[SqlExpr] = expr0 match {
+          case s: Subselect => Some(SubqueryPosition(smap(s)._2))
+          case e => pmap.get(e).map { p => TuplePosition(mappings(p)) }
+        }
 
-          case _ => keepGoing
+        def mkExpr(expr0: SqlExpr): SqlExpr = {
+          topDownTransformation(expr0) {
+            case e: SqlExpr => testExpr(e).map(x => (Some(x), false)).getOrElse(keepGoing)
+          }.asInstanceOf[SqlExpr]
+        }
 
-        }.asInstanceOf[SqlExpr]
+        testExpr(expr).getOrElse(mkExpr(resolveAliases(expr)))
       }
     }
 
@@ -176,10 +189,14 @@ trait Generator extends Traversals with Transformers {
     }
     case object FilterCtx extends RewriteContext
     case object GroupByKeyCtx extends RewriteContext
-    case object GroupByHavingCtx extends RewriteContext { override def aggsValid = true }
+    case object GroupByHavingCtx extends RewriteContext { 
+      override def aggsValid = true 
+    }
     case object OrderByKeyCtx extends RewriteContext
-    case class ProjCtx(o: Int) extends RewriteContext { override def aggsValid = true }
-    case class ProjUnaggCtx(o: Int) extends RewriteContext
+    case class ProjCtx(o: Int = Onions.ALL) extends RewriteContext { 
+      override def aggsValid = true 
+    }
+    case class ProjUnaggCtx(o: Int = Onions.ALL) extends RewriteContext
 
     // rewrite expr under rewriteCtx, breaking up the computation of expr into
     // a server side component and an (optional) client side computation. the
@@ -242,17 +259,19 @@ trait Generator extends Traversals with Transformers {
       val cannotAnswerExpr = (Some(IntLiteral(1)), false)
 
       def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, Int, Boolean)] = {
-        // filter out all fields
-        assert(e.canGatherFields)
-        val fields = e.gatherFields
-        def translateField(e: SqlExpr) = 
+
+        val fields = resolveAliases(e).gatherFields
+
+        def translateField(fi: FieldIdent) = {
           CollectionUtils.optOrEither2(
-            getSupportedExpr(e, Onions.DET),
-            getSupportedExpr(e, Onions.OPE))
+            getSupportedExpr(fi, Onions.DET),
+            getSupportedExpr(fi, Onions.OPE))
           .getOrElse(throw new Exception("should not happen")) match { 
             case Left(e) => (e, Onions.DET)
             case Right(e) => (e, Onions.OPE)
           }
+        }
+
         fields.map { 
           case (f, false) =>
             val (ft, o) = translateField(f)
@@ -547,17 +566,42 @@ trait Generator extends Traversals with Transformers {
     // order by
     cur = {
       def handleUnsupported(o: SqlOrderBy) = {
-        // TODO: general client side comp
-        newLocalOrderBy ++= o.keys.map { case (f, _) => 
-          CollectionUtils.optOrEither2(
-            getSupportedExpr(f, Onions.OPE),
-            getSupportedExpr(f, Onions.DET))
-          .getOrElse(throw new RuntimeException("TODO: currently cannot support non-field keys")) match {
-            case Left(fi) => 
-              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.OPE, false)), Seq.empty)
-            case Right(fi) =>
-              ClientComputation(f, Seq((f, ExprProj(fi, None), Onions.DET, false)), Seq.empty)
-          }
+        def getKeyInfoForExpr(f: SqlExpr) = {
+          getSupportedExpr(f, Onions.OPE).map(e => (f, e, Onions.OPE))
+          .orElse(getSupportedExpr(f, Onions.DET).map(e => (f, e, Onions.DET)))
+            .orElse(getSupportedExpr(f, Onions.HOM).map(e => (f, e, Onions.HOM)))
+        }
+        def mkClientCompFromKeyInfo(f: SqlExpr, fi: SqlExpr, o: Int) = {
+          ClientComputation(f, Seq((f, ExprProj(fi, None), o, false)), Seq.empty)
+        }
+        val keyInfo = o.keys.map { case (f, _) => getKeyInfoForExpr(f) }
+        if (keyInfo.flatten.size == keyInfo.size) {
+          // easy unsupported case- all the keys have some
+          // expr form which we can work with as a single field- thus, we don't
+          // need to call rewriteExprForServer(), since we want to optimize to
+          // prefer OPE over DET (rewriteExprForServer() prefers DET over OPE)
+          newLocalOrderBy ++= (
+            keyInfo.flatten.map { case (f, fi, o) => mkClientCompFromKeyInfo(f, fi, o) })
+        } else {
+          // more general case- 
+          val ctx = 
+            if (cur.groupBy.isDefined && !newLocalFilters.isEmpty) {
+              ProjUnaggCtx()
+            } else {
+              ProjCtx() 
+            }
+          newLocalOrderBy ++= (
+            o.keys.map { case (k, _) =>
+              getKeyInfoForExpr(k)
+                .map { case (f, fi, o) => mkClientCompFromKeyInfo(f, fi, o) }
+                .getOrElse {
+                  rewriteExprForServer(resolveAliases(k), ctx) match {
+                    case (_, _, Some(comp)) => comp
+                    case (fi, o, None) => mkClientCompFromKeyInfo(k, fi, o)
+                  }
+                }
+            }
+          )
         }
         None
       }
@@ -671,20 +715,25 @@ trait Generator extends Traversals with Transformers {
       }
 
     val stage3 = {
-      // TODO: an optimization- if all columns are OPE, then don't need to decrypt
-
-      // TODO: this is an oversimplification
       if (!newLocalOrderBy.isEmpty) {
+        //println(newLocalOrderBy)
         assert(newLocalOrderBy.size == stmt.orderBy.get.keys.size)
-        val pos = newLocalOrderBy.zip(localOrderByPosMaps).map {
-          case (comp, mapping) =>
-            assert(mapping.size == 1) // TODO: assume for now
-            assert(comp.projections.size == 1)
-            mapping.values.head
+        val needDecrypt = newLocalOrderBy.filter { 
+          case ClientComputation(expr, proj, sub) =>
+            (proj.size == 1 && proj.head._2 == Onions.OPE && 
+             proj.head._1 == expr && sub.isEmpty)
+        }.size == newLocalOrderBy.size
+        val decryptPos = localOrderByPosMaps.flatMap(_.values).toSeq
+        val orderPos = 
+          (finalProjs.size until finalProjs.size + stmt.orderBy.get.keys.size).toSeq
+        val orderTrfms = newLocalOrderBy.zip(localOrderByPosMaps).map {
+          case (comp, mapping) => Right(comp.mkSqlExpr(mapping))
         }
+        val allTrfms = (0 until finalProjs.size).map { i => Left(i) } ++ orderTrfms
         LocalOrderBy(
-          pos.zip(stmt.orderBy.get.keys).map { case (p, (_, t)) => (p, t) },
-          LocalDecrypt(pos, stage2))
+          orderPos.zip(stmt.orderBy.get.keys).map { case (p, (_, t)) => (p, t) },
+          LocalTransform(allTrfms, 
+            if (needDecrypt) LocalDecrypt(decryptPos, stage2) else stage2))
       } else {
         stage2
       }
