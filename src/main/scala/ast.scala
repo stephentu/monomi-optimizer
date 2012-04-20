@@ -41,7 +41,6 @@ trait SqlExpr extends Node {
   // return value is:
   // ( (table) relation name for this node's ctx, global table name )
   def getPrecomputableRelation: Option[(String, String)] = {
-    if (!canGatherFields) return None
     val f = gatherFields
     if (f.isEmpty) return None
 
@@ -80,9 +79,9 @@ trait SqlExpr extends Node {
     }
   }
 
-  def canGatherFields: Boolean
-
   // (col, true if aggregate context false otherwise)
+  // only gathers fields within this context (
+  // wont traverse into subselects )
   def gatherFields: Seq[(FieldIdent, Boolean)]
 }
 
@@ -93,7 +92,6 @@ trait Binop extends SqlExpr {
   val opStr: String
 
   override def isLiteral = lhs.isLiteral && rhs.isLiteral
-  def canGatherFields = lhs.canGatherFields && rhs.canGatherFields
   def gatherFields = lhs.gatherFields ++ rhs.gatherFields
 
   def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr): Binop
@@ -150,8 +148,6 @@ case class In(elem: SqlExpr, set: Seq[SqlExpr], negate: Boolean, ctx: Context = 
   def copyWithContext(c: Context) = copy(ctx = c)
   override def isLiteral =
     elem.isLiteral && set.filter(e => !e.isLiteral).isEmpty
-  def canGatherFields =
-    elem.canGatherFields && set.foldLeft(true)(_&&_.canGatherFields)
   def gatherFields =
     elem.gatherFields ++ set.flatMap(_.gatherFields)
   def sql = Seq(elem, "in", "(", set.map(_.sql).mkString(", "), ")") mkString " "
@@ -188,7 +184,6 @@ trait Unop extends SqlExpr {
   val expr: SqlExpr
   val opStr: String
   override def isLiteral = expr.isLiteral
-  def canGatherFields = expr.canGatherFields
   def gatherFields = expr.gatherFields
   def sql = Seq(opStr, "(", expr.sql, ")") mkString " "
 }
@@ -199,70 +194,59 @@ case class Not(expr: SqlExpr, ctx: Context = null) extends Unop {
 }
 case class Exists(select: Subselect, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = false
-  def gatherFields = throw new RuntimeException("not possible")
+  def gatherFields = Seq.empty
   def sql = Seq("exists", "(", select.sql, ")") mkString " "
 }
 
 case class FieldIdent(qualifier: Option[String], name: String, symbol: Symbol = null, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(symbol = null, ctx = c)
-  def canGatherFields = true
   def gatherFields = Seq((this, false))
   def sql = Seq(qualifier, Some(name)).flatten.mkString(".")
 }
 case class Subselect(subquery: SelectStmt, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = false
-  def gatherFields = throw new RuntimeException("not possible")
+  def gatherFields = Seq.empty
   def sql = "(" + subquery.sql + ")"
 }
 
 trait SqlAgg extends SqlExpr
 case class CountStar(ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = true
   def gatherFields = Seq.empty
   def sql = "count(*)"
 }
 case class CountExpr(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = expr.canGatherFields
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = Seq(Some("count("), if (distinct) Some("distinct ") else None, Some(expr.sql), Some(")")).flatten.mkString("")
 }
 case class Sum(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = expr.canGatherFields
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = Seq(Some("sum("), if (distinct) Some("distinct ") else None, Some(expr.sql), Some(")")).flatten.mkString("")
 }
 case class Avg(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = expr.canGatherFields
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = Seq(Some("avg("), if (distinct) Some("distinct ") else None, Some(expr.sql), Some(")")).flatten.mkString("")
 }
 case class Min(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = expr.canGatherFields
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = "min(" + expr.sql + ")"
 }
 case class Max(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = expr.canGatherFields
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = "max(" + expr.sql + ")"
 }
 case class GroupConcat(expr: SqlExpr, sep: String, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = expr.canGatherFields
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sql = Seq("group_concat(", Seq(expr.sql, _q(sep)).mkString(", "), ")").mkString("")
 }
 case class AggCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = args.foldLeft(true)(_&&_.canGatherFields)
   def gatherFields = args.flatMap(_.gatherFields)
   def sql = Seq(name, "(", args.map(_.sql).mkString(", "), ")").mkString("")
 }
@@ -271,7 +255,6 @@ trait SqlFunction extends SqlExpr {
   val name: String
   val args: Seq[SqlExpr]
   override def isLiteral = args.foldLeft(true)(_ && _.isLiteral)
-  def canGatherFields = args.foldLeft(true)(_ && _.canGatherFields)
   def gatherFields = args.flatMap(_.gatherFields)
   def sql = Seq(name, "(", args.map(_.sql) mkString ", ", ")") mkString ""
 }
@@ -306,9 +289,6 @@ case class CaseExpr(expr: SqlExpr, cases: Seq[CaseExprCase], default: Option[Sql
   override def isLiteral =
     expr.isLiteral &&
     cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty
-  def canGatherFields =
-    expr.canGatherFields &&
-    cases.filter(x => !x.cond.canGatherFields || !x.expr.canGatherFields).isEmpty
   def gatherFields =
     expr.gatherFields ++
     cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields)
@@ -318,8 +298,6 @@ case class CaseWhenExpr(cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx:
   def copyWithContext(c: Context) = copy(ctx = c)
   override def isLiteral =
     cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty
-  def canGatherFields =
-    cases.filter(x => !x.cond.canGatherFields || !x.expr.canGatherFields).isEmpty
   def gatherFields =
     cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields)
   def sql = Seq(Some("case"), Some(cases.map(_.sql) mkString " "), default.map(_.sql), Some("end")).flatten.mkString(" ")
@@ -336,7 +314,6 @@ case class UnaryMinus(expr: SqlExpr, ctx: Context = null) extends Unop {
 
 trait LiteralExpr extends SqlExpr {
   override def isLiteral = true
-  def canGatherFields = true
   def gatherFields = Seq.empty
 }
 case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
@@ -401,7 +378,6 @@ case class SqlOrderBy(keys: Seq[(SqlExpr, OrderType)], ctx: Context = null) exte
 
 case class TuplePosition(pos: Int, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = false
   def gatherFields = throw new RuntimeException("error")
   def sql = "pos$" + pos
 }
@@ -414,14 +390,12 @@ case class DependentFieldPlaceholder(placeholder: FieldIdent, ctx: Context = nul
 
 case class SubqueryPosition(pos: Int, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = false
   def gatherFields = throw new RuntimeException("error")
   def sql = "subquery$" + pos
 }
 
 case class ExistsSubqueryPosition(pos: Int, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def canGatherFields = false
   def gatherFields = throw new RuntimeException("error")
   def sql = "exists(subquery$" + pos + ")"
 }

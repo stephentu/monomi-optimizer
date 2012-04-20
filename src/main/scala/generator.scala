@@ -1,4 +1,4 @@
-import scala.collection.mutable.ArrayBuffer
+import scala.collection.mutable.{ ArrayBuffer, HashMap }
 
 trait Generator extends Traversals with Transformers {
 
@@ -6,6 +6,13 @@ trait Generator extends Traversals with Transformers {
     topDownTraversal(start) {
       case e if e.ctx == ctx => f(e)
       case _ => false
+    }
+  }
+
+  private def topDownTransformContext(start: Node, ctx: Context)(f: Node => (Option[Node], Boolean)) = {
+    topDownTransformation(start) {
+      case e if e.ctx == ctx => f(e)
+      case _ => (None, false)
     }
   }
 
@@ -30,6 +37,23 @@ trait Generator extends Traversals with Transformers {
         (Some(resolveAliases(expr1)), false)
       case x => (None, true)
     }.asInstanceOf[SqlExpr]
+  }
+
+  private def splitTopLevelConjunctions(e: SqlExpr): Seq[SqlExpr] = {
+    def split(e: SqlExpr, buffer: ArrayBuffer[SqlExpr]): ArrayBuffer[SqlExpr] = {
+      e match {
+        case And(lhs, rhs, _) =>
+          split(lhs, buffer)
+          split(rhs, buffer)
+        case _ => buffer += e
+      }
+      buffer
+    }
+    split(e, new ArrayBuffer[SqlExpr]).toSeq
+  }
+
+  private def foldTopLevelConjunctions(s: Seq[SqlExpr]): SqlExpr = {
+    s.reduceLeft( (acc: SqlExpr, elem: SqlExpr) => And(acc, elem) )
   }
 
   // the return value is:
@@ -245,6 +269,313 @@ trait Generator extends Traversals with Transformers {
     def rewriteExprForServer(expr: SqlExpr, rewriteCtx: RewriteContext):
       (SqlExpr, Int, Option[ClientComputation]) = {
 
+      def mkOnionRetVal(o: Int) = rewriteCtx match {
+        case FilterCtx | GroupByHavingCtx => 0
+        case ProjCtx(_) | ProjUnaggCtx(_) => o
+        case _ => throw new RuntimeException("TODO: impl")
+      }
+
+      // this is ok, b/c we remove units of conjunctions
+      val cannotAnswerExpr = (Some(IntLiteral(1)), false)
+
+      def doTransform(e: SqlExpr): (SqlExpr, Int, Option[ClientComputation]) = {
+        val onionRetVal = new SetOnce[Int] // TODO: FIX THIS HACK
+        var _exprValid = true
+        def bailOut = {
+          _exprValid = false
+          cannotAnswerExpr
+        }
+        val newExpr = topDownTransformation(e) {
+          case Or(_, _, _) =>
+            onionRetVal.set(mkOnionRetVal(0))
+            keepGoing
+          case And(_, _, _) =>
+            onionRetVal.set(mkOnionRetVal(0))
+            keepGoing
+
+          case eq: EqualityLike =>
+            onionRetVal.set(mkOnionRetVal(0))
+            def handleOneLiteral(lhs: SqlExpr, rhs: SqlExpr) = {
+              assert(!lhs.isLiteral)
+              assert(rhs.isLiteral)
+              lhs match {
+                case ss @ Subselect(q, _) =>
+                  val subPlans =
+                    Seq(generatePlanFromOnionSet0(q, onionSet, SingleEncProj(Onions.DET)),
+                        generatePlanFromOnionSet0(q, onionSet, SingleEncProj(Onions.OPE)))
+                  val sp0 = subPlans.map(x => if (x.isInstanceOf[RemoteSql]) Some(x) else None)
+                  CollectionUtils.optOr2(sp0(0), sp0(1)).map {
+                    case RemoteSql(qp, _) =>
+                      (Some(eq.copyWithChildren(Subselect(qp), NullLiteral())), false)
+                  }.getOrElse(bailOut)
+                case _ =>
+                  CollectionUtils.optOr2(
+                    getSupportedExpr(lhs, Onions.DET),
+                    getSupportedExpr(lhs, Onions.OPE))
+                  .map(fi => (Some(eq.copyWithChildren(fi, NullLiteral())), false))
+                  .getOrElse(bailOut)
+              }
+            }
+            def handleNoLiteral(lhs: SqlExpr, rhs: SqlExpr) = {
+              assert(!lhs.isLiteral)
+              assert(!rhs.isLiteral)
+
+              def handleOne(ss: Subselect, expr: SqlExpr) = {
+                assert(!expr.isInstanceOf[Subselect])
+
+                val e0 = getSupportedExpr(expr, Onions.DET)
+                val e1 = getSupportedExpr(expr, Onions.OPE)
+
+                val p0 =
+                  e0.map(_ =>
+                    generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.DET)))
+
+                val p1 =
+                  e1.map(_ =>
+                    generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.OPE)))
+
+                p0 match {
+                  case Some(RemoteSql(q0, _)) =>
+                    (Some(eq.copyWithChildren(e0.get, Subselect(q0))), false)
+                  case _ =>
+                    p1 match {
+                      case Some(RemoteSql(q1, _)) =>
+                        (Some(eq.copyWithChildren(e1.get, Subselect(q1))), false)
+                      case _ => bailOut
+                    }
+                }
+              }
+
+              (lhs, rhs) match {
+                case (ss0 @ Subselect(q0, _), ss1 @ Subselect(q1, _)) =>
+                  // try both DETs or both OPEs
+                  val spDETs =
+                    Seq(generatePlanFromOnionSet0(q0, onionSet, SingleEncProj(Onions.DET)),
+                        generatePlanFromOnionSet0(q1, onionSet, SingleEncProj(Onions.DET)))
+                  val spOPEs =
+                    Seq(generatePlanFromOnionSet0(q0, onionSet, SingleEncProj(Onions.OPE)),
+                        generatePlanFromOnionSet0(q1, onionSet, SingleEncProj(Onions.OPE)))
+
+                  // try spDETs first, then spOPEs
+                  (spDETs(0), spDETs(1)) match {
+                    case (RemoteSql(q0p, _), RemoteSql(q1p, _)) =>
+                      (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
+                    case _ =>
+                      (spOPEs(0), spOPEs(1)) match {
+                        case (RemoteSql(q0p, _), RemoteSql(q1p, _)) =>
+                          (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
+                        case _ => bailOut
+                      }
+                  }
+                case (ss @ Subselect(_, _), _) => handleOne(ss, rhs)
+                case (_, ss @ Subselect(_, _)) => handleOne(ss, lhs)
+                case _ =>
+                  CollectionUtils.optOr2(
+                    CollectionUtils.opt2(
+                      getSupportedExpr(lhs, Onions.DET),
+                      getSupportedExpr(rhs, Onions.DET)),
+                    CollectionUtils.opt2(
+                      getSupportedExpr(lhs, Onions.OPE),
+                      getSupportedExpr(rhs, Onions.OPE)))
+                  .map {
+                    case (lfi, rfi) =>
+                      (Some(eq.copyWithChildren(lfi, rfi)), false)
+                  }.getOrElse(bailOut)
+              }
+            }
+
+            (eq.lhs, eq.rhs) match {
+              case (lhs, rhs) if rhs.isLiteral => handleOneLiteral(lhs, rhs)
+              case (lhs, rhs) if lhs.isLiteral => handleOneLiteral(rhs, lhs)
+              case (lhs, rhs) => handleNoLiteral(lhs, rhs)
+            }
+
+          // TODO: handle subqueries
+          case ieq: InequalityLike =>
+            onionRetVal.set(mkOnionRetVal(0))
+            (ieq.lhs, ieq.rhs) match {
+              case (lhs, rhs) if rhs.isLiteral =>
+                getSupportedExpr(lhs, Onions.OPE).map(fi => (Some(ieq.copyWithChildren(fi, NullLiteral())), false)).getOrElse(bailOut)
+              case (lhs, rhs) if lhs.isLiteral =>
+                getSupportedExpr(rhs, Onions.OPE).map(fi => (Some(ieq.copyWithChildren(NullLiteral(), fi)), false)).getOrElse(bailOut)
+              case (lhs, rhs) =>
+                CollectionUtils.opt2(
+                  getSupportedExpr(lhs, Onions.OPE),
+                  getSupportedExpr(rhs, Onions.OPE))
+                .map {
+                  case (lfi, rfi) =>
+                    (Some(ieq.copyWithChildren(lfi, rfi)), false)
+                }.getOrElse(bailOut)
+            }
+
+          // TODO: handle subqueries
+          case like @ Like(lhs, rhs, n, _) =>
+            onionRetVal.set(mkOnionRetVal(0))
+            (lhs, rhs) match {
+              case (lhs, rhs) if rhs.isLiteral =>
+                getSupportedExpr(lhs, Onions.SWP).map(fi => (Some(FunctionCall("searchSWP", Seq(fi, NullLiteral(), NullLiteral()))), false)).getOrElse(bailOut)
+              case (lhs, rhs) if lhs.isLiteral =>
+                getSupportedExpr(rhs, Onions.SWP).map(fi => (Some(FunctionCall("searchSWP", Seq(fi, NullLiteral(), NullLiteral()))), false)).getOrElse(bailOut)
+              case (lhs, rhs) =>
+                // TODO: can we handle this?
+                bailOut
+            }
+
+          case ex @ Exists(ss, _) =>
+            val plan = generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveCardinality)
+            plan match {
+              case RemoteSql(q, _) =>
+                (Some(ex.copy(select = Subselect(q))), false)
+              case _ => bailOut
+            }
+
+          case cs @ CountStar(_) if rewriteCtx.aggsValid =>
+            onionRetVal.set(mkOnionRetVal(0))
+            answerWithoutModification(cs)
+
+          case m @ Min(f, _) if rewriteCtx.aggsValid =>
+            onionRetVal.set(mkOnionRetVal(Onions.OPE))
+            getSupportedExpr(f, Onions.OPE).map(fi => (Some(Min(fi)), false)).getOrElse(bailOut)
+
+          case m @ Max(f, _) if rewriteCtx.aggsValid =>
+            onionRetVal.set(mkOnionRetVal(Onions.OPE))
+            getSupportedExpr(f, Onions.OPE).map(fi => (Some(Max(fi)), false)).getOrElse(bailOut)
+
+          case s @ Sum(f, _, _) if rewriteCtx.aggsValid =>
+            onionRetVal.set(mkOnionRetVal(Onions.HOM))
+            getSupportedExpr(f, Onions.HOM).map(fi => (Some(AggCall("hom_add", Seq(fi))), false)).getOrElse(bailOut)
+
+          case e: SqlExpr =>
+
+            def handleProj(onion: Int) = {
+              val d = getSupportedExpr(e, Onions.DET)
+              val o = getSupportedExpr(e, Onions.OPE)
+              // try to honor the given onions first
+              if ((onion & Onions.DET) != 0 && d.isDefined) {
+                onionRetVal.set(mkOnionRetVal(Onions.DET))
+                (Some(d.get), false)
+              } else if ((onion & Onions.OPE) != 0 && o.isDefined) {
+                onionRetVal.set(mkOnionRetVal(Onions.OPE))
+                (Some(o.get), false)
+              } else if (d.isDefined) {
+                onionRetVal.set(mkOnionRetVal(Onions.DET))
+                (Some(d.get), false)
+              } else if (o.isDefined) {
+                onionRetVal.set(mkOnionRetVal(Onions.OPE))
+                (Some(o.get), false)
+              } else {
+                bailOut
+              }
+            }
+
+            rewriteCtx match {
+              case FilterCtx | GroupByHavingCtx =>
+                throw new RuntimeException("TODO: need to evaluate in boolean context")
+              case ProjCtx(o) => handleProj(o)
+              case ProjUnaggCtx(o) => handleProj(o)
+              case _ => throw new RuntimeException("TODO: impl")
+            }
+
+          case e => throw new Exception("should only have exprs under expr clause")
+        }.asInstanceOf[SqlExpr]
+
+        if (_exprValid) {
+          // nice, easy case
+          (newExpr, onionRetVal.get.getOrElse(0), None)
+        } else {
+          // ugly, messy case- in this case, we have to project enough clauses
+          // to compute the entirety of e locally. we can still make optimizations,
+          // however, like replacing subexpressions within the expression with
+          // more optimized variants
+
+          // take care of all subselects
+          val subselects = new ArrayBuffer[(Subselect, PlanNode, EncContext)]
+          topDownTraversalWithParent(e) {
+            case (Some(_: Exists), s @ Subselect(ss, _)) =>
+              val p = generatePlanFromOnionSet0(ss, onionSet, PreserveCardinality)
+              subselects += ((s, p, PreserveCardinality))
+              false
+            case (_, s @ Subselect(ss, _)) =>
+              val p = generatePlanFromOnionSet0(ss, onionSet, PreserveOriginal)
+              subselects += ((s, p, PreserveOriginal))
+              false
+            case _ => true
+          }
+
+          // return value is:
+          // ( expr to replace in e -> ( replacement expr, seq( projections needed ) ) )
+          def mkOptimizations(e: SqlExpr): Map[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, Int, Boolean)])] = {
+            val ret = new HashMap[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, Int, Boolean)])]
+            topDownTraverseContext(e, e.ctx) {
+              case avg @ Avg(f, _, _) if rewriteCtx.aggsValid =>
+                getSupportedExpr(f, Onions.HOM).map(fi => {
+                  val id0 = _generator.uniqueId()
+                  val id1 = _generator.uniqueId()
+
+                  val expr0 = FieldIdent(None, id0)
+                  val expr1 = FieldIdent(None, id1)
+
+                  val projs = Seq(
+                    (expr0, ExprProj(AggCall("hom_add", Seq(fi)), None), Onions.HOM, false),
+                    (expr1, ExprProj(CountStar(), None), 0, false))
+
+                  ret += (avg -> (Div(expr0, expr1), projs))
+
+                  false // stop
+                }).getOrElse(true) // keep traversing
+
+              case _ => true // keep traversing
+            }
+            ret.toMap
+          }
+
+          def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, Int, Boolean)] = {
+
+            val fields = resolveAliases(e).gatherFields
+
+            def translateField(fi: FieldIdent) = {
+              CollectionUtils.optOrEither2(
+                getSupportedExpr(fi, Onions.DET),
+                getSupportedExpr(fi, Onions.OPE))
+              .getOrElse(throw new Exception("should not happen")) match {
+                case Left(e) => (e, Onions.DET)
+                case Right(e) => (e, Onions.OPE)
+              }
+            }
+
+            fields.map {
+              case (f, false) =>
+                val (ft, o) = translateField(f)
+                (f, ExprProj(ft, Some(_generator.uniqueId())), o, false)
+              case (f, true) =>
+                val (ft, o) = translateField(f)
+                (f, ExprProj(GroupConcat(ft, ","), Some(_generator.uniqueId())), o, true)
+            }
+          }
+
+          val opts = mkOptimizations(e)
+
+          val e0ForProj = topDownTransformContext(e, e.ctx) {
+            // replace w/ something dumb, so we can gather fields w/o worrying about it
+            case e: SqlExpr if opts.contains(e) => (Some(IntLiteral(1)), false)
+            case _ => (None, true)
+          }.asInstanceOf[SqlExpr]
+
+          val e0 = topDownTransformContext(e, e.ctx) {
+            case e: SqlExpr if opts.contains(e) => (Some(opts(e)._1), false)
+            case _ => (None, true)
+
+          }.asInstanceOf[SqlExpr]
+
+          (cannotAnswerExpr._1.get,
+           0,
+           Some(ClientComputation(
+             e0,
+             opts.values.flatMap(_._2).toSeq ++ mkProjections(e0ForProj),
+             subselects.toSeq)))
+        }
+      }
+
       var conjunctions: Option[ClientComputation] = None
 
       def mergeConjunctions(that: ClientComputation) = {
@@ -254,292 +585,14 @@ trait Generator extends Traversals with Transformers {
         }
       }
 
-      def mkOnionRetVal(o: Int) = rewriteCtx match {
-        case FilterCtx | GroupByHavingCtx => 0
-        case ProjCtx(_) | ProjUnaggCtx(_) => o
-        case _ => throw new RuntimeException("TODO: impl")
-      }
+      val exprs = splitTopLevelConjunctions(expr).map(doTransform)
+      assert(!exprs.isEmpty)
 
-      val onionRetVal = new SetOnce[Int] // TODO: FIX THIS HACK
+      val serverExpr = foldTopLevelConjunctions(exprs.map(_._1))
+      val serverOnion = if (exprs.size == 1) exprs.head._2 else 0
+      exprs.map(_._3).foreach(_.foreach(mergeConjunctions))
 
-      val cannotAnswerExpr = (Some(IntLiteral(1)), false)
-
-      def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, Int, Boolean)] = {
-
-        val fields = resolveAliases(e).gatherFields
-
-        def translateField(fi: FieldIdent) = {
-          CollectionUtils.optOrEither2(
-            getSupportedExpr(fi, Onions.DET),
-            getSupportedExpr(fi, Onions.OPE))
-          .getOrElse(throw new Exception("should not happen")) match {
-            case Left(e) => (e, Onions.DET)
-            case Right(e) => (e, Onions.OPE)
-          }
-        }
-
-        fields.map {
-          case (f, false) =>
-            val (ft, o) = translateField(f)
-            (f, ExprProj(ft, Some(_generator.uniqueId())), o, false)
-          case (f, true) =>
-            val (ft, o) = translateField(f)
-            (f, ExprProj(GroupConcat(ft, ","), Some(_generator.uniqueId())), o, true)
-        }
-      }
-
-      def cannotAnswer(e: SqlExpr): (Option[Node], Boolean) = {
-        // TODO: rewrite query deal w/ the projections
-        mergeConjunctions(ClientComputation(e, mkProjections(e), Seq.empty))
-        cannotAnswerExpr
-      }
-
-      val newExpr = topDownTransformation(expr) {
-
-        case Or(_, _, _) =>
-          throw new Exception("TODO: don't assume clause is only conjuctive")
-        case And(_, _, _) =>
-          onionRetVal.set(mkOnionRetVal(0))
-          keepGoing
-
-        case eq: EqualityLike =>
-          onionRetVal.set(mkOnionRetVal(0))
-          def handleOneLiteral(lhs: SqlExpr, rhs: SqlExpr) = {
-            assert(!lhs.isLiteral)
-            assert(rhs.isLiteral)
-            lhs match {
-              case ss @ Subselect(q, _) =>
-                val subPlans =
-                  Seq(generatePlanFromOnionSet0(q, onionSet, SingleEncProj(Onions.DET)),
-                      generatePlanFromOnionSet0(q, onionSet, SingleEncProj(Onions.OPE)))
-                val sp0 = subPlans.map(x => if (x.isInstanceOf[RemoteSql]) Some(x) else None)
-                CollectionUtils.optOr2(sp0(0), sp0(1)).map {
-                  case RemoteSql(qp, _) =>
-                    (Some(eq.copyWithChildren(Subselect(qp), NullLiteral())), false)
-                }.getOrElse {
-                  mergeConjunctions(
-                    ClientComputation(
-                      eq,
-                      Seq.empty,
-                      Seq((ss, generatePlanFromOnionSet0(q, onionSet, PreserveOriginal), PreserveOriginal))))
-                  cannotAnswerExpr
-                }
-              case _ =>
-                CollectionUtils.optOr2(
-                  getSupportedExpr(lhs, Onions.DET),
-                  getSupportedExpr(lhs, Onions.OPE))
-                .map(fi => (Some(eq.copyWithChildren(fi, NullLiteral())), false))
-                .getOrElse(cannotAnswer(eq))
-            }
-          }
-          def handleNoLiteral(lhs: SqlExpr, rhs: SqlExpr) = {
-            assert(!lhs.isLiteral)
-            assert(!rhs.isLiteral)
-
-            def handleOne(ss: Subselect, expr: SqlExpr) = {
-              assert(!expr.isInstanceOf[Subselect])
-
-              val e0 = getSupportedExpr(expr, Onions.DET)
-              val e1 = getSupportedExpr(expr, Onions.OPE)
-
-              val p0 =
-                e0.map(_ =>
-                  generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.DET)))
-
-              val p1 =
-                e1.map(_ =>
-                  generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.OPE)))
-
-              //println("p1 = " + p1)
-
-              p0 match {
-                case Some(RemoteSql(q0, _)) =>
-                  (Some(eq.copyWithChildren(e0.get, Subselect(q0))), false)
-                case _ =>
-                  p1 match {
-                    case Some(RemoteSql(q1, _)) =>
-                      (Some(eq.copyWithChildren(e1.get, Subselect(q1))), false)
-                    case _ =>
-                      mergeConjunctions(
-                        ClientComputation(
-                          eq,
-                          mkProjections(expr),
-                          Seq((ss, generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveOriginal), PreserveOriginal))))
-                      cannotAnswerExpr
-                  }
-              }
-            }
-
-            (lhs, rhs) match {
-              case (ss0 @ Subselect(q0, _), ss1 @ Subselect(q1, _)) =>
-                // try both DETs or both OPEs
-                val spDETs =
-                  Seq(generatePlanFromOnionSet0(q0, onionSet, SingleEncProj(Onions.DET)),
-                      generatePlanFromOnionSet0(q1, onionSet, SingleEncProj(Onions.DET)))
-                val spOPEs =
-                  Seq(generatePlanFromOnionSet0(q0, onionSet, SingleEncProj(Onions.OPE)),
-                      generatePlanFromOnionSet0(q1, onionSet, SingleEncProj(Onions.OPE)))
-
-                // try spDETs first, then spOPEs
-                (spDETs(0), spDETs(1)) match {
-                  case (RemoteSql(q0p, _), RemoteSql(q1p, _)) =>
-                    (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
-                  case _ =>
-                    (spOPEs(0), spOPEs(1)) match {
-                      case (RemoteSql(q0p, _), RemoteSql(q1p, _)) =>
-                        (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
-                      case _ =>
-                        mergeConjunctions(
-                          ClientComputation(
-                            eq,
-                            Seq.empty,
-                            Seq(
-                              (ss0, generatePlanFromOnionSet0(q0, onionSet, PreserveOriginal), PreserveOriginal),
-                              (ss1, generatePlanFromOnionSet0(q1, onionSet, PreserveOriginal), PreserveOriginal))))
-                        cannotAnswerExpr
-                    }
-                }
-              case (ss @ Subselect(_, _), _) => handleOne(ss, rhs)
-              case (_, ss @ Subselect(_, _)) => handleOne(ss, lhs)
-              case _ =>
-                CollectionUtils.optOr2(
-                  CollectionUtils.opt2(
-                    getSupportedExpr(lhs, Onions.DET),
-                    getSupportedExpr(rhs, Onions.DET)),
-                  CollectionUtils.opt2(
-                    getSupportedExpr(lhs, Onions.OPE),
-                    getSupportedExpr(rhs, Onions.OPE)))
-                .map {
-                  case (lfi, rfi) =>
-                    (Some(eq.copyWithChildren(lfi, rfi)), false)
-                }.getOrElse(cannotAnswer(eq))
-            }
-          }
-
-          (eq.lhs, eq.rhs) match {
-            case (lhs, rhs) if rhs.isLiteral => handleOneLiteral(lhs, rhs)
-            case (lhs, rhs) if lhs.isLiteral => handleOneLiteral(rhs, lhs)
-            case (lhs, rhs) => handleNoLiteral(lhs, rhs)
-          }
-
-        // TODO: handle subqueries
-        case ieq: InequalityLike =>
-          onionRetVal.set(mkOnionRetVal(0))
-          (ieq.lhs, ieq.rhs) match {
-            case (lhs, rhs) if rhs.isLiteral =>
-              getSupportedExpr(lhs, Onions.OPE).map(fi => (Some(ieq.copyWithChildren(fi, NullLiteral())), false)).getOrElse(cannotAnswer(ieq))
-            case (lhs, rhs) if lhs.isLiteral =>
-              getSupportedExpr(rhs, Onions.OPE).map(fi => (Some(ieq.copyWithChildren(NullLiteral(), fi)), false)).getOrElse(cannotAnswer(ieq))
-            case (lhs, rhs) =>
-              CollectionUtils.opt2(
-                getSupportedExpr(lhs, Onions.OPE),
-                getSupportedExpr(rhs, Onions.OPE))
-              .map {
-                case (lfi, rfi) =>
-                  (Some(ieq.copyWithChildren(lfi, rfi)), false)
-              }.getOrElse(cannotAnswer(ieq))
-          }
-
-        // TODO: handle subqueries
-        case like @ Like(lhs, rhs, n, _) =>
-          onionRetVal.set(mkOnionRetVal(0))
-          (lhs, rhs) match {
-            case (lhs, rhs) if rhs.isLiteral =>
-              getSupportedExpr(lhs, Onions.SWP).map(fi => (Some(FunctionCall("searchSWP", Seq(fi, NullLiteral(), NullLiteral()))), false)).getOrElse(cannotAnswer(like))
-            case (lhs, rhs) if lhs.isLiteral =>
-              getSupportedExpr(rhs, Onions.SWP).map(fi => (Some(FunctionCall("searchSWP", Seq(fi, NullLiteral(), NullLiteral()))), false)).getOrElse(cannotAnswer(like))
-            case (lhs, rhs) =>
-              // TODO: can we handle this?
-              cannotAnswer(like)
-          }
-
-        case ex @ Exists(ss, _) =>
-          val plan = generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveCardinality)
-          plan match {
-            case RemoteSql(q, _) =>
-              (Some(ex.copy(select = Subselect(q))), false)
-
-            case _ =>
-              mergeConjunctions(
-                ClientComputation(
-                  ex,
-                  Seq.empty,
-                  Seq((ss, plan, PreserveCardinality))))
-              cannotAnswerExpr
-          }
-
-        case cs @ CountStar(_) if rewriteCtx.aggsValid =>
-          onionRetVal.set(mkOnionRetVal(0))
-          answerWithoutModification(cs)
-
-        case m @ Min(f, _) if rewriteCtx.aggsValid =>
-          onionRetVal.set(mkOnionRetVal(Onions.OPE))
-          getSupportedExpr(f, Onions.OPE).map(fi => (Some(Min(fi)), false)).getOrElse(cannotAnswer(m))
-
-        case m @ Max(f, _) if rewriteCtx.aggsValid =>
-          onionRetVal.set(mkOnionRetVal(Onions.OPE))
-          getSupportedExpr(f, Onions.OPE).map(fi => (Some(Max(fi)), false)).getOrElse(cannotAnswer(m))
-
-        case s @ Sum(f, _, _) if rewriteCtx.aggsValid =>
-          onionRetVal.set(mkOnionRetVal(Onions.HOM))
-          getSupportedExpr(f, Onions.HOM).map(fi => (Some(AggCall("hom_add", Seq(fi))), false)).getOrElse(cannotAnswer(s))
-
-        case avg @ Avg(f, _, _) if rewriteCtx.aggsValid =>
-          onionRetVal.set(mkOnionRetVal(0))
-          getSupportedExpr(f, Onions.HOM).map(fi => {
-            val id0 = _generator.uniqueId()
-            val id1 = _generator.uniqueId()
-
-            val expr0 = FieldIdent(None, id0)
-            val expr1 = FieldIdent(None, id1)
-
-            val projs = Seq(
-              (expr0, ExprProj(AggCall("hom_add", Seq(fi)), None), Onions.HOM, false),
-              (expr1, ExprProj(CountStar(), None), 0, false))
-
-            mergeConjunctions(
-              ClientComputation(
-                Div(expr0, expr1),
-                projs,
-                Seq.empty))
-            cannotAnswerExpr
-          }).getOrElse(cannotAnswer(avg))
-
-        case e: SqlExpr =>
-
-          def handleProj(onion: Int) = {
-            val d = getSupportedExpr(e, Onions.DET)
-            val o = getSupportedExpr(e, Onions.OPE)
-            // try to honor the given onions first
-            if ((onion & Onions.DET) != 0 && d.isDefined) {
-              onionRetVal.set(mkOnionRetVal(Onions.DET))
-              (Some(d.get), false)
-            } else if ((onion & Onions.OPE) != 0 && o.isDefined) {
-              onionRetVal.set(mkOnionRetVal(Onions.OPE))
-              (Some(o.get), false)
-            } else if (d.isDefined) {
-              onionRetVal.set(mkOnionRetVal(Onions.DET))
-              (Some(d.get), false)
-            } else if (o.isDefined) {
-              onionRetVal.set(mkOnionRetVal(Onions.OPE))
-              (Some(o.get), false)
-            } else {
-              cannotAnswer(e)
-            }
-          }
-
-          rewriteCtx match {
-            case FilterCtx | GroupByHavingCtx =>
-              throw new RuntimeException("TODO: need to evaluate in boolean context")
-            case ProjCtx(o) => handleProj(o)
-            case ProjUnaggCtx(o) => handleProj(o)
-            case _ => throw new RuntimeException("TODO: impl")
-          }
-
-        case e => throw new Exception("should only have exprs under expr clause")
-      }.asInstanceOf[SqlExpr]
-
-      (newExpr, onionRetVal.get.getOrElse(0), conjunctions)
+      (serverExpr, serverOnion, conjunctions)
     }
 
     // filters
@@ -713,7 +766,7 @@ trait Generator extends Traversals with Transformers {
       val s = m.flatMap { pos =>
         if (td(pos)._1.isDefined) Some(pos) else None
       }.toSeq
-      LocalDecrypt(s, p)
+      if (s.isEmpty) p else LocalDecrypt(s, p)
     }
 
     def wrapDecryptionNodeMap(p: PlanNode, m: Map[SqlProj, Int]): PlanNode =
@@ -739,24 +792,31 @@ trait Generator extends Traversals with Transformers {
 
     val stage3 = {
       if (!newLocalOrderBy.isEmpty) {
-        //println(newLocalOrderBy)
         assert(newLocalOrderBy.size == stmt.orderBy.get.keys.size)
-        val skipDecrypt = newLocalOrderBy.filter {
-          case ClientComputation(expr, proj, sub) =>
-            (proj.size == 1 && proj.head._2 == Onions.OPE &&
+        assert(newLocalOrderBy.size == localOrderByPosMaps.size)
+
+        val skipDecryptPos = newLocalOrderBy.map {
+          case cc @ ClientComputation(expr, proj, sub) =>
+            (proj.size == 1 && proj.head._3 == Onions.OPE &&
              proj.head._1 == expr && sub.isEmpty)
-        }.size == newLocalOrderBy.size
-        val decryptPos = localOrderByPosMaps.flatMap(_.values).toSeq
+        }
+
+        val decryptPos = localOrderByPosMaps.zip(skipDecryptPos).flatMap {
+          case (m, false) => m.values.toSeq
+          case (_, true) => Seq.empty
+        }
+
         val orderPos =
           (finalProjs.size until finalProjs.size + stmt.orderBy.get.keys.size).toSeq
         val orderTrfms = newLocalOrderBy.zip(localOrderByPosMaps).map {
           case (comp, mapping) => Right(comp.mkSqlExpr(mapping))
         }
+
         val allTrfms = (0 until finalProjs.size).map { i => Left(i) } ++ orderTrfms
         LocalOrderBy(
           orderPos.zip(stmt.orderBy.get.keys).map { case (p, (_, t)) => (p, t) },
           LocalTransform(allTrfms,
-            if (!skipDecrypt) LocalDecrypt(decryptPos, stage2) else stage2))
+            if (!decryptPos.isEmpty) LocalDecrypt(decryptPos, stage2) else stage2))
       } else {
         stage2
       }
