@@ -36,12 +36,12 @@ object CollectionUtils {
       Seq(Seq(s.head) ++ x, x)
     })
   }
-  def powerSetMinusEmpty[T](s: Seq[T]): Seq[Seq[T]] = 
+  def powerSetMinusEmpty[T](s: Seq[T]): Seq[Seq[T]] =
     powerSet(s).filterNot(_.isEmpty)
 
   def opt2[T](t0: Option[T], t1: Option[T]): Option[(T, T)] = {
     if (t0.isDefined) {
-      t1.map(x => (t0.get, x)) 
+      t1.map(x => (t0.get, x))
     } else None
   }
 
@@ -50,7 +50,7 @@ object CollectionUtils {
   }
 
   def optOrEither2[T0, T1](t0: Option[T0], t1: Option[T1]): Option[Either[T0, T1]] = {
-    if (t0.isDefined) Some(Left(t0.get)) 
+    if (t0.isDefined) Some(Left(t0.get))
     else if (t1.isDefined) Some(Right(t1.get))
     else None
   }

@@ -9,22 +9,22 @@ trait Resolver extends Transformers with Traversals {
   }
 
   def resolve(stmt: SelectStmt, schema: Definitions): SelectStmt = {
-    // init contexts 
+    // init contexts
     val n1 = topDownTransformationWithParent(stmt)((parent: Option[Node], child: Node) => child match {
-      case s: SelectStmt => 
+      case s: SelectStmt =>
         parent match {
           case _: SubqueryRelationAST =>
             (Some(s.copyWithContext(new Context(Left(schema)))), true)
           case _ =>
             (Some(s.copyWithContext(new Context(parent.map(c => Right(c.ctx)).getOrElse(Left(schema))))), true)
         }
-      case e => 
+      case e =>
         (Some(e.copyWithContext(parent.map(_.ctx).getOrElse(throw new RuntimeException("should have ctx")))), true)
     }).asInstanceOf[SelectStmt]
 
     // build contexts up
     topDownTraversal(n1)(wrapReturnTrue {
-      case s @ SelectStmt(projections, relations, _, _, _, _, ctx) => 
+      case s @ SelectStmt(projections, relations, _, _, _, _, ctx) =>
 
         def checkName(name: String, alias: Option[String], ctx: Context): String = {
           val name0 = alias.getOrElse(name)
@@ -35,7 +35,7 @@ trait Resolver extends Transformers with Traversals {
         }
 
         def processRelation(r: SqlRelation): Unit = r match {
-          case TableRelationAST(name, alias, _) => 
+          case TableRelationAST(name, alias, _) =>
 
             //println("processing: " + name)
             //println(ctx.relations)
@@ -43,7 +43,7 @@ trait Resolver extends Transformers with Traversals {
             // check name
             val name0 = checkName(name, alias, ctx)
 
-            // check valid table 
+            // check valid table
             val r = schema.defns.get(name).getOrElse(
               throw ResolutionException("no such table: " + name))
 
@@ -69,7 +69,7 @@ trait Resolver extends Transformers with Traversals {
         projections.zipWithIndex.foreach {
           case (ExprProj(f @ FieldIdent(qual, name, _, _), alias, _), idx) =>
             ctx.projections += NamedProjection(alias.getOrElse(name), f, idx)
-          case (ExprProj(expr, alias, _), idx) => 
+          case (ExprProj(expr, alias, _), idx) =>
             ctx.projections += NamedProjection(alias.getOrElse("$unknown$"), expr, idx)
           case (StarProj(_), _) if !seenWildcard =>
             ctx.projections += WildcardProjection

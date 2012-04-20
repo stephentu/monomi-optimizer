@@ -7,7 +7,7 @@ trait Node extends PrettyPrinters {
   def sql: String
 }
 
-case class SelectStmt(projections: Seq[SqlProj], 
+case class SelectStmt(projections: Seq[SqlProj],
                       relations: Option[Seq[SqlRelation]],
                       filter: Option[SqlExpr],
                       groupBy: Option[SqlGroupBy],
@@ -15,7 +15,7 @@ case class SelectStmt(projections: Seq[SqlProj],
                       limit: Option[Int], ctx: Context = null) extends Node {
   def copyWithContext(c: Context) = copy(ctx = c)
   def sql =
-    Seq(Some("select"), 
+    Seq(Some("select"),
         Some(projections.map(_.sql).mkString(", ")),
         relations.map(x => "from " + x.map(_.sql).mkString(", ")),
         filter.map(x => "where " + x.sql),
@@ -68,8 +68,8 @@ trait SqlExpr extends Node {
     }
 
     // now check if the relation is not a subquery
-    fctx.flatMap { f => rlxns.map(r => (f, r)) } flatMap { 
-      case (c, r) => 
+    fctx.flatMap { f => rlxns.map(r => (f, r)) } flatMap {
+      case (c, r) =>
         if (!c.relations.contains(r)) {
           println("bad expr = " + this)
         }
@@ -148,13 +148,13 @@ case class Lt(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Inequalit
 
 case class In(elem: SqlExpr, set: Seq[SqlExpr], negate: Boolean, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  override def isLiteral = 
+  override def isLiteral =
     elem.isLiteral && set.filter(e => !e.isLiteral).isEmpty
-  def canGatherFields = 
+  def canGatherFields =
     elem.canGatherFields && set.foldLeft(true)(_&&_.canGatherFields)
   def gatherFields =
     elem.gatherFields ++ set.flatMap(_.gatherFields)
-  def sql = Seq(elem, "in", "(", set.map(_.sql).mkString(", "), ")") mkString " " 
+  def sql = Seq(elem, "in", "(", set.map(_.sql).mkString(", "), ")") mkString " "
 }
 case class Like(lhs: SqlExpr, rhs: SqlExpr, negate: Boolean, ctx: Context = null) extends Binop {
   val opStr = if (negate) "not like" else "like"
@@ -188,7 +188,7 @@ trait Unop extends SqlExpr {
   val expr: SqlExpr
   val opStr: String
   override def isLiteral = expr.isLiteral
-  def canGatherFields = expr.canGatherFields 
+  def canGatherFields = expr.canGatherFields
   def gatherFields = expr.gatherFields
   def sql = Seq(opStr, "(", expr.sql, ")") mkString " "
 }
@@ -270,9 +270,9 @@ case class AggCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extend
 trait SqlFunction extends SqlExpr {
   val name: String
   val args: Seq[SqlExpr]
-  override def isLiteral = args.foldLeft(true)(_ && _.isLiteral) 
-  def canGatherFields = args.foldLeft(true)(_ && _.canGatherFields) 
-  def gatherFields = args.flatMap(_.gatherFields) 
+  override def isLiteral = args.foldLeft(true)(_ && _.isLiteral)
+  def canGatherFields = args.foldLeft(true)(_ && _.canGatherFields)
+  def gatherFields = args.flatMap(_.gatherFields)
   def sql = Seq(name, "(", args.map(_.sql) mkString ", ", ")") mkString ""
 }
 
@@ -303,8 +303,8 @@ case class CaseExprCase(cond: SqlExpr, expr: SqlExpr, ctx: Context = null) exten
 }
 case class CaseExpr(expr: SqlExpr, cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  override def isLiteral = 
-    expr.isLiteral && 
+  override def isLiteral =
+    expr.isLiteral &&
     cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty
   def canGatherFields =
     expr.canGatherFields &&
@@ -316,7 +316,7 @@ case class CaseExpr(expr: SqlExpr, cases: Seq[CaseExprCase], default: Option[Sql
 }
 case class CaseWhenExpr(cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  override def isLiteral = 
+  override def isLiteral =
     cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty
   def canGatherFields =
     cases.filter(x => !x.cond.canGatherFields || !x.expr.canGatherFields).isEmpty
@@ -336,7 +336,7 @@ case class UnaryMinus(expr: SqlExpr, ctx: Context = null) extends Unop {
 
 trait LiteralExpr extends SqlExpr {
   override def isLiteral = true
-  def canGatherFields = true 
+  def canGatherFields = true
   def gatherFields = Seq.empty
 }
 case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
@@ -361,7 +361,7 @@ case class DateLiteral(d: String, ctx: Context = null) extends LiteralExpr {
 }
 case class IntervalLiteral(e: String, unit: ExtractType, ctx: Context = null) extends LiteralExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq("interval", "\"" + e + "\"", unit.toString) mkString " " 
+  def sql = Seq("interval", "\"" + e + "\"", unit.toString) mkString " "
 }
 
 trait SqlRelation extends Node
@@ -406,7 +406,7 @@ case class TuplePosition(pos: Int, ctx: Context = null) extends SqlExpr {
   def sql = "pos$" + pos
 }
 
-case class DependentFieldPlaceholder(placeholder: FieldIdent, ctx: Context = null) 
+case class DependentFieldPlaceholder(placeholder: FieldIdent, ctx: Context = null)
   extends LiteralExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def sql = "<placeholder>"

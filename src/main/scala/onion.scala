@@ -17,7 +17,7 @@ object Onions {
 
 object OnionSet {
   def merge(sets: Seq[OnionSet]): OnionSet = {
-    sets.foldLeft(new OnionSet) { 
+    sets.foldLeft(new OnionSet) {
       case (acc, elem) => acc.merge(elem)
     }
   }
@@ -27,12 +27,12 @@ class OnionSet {
   private val _gen = new NameGenerator("_virtual")
 
   // string is enc name, int is Onions bitmask
-  private val opts = new HashMap[(String, Either[String, SqlExpr]), (String, Int)] 
+  private val opts = new HashMap[(String, Either[String, SqlExpr]), (String, Int)]
 
   private def mkKey(relation: String, expr: SqlExpr) = {
     ((relation, expr match {
       case FieldIdent(_, n, _, _) => Left(n)
-      case _ => Right(expr.copyWithContext(null).asInstanceOf[SqlExpr]) 
+      case _ => Right(expr.copyWithContext(null).asInstanceOf[SqlExpr])
     }))
   }
 
@@ -40,7 +40,7 @@ class OnionSet {
   def add(relation: String, expr: SqlExpr, o: Int): Unit = {
     val key = mkKey(relation, expr)
     opts.get(key) match {
-      case Some((v1, v2)) => 
+      case Some((v1, v2)) =>
         opts.put(key, (v1, v2 | o))
       case None =>
         opts.put(key, (expr match {
@@ -90,7 +90,7 @@ class OnionSet {
 
   // deep copy
   def copy: OnionSet = {
-    val cpy = new OnionSet 
+    val cpy = new OnionSet
     opts.foreach {
       case (k @ (relation, Left(name)), v) =>
         cpy.opts.put(k, v)
@@ -110,5 +110,5 @@ class SetOnce[T] {
   def set(v: T): Unit = {
     if (!_value.isDefined) _value = Some(v)
   }
-  def get: Option[T] = _value 
+  def get: Option[T] = _value
 }

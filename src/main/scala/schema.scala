@@ -8,7 +8,7 @@ case class TableRelation(name: String) extends Relation
 case class SubqueryRelation(stmt: SelectStmt) extends Relation
 
 case class TableColumn(name: String, tpe: DataType) extends PrettyPrinters {
-  def scalaStr: String = 
+  def scalaStr: String =
     "TableColumn(" + _q(name) + ", " + tpe.toString + ")"
 }
 
@@ -36,20 +36,20 @@ class PgSchema(hostname: String, port: Int, db: String, props: Properties) exten
   def loadSchema() = {
     import Conversions._
     val s = conn.prepareStatement("""
-select table_name from information_schema.tables 
+select table_name from information_schema.tables
 where table_catalog = ? and table_schema = 'public'
       """)
     s.setString(1, db)
-    val r = s.executeQuery    
+    val r = s.executeQuery
     val tables = r.map(_.getString(1))
     s.close()
 
     new Definitions(tables.map(name => {
       val s = conn.prepareStatement("""
-select 
-  column_name, data_type, character_maximum_length, 
-  numeric_precision, numeric_precision_radix, numeric_scale 
-from information_schema.columns 
+select
+  column_name, data_type, character_maximum_length,
+  numeric_precision, numeric_precision_radix, numeric_scale
+from information_schema.columns
 where table_schema = 'public' and table_name = ?
 """)
       s.setString(1, name)
@@ -61,7 +61,7 @@ where table_schema = 'public' and table_name = ?
           case "character" => FixedLenString(rs.getInt(3))
           case "date" => DateType
           case "numeric" => DecimalType(rs.getInt(4), rs.getInt(6))
-          case "integer" => 
+          case "integer" =>
             assert(rs.getInt(4) % 8 == 0)
             IntType(rs.getInt(4) / 8)
           case e => sys.error("unknown type: " + e)

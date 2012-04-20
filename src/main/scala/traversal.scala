@@ -8,10 +8,10 @@ trait Traversals {
   def topDownTraversalWithParent(n: Node)(f: (Option[Node], Node) => Boolean): Unit =
     topDownTraversal0(None, n)((n: Node) => (), f, (n: Node) => ())
 
-  def topDownTraversalPrePost[A0, A1](n: Node)(preVisit: Node => A0, visit: Node => Boolean, postVisit: Node => A1): Unit = 
+  def topDownTraversalPrePost[A0, A1](n: Node)(preVisit: Node => A0, visit: Node => Boolean, postVisit: Node => A1): Unit =
    topDownTraversalPrePostWithParent(n)(preVisit, (p: Option[Node], c: Node) => visit(c), postVisit)
 
-  def topDownTraversalPrePostWithParent[A0, A1](n: Node)(preVisit: Node => A0, visit: (Option[Node], Node) => Boolean, postVisit: Node => A1): Unit = 
+  def topDownTraversalPrePostWithParent[A0, A1](n: Node)(preVisit: Node => A0, visit: (Option[Node], Node) => Boolean, postVisit: Node => A1): Unit =
    topDownTraversal0(None, n)(preVisit, visit, postVisit)
 
   private def topDownTraversal0[A0, A1](p: Option[Node], n: Node)(preVisit: Node => A0, visit: (Option[Node], Node) => Boolean, postVisit: Node => A1): Unit = {
@@ -35,7 +35,7 @@ trait Traversals {
       case Gt(l, r, _) => recur(l); recur(r)
       case Le(l, r, _) => recur(l); recur(r)
       case Lt(l, r, _) => recur(l); recur(r)
-      case In(e, s, _, _) => recur(e); s.map(recur) 
+      case In(e, s, _, _) => recur(e); s.map(recur)
       case Like(l, r, _, _) => recur(l); recur(r)
       case Plus(l, r, _) => recur(l); recur(r)
       case Minus(l, r, _) => recur(l); recur(r)
@@ -61,7 +61,7 @@ trait Traversals {
       case JoinRelation(l, r, _, c, _) => recur(l); recur(r); recur(c)
       case SqlGroupBy(k, h, _) => k.map(recur); h.map(recur)
       case SqlOrderBy(k, _) => k.map(x => recur(x._1))
-      case _ => 
+      case _ =>
     }
     postVisit(n)
   }
