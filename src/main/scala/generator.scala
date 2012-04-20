@@ -64,9 +64,13 @@ trait Generator extends Traversals with Transformers {
   def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode =
     generatePlanFromOnionSet0(stmt, onionSet, PreserveOriginal)
 
-  abstract trait EncContext
+  abstract trait EncContext {
+    def needsProjections: Boolean = true
+  }
   case object PreserveOriginal extends EncContext
-  case object PreserveCardinality extends EncContext
+  case object PreserveCardinality extends EncContext {
+    override def needsProjections = false
+  }
   case class SingleEncProj(onion: Int) extends EncContext
 
   // if encContext is PreserveOriginal, then the plan node generated faithfully
@@ -124,7 +128,7 @@ trait Generator extends Traversals with Transformers {
        projections: Seq[(SqlExpr, SqlProj, Int, Boolean)], 
 
        /* additional subqueries needed for conjunction. the tuple is as follows:
-        *   ( (original) subselect form conjunction which will be replaced with PlanNode,
+        *   ( (original) SelectStmt from the conjunction which will be replaced with PlanNode,
         *     the PlanNode to execute,
         *     the EncContext the PlanNode was generated with 
         *       (tells about the type of tuples coming from PlanNode) )
@@ -146,6 +150,8 @@ trait Generator extends Traversals with Transformers {
         val smap = subqueries.zipWithIndex.map { case ((s, p, _), i) => (s, (p, i)) }.toMap
 
         def testExpr(expr0: SqlExpr): Option[SqlExpr] = expr0 match {
+          case Exists(s: Subselect, _) =>
+            Some(ExistsSubqueryPosition(smap(s)._2))
           case s: Subselect => Some(SubqueryPosition(smap(s)._2))
           case e => pmap.get(e).map { p => TuplePosition(mappings(p)) }
         }
@@ -344,7 +350,7 @@ trait Generator extends Traversals with Transformers {
                 e1.map(_ =>
                   generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.OPE)))
 
-              println("p1 = " + p1)
+              //println("p1 = " + p1)
 
               p0 match {
                 case Some(RemoteSql(q0, _)) =>
@@ -445,6 +451,21 @@ trait Generator extends Traversals with Transformers {
             case (lhs, rhs) =>
               // TODO: can we handle this?
               cannotAnswer(like)
+          }
+
+        case ex @ Exists(ss, _) =>
+          val plan = generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveCardinality)   
+          plan match {
+            case RemoteSql(q, _) => 
+              (Some(ex.copy(select = Subselect(q))), false)
+
+            case _ =>
+              mergeConjunctions(
+                ClientComputation(
+                  ex,
+                  Seq.empty,
+                  Seq((ss, plan, PreserveCardinality))))
+              cannotAnswerExpr
           }
 
         case cs @ CountStar(_) if rewriteCtx.aggsValid => 
@@ -657,32 +678,34 @@ trait Generator extends Traversals with Transformers {
         localOrderByPosMaps += processClientComputation(c)
       }
 
-      cur.projections.foreach {
-        case ExprProj(e, a, _) =>
-          val onion = encContext match {
-            case SingleEncProj(o) => o
-            case _ => Onions.ALL
-          }
-          val ctx = 
-            if (cur.groupBy.isDefined && !newLocalFilters.isEmpty) {
-              ProjUnaggCtx(onion)
-            } else {
-              ProjCtx(onion) 
+      if (encContext.needsProjections) {
+        cur.projections.foreach {
+          case ExprProj(e, a, _) =>
+            val onion = encContext match {
+              case SingleEncProj(o) => o
+              case _ => Onions.ALL
             }
-          rewriteExprForServer(e, ctx) match {
-            case (_, _, Some(comps)) =>
-              val m = processClientComputation(comps)
-              projPosMaps += Right((comps, m))
+            val ctx = 
+              if (cur.groupBy.isDefined && !newLocalFilters.isEmpty) {
+                ProjUnaggCtx(onion)
+              } else {
+                ProjCtx(onion) 
+              }
+            rewriteExprForServer(e, ctx) match {
+              case (_, _, Some(comps)) =>
+                val m = processClientComputation(comps)
+                projPosMaps += Right((comps, m))
 
-            case (s, o, None) =>
-              val stmtIdx = finalProjs.size
-              finalProjs += ((ExprProj(s, a), o, false))
-              projPosMaps += Left((stmtIdx, o))
-          }
-        case StarProj(_) => throw new RuntimeException("TODO: implement me")
+              case (s, o, None) =>
+                val stmtIdx = finalProjs.size
+                finalProjs += ((ExprProj(s, a), o, false))
+                projPosMaps += Left((stmtIdx, o))
+            }
+          case StarProj(_) => throw new RuntimeException("TODO: implement me")
+        }
       }
 
-      cur.copy(projections = finalProjs.map(_._1).toSeq)
+      cur.copy(projections = finalProjs.map(_._1).toSeq ++ (if (encContext.needsProjections) Seq.empty else Seq(StarProj())))
     }
 
     def wrapDecryptionNodeSeq(p: PlanNode, m: Seq[Int]): PlanNode = {

@@ -110,13 +110,13 @@ class SQLParser extends StandardTokenParsers {
           case (acc, ((">", rhs: SqlExpr))) => Gt(acc, rhs)
           case (acc, ((">=", rhs: SqlExpr))) => Ge(acc, rhs)
           case (acc, (("between", l: SqlExpr, r: SqlExpr))) => And(Ge(acc, l), Le(acc, r))
-          case (acc, (("in", e: Seq[_], n: Boolean))) => In(acc, Left(e.asInstanceOf[Seq[SqlExpr]]), n)
-          case (acc, (("in", s: SelectStmt, n: Boolean))) => In(acc, Right(s), n)
+          case (acc, (("in", e: Seq[_], n: Boolean))) => In(acc, e.asInstanceOf[Seq[SqlExpr]], n)
+          case (acc, (("in", s: SelectStmt, n: Boolean))) => In(acc, Seq(Subselect(s)), n)
           case (acc, (("like", e: SqlExpr, n: Boolean))) => Like(acc, e, n)
         }
     } |
     "not" ~> cmp_expr ^^ (Not(_)) |
-    "exists" ~> "(" ~> select <~ ")" ^^ (Exists(_))
+    "exists" ~> "(" ~> select <~ ")" ^^ { case s => Exists(Subselect(s)) }
 
   def add_expr: Parser[SqlExpr] =
     mult_expr * (

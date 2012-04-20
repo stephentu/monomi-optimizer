@@ -146,17 +146,15 @@ case class Lt(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Inequalit
   def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
 
-case class In(elem: SqlExpr, set: Either[Seq[SqlExpr], SelectStmt], negate: Boolean, ctx: Context = null) extends SqlExpr {
+case class In(elem: SqlExpr, set: Seq[SqlExpr], negate: Boolean, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   override def isLiteral = 
-    elem.isLiteral && 
-    set.left.toOption.map(_.filter(e => !e.isLiteral).isEmpty).getOrElse(false)
+    elem.isLiteral && set.filter(e => !e.isLiteral).isEmpty
   def canGatherFields = 
-    elem.canGatherFields && 
-    set.left.toOption.map(_.foldLeft(true)(_&&_.canGatherFields)).getOrElse(false)
+    elem.canGatherFields && set.foldLeft(true)(_&&_.canGatherFields)
   def gatherFields =
-    elem.gatherFields ++ set.left.get.flatMap(_.gatherFields)
-  def sql = Seq(elem, "in", "(", set.fold(_.map(_.sql).mkString(", "), _.sql), ")") mkString " " 
+    elem.gatherFields ++ set.flatMap(_.gatherFields)
+  def sql = Seq(elem, "in", "(", set.map(_.sql).mkString(", "), ")") mkString " " 
 }
 case class Like(lhs: SqlExpr, rhs: SqlExpr, negate: Boolean, ctx: Context = null) extends Binop {
   val opStr = if (negate) "not like" else "like"
@@ -199,7 +197,7 @@ case class Not(expr: SqlExpr, ctx: Context = null) extends Unop {
   val opStr = "not"
   def copyWithContext(c: Context) = copy(ctx = c)
 }
-case class Exists(select: SelectStmt, ctx: Context = null) extends SqlExpr {
+case class Exists(select: Subselect, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def canGatherFields = false
   def gatherFields = throw new RuntimeException("not possible")
@@ -419,4 +417,11 @@ case class SubqueryPosition(pos: Int, ctx: Context = null) extends SqlExpr {
   def canGatherFields = false
   def gatherFields = throw new RuntimeException("error")
   def sql = "subquery$" + pos
+}
+
+case class ExistsSubqueryPosition(pos: Int, ctx: Context = null) extends SqlExpr {
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def canGatherFields = false
+  def gatherFields = throw new RuntimeException("error")
+  def sql = "exists(subquery$" + pos + ")"
 }
