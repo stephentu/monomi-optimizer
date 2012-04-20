@@ -741,7 +741,7 @@ trait Generator extends Traversals with Transformers {
       if (!newLocalOrderBy.isEmpty) {
         //println(newLocalOrderBy)
         assert(newLocalOrderBy.size == stmt.orderBy.get.keys.size)
-        val needDecrypt = newLocalOrderBy.filter { 
+        val skipDecrypt = newLocalOrderBy.filter { 
           case ClientComputation(expr, proj, sub) =>
             (proj.size == 1 && proj.head._2 == Onions.OPE && 
              proj.head._1 == expr && sub.isEmpty)
@@ -756,7 +756,7 @@ trait Generator extends Traversals with Transformers {
         LocalOrderBy(
           orderPos.zip(stmt.orderBy.get.keys).map { case (p, (_, t)) => (p, t) },
           LocalTransform(allTrfms, 
-            if (needDecrypt) LocalDecrypt(decryptPos, stage2) else stage2))
+            if (!skipDecrypt) LocalDecrypt(decryptPos, stage2) else stage2))
       } else {
         stage2
       }
@@ -790,7 +790,16 @@ trait Generator extends Traversals with Transformers {
       case Left((p, _)) => Left(p)
     }
 
-    val s1 = LocalTransform(trfms, s0)
+    def checkTransforms(trfms: Seq[Either[Int, SqlExpr]]): Boolean = {
+      trfms.zipWithIndex.foldLeft(true) {
+        case (acc, (Left(p), idx)) => acc && p == idx
+        case (acc, (Right(_), _)) => false
+      }
+    }
+    
+    // if trfms describes purely an identity transform, we can omit it
+    val s1 = 
+      if (trfms.size == s0.tupleDesc.size && checkTransforms(trfms)) s0 else LocalTransform(trfms, s0)
 
     encContext match {
       case PreserveOriginal => s1
@@ -831,7 +840,7 @@ trait Generator extends Traversals with Transformers {
     val perms = CollectionUtils.powerSetMinusEmpty(o)
     // merge all perms, then unique
     val candidates = perms.map(p => OnionSet.merge(p)).toSet.toSeq
-    println("size(candidates) = " + candidates.size)
+    //println("size(candidates) = " + candidates.size)
     //println("candidates = " + candidates)
     def fillOnionSet(o: OnionSet): OnionSet = {
       o.complete(stmt.ctx.defns)
@@ -867,8 +876,8 @@ trait Generator extends Traversals with Transformers {
             true
         }.getOrElse(false)
 
-      def negate(f: Node => Boolean): Node => Boolean = 
-        (n: Node) => !f(n)
+      def negate(f: Node => Boolean): Node => Boolean = (n: Node) => { !f(n) }
+     
 
       // TODO: this is kind of hacky, we shouldn't have to special case this
       def specialCaseExprOpSubselect(expr: SqlExpr, subselectAgg: SqlAgg) = {
@@ -935,12 +944,9 @@ trait Generator extends Traversals with Transformers {
             true
           }.getOrElse(false)
 
-        case ss : SelectStmt =>
+        case Subselect(ss, _) =>
           workingSet = selectFn(ss, workingSet)
           true
-
-        //case e: SqlExpr =>
-        //  add1(e, Onions.DET)
 
         case _ => false
       })

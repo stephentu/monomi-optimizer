@@ -23,7 +23,7 @@ trait Traversals {
     }
 
     def recur(n0: Node) = topDownTraversal0(Some(n), n0)(preVisit, visit, postVisit)
-    val ret = n match {
+    n match {
       case SelectStmt(p, r, f, g, o, _, _) =>
         p.map(recur); r.map(_.map(recur)); f.map(recur); g.map(recur); o.map(recur)
       case ExprProj(e, _, _) => recur(e)
@@ -64,6 +64,5 @@ trait Traversals {
       case _ => 
     }
     postVisit(n)
-    ret
   }
 }
