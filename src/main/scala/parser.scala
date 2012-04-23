@@ -184,8 +184,8 @@ class SQLParser extends StandardTokenParsers {
 
   def join_type: Parser[JoinType] =
     ("left" | "right") ~ opt("outer") ^^ {
-      case "left" ~ o  => LeftJoin(o.isDefined)
-      case "right" ~ o => RightJoin(o.isDefined)
+      case "left" ~ o  => LeftJoin
+      case "right" ~ o => RightJoin
     } |
     "inner" ^^^ (InnerJoin)
 

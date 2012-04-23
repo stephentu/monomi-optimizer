@@ -16,19 +16,19 @@ trait Generator extends Traversals with Transformers {
     }
   }
 
-  private def isSingleAggGroupStmt(stmt: SelectStmt): Boolean = {
-    if (stmt.groupBy.isDefined) return false
-    var found = false
-    stmt.projections.foreach { p =>
-      topDownTraverseContext(p, stmt.ctx) {
-        case _: SqlAgg =>
-          found = true
-          false
-        case _ => !found
-      }
-    }
-    found
-  }
+  //private def isSingleAggGroupStmt(stmt: SelectStmt): Boolean = {
+  //  if (stmt.groupBy.isDefined) return false
+  //  var found = false
+  //  stmt.projections.foreach { p =>
+  //    topDownTraverseContext(p, stmt.ctx) {
+  //      case _: SqlAgg =>
+  //        found = true
+  //        false
+  //      case _ => !found
+  //    }
+  //  }
+  //  found
+  //}
 
   private def resolveAliases(e: SqlExpr): SqlExpr = {
     topDownTransformation(e) {
@@ -56,8 +56,18 @@ trait Generator extends Traversals with Transformers {
     s.reduceLeft( (acc: SqlExpr, elem: SqlExpr) => And(acc, elem) )
   }
 
+  private val subRelnGen = new NameGenerator("subrelation")
+
   // the return value is:
   // (relation name in e's ctx, global table name, expr out of the global table)
+  //
+  // NOTE: relation name is kind of misleading. consider the following example:
+  //   SELECT ... FROM ( SELECT n1.x + n1.y AS foo FROM n1 WHERE ... ) AS t
+  //   ORDER BY foo
+  //
+  // Suppose we precompute (x + y) for table n1. If we call findOnionableExpr() on
+  // "foo", then we'll get (t, n1, x + y) returned. This works under the assumption
+  // that we'll project the pre-computed (x + y) from the inner SELECT
   private def findOnionableExpr(e: SqlExpr): Option[(String, String, SqlExpr)] = {
     val ep = resolveAliases(e)
     val r = ep.getPrecomputableRelation
@@ -69,17 +79,21 @@ trait Generator extends Traversals with Transformers {
       }.asInstanceOf[SqlExpr]
       Some((r.get._1, r.get._2, e0))
     } else {
-      None
-      //e match {
-      //  // TODO: this special case currently doesn't help you
-      //  case FieldIdent(_, _, Symbol(relation, name, ctx), _) =>
-      //    assert(ctx.relations(relation).isInstanceOf[SubqueryRelation])
-      //    ctx
-      //      .relations(relation)
-      //      .asInstanceOf[SubqueryRelation]
-      //      .stmt.ctx.lookupProjection(name).flatMap(findOnionableExpr)
-      //  case _ => None
-      //}
+      e match {
+        case FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _) =>
+          if (ctx.relations(relation).isInstanceOf[SubqueryRelation]) {
+            // recurse on the sub-relation
+            ctx
+              .relations(relation)
+              .asInstanceOf[SubqueryRelation]
+              .stmt
+              .ctx
+              .lookupProjection(name)
+              .flatMap(findOnionableExpr)
+              .map(_.copy(_1 = relation))
+          } else None
+        case _ => None
+      }
     }
   }
 
@@ -95,7 +109,10 @@ trait Generator extends Traversals with Transformers {
   case object PreserveCardinality extends EncContext {
     override def needsProjections = false
   }
-  case class SingleEncProj(onion: Int) extends EncContext
+
+  // TODO: we should support "don't care" columns for optimization
+  // ie, Seq[Option[Int]]
+  case class EncProj(onions: Seq[Int]) extends EncContext
 
   // if encContext is PreserveOriginal, then the plan node generated faithfully
   // recreates the original statement- that is, the result set has the same
@@ -106,25 +123,17 @@ trait Generator extends Traversals with Transformers {
   // result set, however, is potentially left encrypted. this is useful for generating
   // plans such as subqueries to EXISTS( ... ) calls
   //
-  // if encContext is SingleEncProj, then stmt is expected to have exactly one
+  // if encContext is EncProj, then stmt is expected to have exactly onions.size()
   // projection (this is asserted)- and plan node is written so it returns the
-  // single projection encrypted with the onion given by SingleEncProj
+  // projections encrypted with the onion given by the onions sequence
   private def generatePlanFromOnionSet0(
     stmt: SelectStmt, onionSet: OnionSet, encContext: EncContext): PlanNode = {
 
     encContext match {
-      case SingleEncProj(_) =>
-        assert(stmt.ctx.projections.size == 1 && isSingleAggGroupStmt(stmt))
+      case EncProj(o) =>
+        assert(stmt.ctx.projections.size == o.size)
       case _ =>
     }
-
-    // order is
-    // 1) where clause (filter)
-    // 2) group by
-    // 3) select clause (projections)
-    // 4) order by
-
-    // NOTE: assumes that all expressions are in disjunctive normal form (DNF)
 
     def getSupportedExpr(e: SqlExpr, o: Int): Option[FieldIdent] = {
       val e0 = findOnionableExpr(e)
@@ -132,7 +141,26 @@ trait Generator extends Traversals with Transformers {
         onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).map {
           case (basename, _) =>
             val qual = if (r == t) encTblName(t) else r
-            FieldIdent(Some(qual), basename + "_" + Onions.str(o))
+
+            // TODO: not sure if this actually correct
+            val name = e match {
+              case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx), _)
+                if ctx.relations(relation).isInstanceOf[SubqueryRelation] => name0
+              case _ => basename + "_" + Onions.str(o)
+            }
+
+            FieldIdent(Some(qual), name)
+        }
+      }.orElse {
+        // TODO: this is hacky -
+        // special case- if we looking at a field projection
+        // from a subquery relation, then it is guaranteed to exist in DET form
+        // (since we will use a RemoteMaterialize to make it so)
+        e match {
+          case fi @ FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _)
+            if o == Onions.DET &&
+               ctx.relations(relation).isInstanceOf[SubqueryRelation] => Some(fi)
+          case _ => None
         }
       }
     }
@@ -301,11 +329,11 @@ trait Generator extends Traversals with Transformers {
               lhs match {
                 case ss @ Subselect(q, _) =>
                   val subPlans =
-                    Seq(generatePlanFromOnionSet0(q, onionSet, SingleEncProj(Onions.DET)),
-                        generatePlanFromOnionSet0(q, onionSet, SingleEncProj(Onions.OPE)))
+                    Seq(generatePlanFromOnionSet0(q, onionSet, EncProj(Seq(Onions.DET))),
+                        generatePlanFromOnionSet0(q, onionSet, EncProj(Seq(Onions.OPE))))
                   val sp0 = subPlans.map(x => if (x.isInstanceOf[RemoteSql]) Some(x) else None)
                   CollectionUtils.optOr2(sp0(0), sp0(1)).map {
-                    case RemoteSql(qp, _) =>
+                    case RemoteSql(qp, _, _) =>
                       (Some(eq.copyWithChildren(Subselect(qp), NullLiteral())), false)
                   }.getOrElse(bailOut)
                 case _ =>
@@ -328,18 +356,18 @@ trait Generator extends Traversals with Transformers {
 
                 val p0 =
                   e0.map(_ =>
-                    generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.DET)))
+                    generatePlanFromOnionSet0(ss.subquery, onionSet, EncProj(Seq(Onions.DET))))
 
                 val p1 =
                   e1.map(_ =>
-                    generatePlanFromOnionSet0(ss.subquery, onionSet, SingleEncProj(Onions.OPE)))
+                    generatePlanFromOnionSet0(ss.subquery, onionSet, EncProj(Seq(Onions.OPE))))
 
                 p0 match {
-                  case Some(RemoteSql(q0, _)) =>
+                  case Some(RemoteSql(q0, _, _)) =>
                     (Some(eq.copyWithChildren(e0.get, Subselect(q0))), false)
                   case _ =>
                     p1 match {
-                      case Some(RemoteSql(q1, _)) =>
+                      case Some(RemoteSql(q1, _, _)) =>
                         (Some(eq.copyWithChildren(e1.get, Subselect(q1))), false)
                       case _ => bailOut
                     }
@@ -350,19 +378,19 @@ trait Generator extends Traversals with Transformers {
                 case (ss0 @ Subselect(q0, _), ss1 @ Subselect(q1, _)) =>
                   // try both DETs or both OPEs
                   val spDETs =
-                    Seq(generatePlanFromOnionSet0(q0, onionSet, SingleEncProj(Onions.DET)),
-                        generatePlanFromOnionSet0(q1, onionSet, SingleEncProj(Onions.DET)))
+                    Seq(generatePlanFromOnionSet0(q0, onionSet, EncProj(Seq(Onions.DET))),
+                        generatePlanFromOnionSet0(q1, onionSet, EncProj(Seq(Onions.DET))))
                   val spOPEs =
-                    Seq(generatePlanFromOnionSet0(q0, onionSet, SingleEncProj(Onions.OPE)),
-                        generatePlanFromOnionSet0(q1, onionSet, SingleEncProj(Onions.OPE)))
+                    Seq(generatePlanFromOnionSet0(q0, onionSet, EncProj(Seq(Onions.OPE))),
+                        generatePlanFromOnionSet0(q1, onionSet, EncProj(Seq(Onions.OPE))))
 
                   // try spDETs first, then spOPEs
                   (spDETs(0), spDETs(1)) match {
-                    case (RemoteSql(q0p, _), RemoteSql(q1p, _)) =>
+                    case (RemoteSql(q0p, _, _), RemoteSql(q1p, _, _)) =>
                       (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
                     case _ =>
                       (spOPEs(0), spOPEs(1)) match {
-                        case (RemoteSql(q0p, _), RemoteSql(q1p, _)) =>
+                        case (RemoteSql(q0p, _, _), RemoteSql(q1p, _, _)) =>
                           (Some(eq.copyWithChildren(Subselect(q0p), Subselect(q1p))), false)
                         case _ => bailOut
                       }
@@ -424,7 +452,7 @@ trait Generator extends Traversals with Transformers {
           case ex @ Exists(ss, _) =>
             val plan = generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveCardinality)
             plan match {
-              case RemoteSql(q, _) =>
+              case RemoteSql(q, _, _) =>
                 (Some(ex.copy(select = Subselect(q))), false)
               case _ => bailOut
             }
@@ -450,6 +478,9 @@ trait Generator extends Traversals with Transformers {
             def handleProj(onion: Int) = {
               val d = getSupportedExpr(e, Onions.DET)
               val o = getSupportedExpr(e, Onions.OPE)
+              val h = getSupportedExpr(e, Onions.HOM)
+              val s = getSupportedExpr(e, Onions.SWP)
+
               // try to honor the given onions first
               if ((onion & Onions.DET) != 0 && d.isDefined) {
                 onionRetVal.set(mkOnionRetVal(Onions.DET))
@@ -457,12 +488,24 @@ trait Generator extends Traversals with Transformers {
               } else if ((onion & Onions.OPE) != 0 && o.isDefined) {
                 onionRetVal.set(mkOnionRetVal(Onions.OPE))
                 (Some(o.get), false)
+              } else if ((onion & Onions.HOM) != 0 && h.isDefined) {
+                onionRetVal.set(mkOnionRetVal(Onions.HOM))
+                (Some(h.get), false)
+              } else if ((onion & Onions.SWP) != 0 && s.isDefined) {
+                onionRetVal.set(mkOnionRetVal(Onions.HOM))
+                (Some(s.get), false)
               } else if (d.isDefined) {
                 onionRetVal.set(mkOnionRetVal(Onions.DET))
                 (Some(d.get), false)
               } else if (o.isDefined) {
                 onionRetVal.set(mkOnionRetVal(Onions.OPE))
                 (Some(o.get), false)
+              } else if (h.isDefined) {
+                onionRetVal.set(mkOnionRetVal(Onions.HOM))
+                (Some(h.get), false)
+              } else if (s.isDefined) {
+                onionRetVal.set(mkOnionRetVal(Onions.SWP))
+                (Some(s.get), false)
               } else {
                 bailOut
               }
@@ -595,6 +638,120 @@ trait Generator extends Traversals with Transformers {
       (serverExpr, serverOnion, conjunctions)
     }
 
+    // subquery relations
+    def findSubqueryRelations(r: SqlRelation): Seq[SubqueryRelationAST] =
+      r match {
+        case _: TableRelationAST         => Seq.empty
+        case e: SubqueryRelationAST      => Seq(e)
+        case JoinRelation(l, r, _, _, _) =>
+          findSubqueryRelations(l) ++ findSubqueryRelations(r)
+      }
+
+    val subqueryRelations =
+      cur.relations.map(_.flatMap(findSubqueryRelations)).getOrElse(Seq.empty)
+
+    val subqueryRelationPlans =
+      subqueryRelations.map { subq =>
+
+        // build an encryption vector for this subquery
+        val encVec = collection.mutable.Seq.fill(subq.subquery.ctx.projections.size)(0)
+
+        def traverseContext(
+          start: Node,
+          ctx: Context,
+          selectFn: (SelectStmt) => Unit): Unit = {
+
+          def add(exprs: Seq[SqlExpr], o: Int): Boolean = {
+            val e0 = exprs.map(e => getSupportedExpr(e, o)).flatten
+            if (e0.size == exprs.size) {
+              // look for references to elements from this subquery
+              exprs.foreach { e =>
+                e match {
+                  case FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _) =>
+                    if (ctx.relations(relation).isInstanceOf[SubqueryRelation]) {
+                      val idx =
+                        ctx
+                          .relations(relation)
+                          .asInstanceOf[SubqueryRelation]
+                          .stmt.ctx.lookupNamedProjectionIndex(name)
+                      assert(idx.isDefined)
+                      encVec( idx.get ) |= o
+                    }
+                  case _ =>
+                }
+              }
+              true
+            } else false
+          }
+
+          def negate(f: Node => Boolean): Node => Boolean = (n: Node) => { !f(n) }
+
+          topDownTraverseContext(start, ctx)(negate { e =>
+            getPotentialCryptoOpts(e) match {
+              case Some(( exprs, o )) =>
+                add(exprs, o)
+              case None =>
+                e match {
+                  case Subselect(ss, _) =>
+                    selectFn(ss)
+                    true
+                  case _ => false
+                }
+            }
+          })
+        }
+
+        def buildForSelectStmt(stmt: SelectStmt): Unit = {
+          val SelectStmt(p, _, f, g, o, _, ctx) = stmt
+          p.foreach(e => traverseContext(e, ctx, buildForSelectStmt))
+          f.foreach(e => traverseContext(e, ctx, buildForSelectStmt))
+          g.foreach(e => traverseContext(e, ctx, buildForSelectStmt))
+          o.foreach(e => traverseContext(e, ctx, buildForSelectStmt))
+        }
+
+        // TODO: not the most efficient implementation
+        buildForSelectStmt(cur)
+
+        // TODO: we should be more sensitive to what encs the subrelation
+        // supports
+        (subq,
+         generatePlanFromOnionSet0(
+           subq.subquery,
+           onionSet,
+           EncProj(encVec.map(x => if (x != 0) x else Onions.DET).toSeq)))
+
+      }.toMap
+
+    // TODO: explicit join predicates (ie A JOIN B ON (pred)).
+    // TODO: handle {LEFT,RIGHT} OUTER JOINS
+
+    val finalSubqueryRelationPlans = new ArrayBuffer[PlanNode]
+
+    // relations
+    cur = cur.relations.map { r =>
+      def rewriteSqlRelation(s: SqlRelation): SqlRelation =
+        s match {
+          case t @ TableRelationAST(name, _, _) => t.copy(name = encTblName(name))
+          case j @ JoinRelation(l, r, _, _, _)  =>
+            j.copy(left  = rewriteSqlRelation(l),
+                   right = rewriteSqlRelation(r))
+          case r : SubqueryRelationAST =>
+            subqueryRelationPlans(r) match {
+              case p : RemoteSql =>
+                // if remote sql, then keep the subquery as subquery in the server sql,
+                // while adding the plan's subquery children to our children directly
+                finalSubqueryRelationPlans ++= p.subrelations
+                r.copy(subquery = p.stmt)
+              case p =>
+                // otherwise, add a RemoteMaterialize node
+                val name = subRelnGen.uniqueId()
+                finalSubqueryRelationPlans += RemoteMaterialize(name, p)
+                TableRelationAST(name, None)
+            }
+        }
+      cur.copy(relations = Some(r.map(rewriteSqlRelation)))
+    }.getOrElse(cur)
+
     // filters
     cur = cur.filter.map(x => rewriteExprForServer(x, FilterCtx)).map {
       case (stmt, _, comps) =>
@@ -632,7 +789,10 @@ trait Generator extends Traversals with Transformers {
           CollectionUtils.optOr2(
             getSupportedExpr(k, Onions.DET),
             getSupportedExpr(k, Onions.OPE))
-          .getOrElse(throw new RuntimeException("TODO: currently cannot support non-field keys")))
+          .getOrElse {
+            println("Non supported expr: " + k)
+            throw new RuntimeException("TODO: currently cannot support non-field keys")
+          })
       }))
       cur.copy(groupBy = newGroupBy0)
     }
@@ -732,10 +892,10 @@ trait Generator extends Traversals with Transformers {
       }
 
       if (encContext.needsProjections) {
-        cur.projections.foreach {
-          case ExprProj(e, a, _) =>
+        cur.projections.zipWithIndex.foreach {
+          case (ExprProj(e, a, _), idx) =>
             val onion = encContext match {
-              case SingleEncProj(o) => o
+              case EncProj(o) => o(idx)
               case _ => Onions.ALL
             }
             val ctx =
@@ -754,7 +914,7 @@ trait Generator extends Traversals with Transformers {
                 finalProjs += ((ExprProj(s, a), o, false))
                 projPosMaps += Left((stmtIdx, o))
             }
-          case StarProj(_) => throw new RuntimeException("TODO: implement me")
+          case (StarProj(_), _) => throw new RuntimeException("TODO: implement me")
         }
       }
 
@@ -775,12 +935,14 @@ trait Generator extends Traversals with Transformers {
     val tdesc =
       finalProjs.map(p => if (p._2 == 0) ((None, p._3)) else ((Some(p._2), p._3)))
     val stage1 =
-      newLocalFilters.zip(localFilterPosMaps).foldLeft( RemoteSql(cur, tdesc) : PlanNode ) {
-        case (acc, (comp, mapping)) =>
-          LocalFilter(comp.mkSqlExpr(mapping),
-                      wrapDecryptionNodeMap(acc, mapping),
-                      comp.subqueries.map(_._2))
-      }
+      newLocalFilters
+        .zip(localFilterPosMaps)
+        .foldLeft( RemoteSql(cur, tdesc, finalSubqueryRelationPlans.toSeq) : PlanNode ) {
+          case (acc, (comp, mapping)) =>
+            LocalFilter(comp.mkSqlExpr(mapping),
+                        wrapDecryptionNodeMap(acc, mapping),
+                        comp.subqueries.map(_._2))
+        }
 
     val stage2 =
       newLocalGroupBy.zip(localGroupByPosMaps).foldLeft( stage1 : PlanNode ) {
@@ -864,34 +1026,101 @@ trait Generator extends Traversals with Transformers {
     encContext match {
       case PreserveOriginal => s1
       case PreserveCardinality => stage4 // don't care about projections
-      case SingleEncProj(o) =>
-        assert(s1.tupleDesc.size == 1)
+      case EncProj(o) =>
+        assert(s1.tupleDesc.size == o.size)
+
         // special case if stage4 is usuable
         val s4td = stage4.tupleDesc
-        if (s4td.size == 1 &&
-            !s4td.head._2 &&
-            s4td.head._1.map(_ == o).getOrElse(false)) {
+
+        if (s4td.zip(o).filter {
+              case ((Some(x), _), y) => x == y
+              case _ => false
+            }.size == s4td.size) {
           stage4
         } else {
-          // TODO: assert s1 doesn't leave in vector context
-          s1.tupleDesc(0) match {
-            case (Some(o0), _) if o0 == o => s1
+          val dec =
+            s1.tupleDesc.zip(o).zipWithIndex.flatMap {
+              case (((Some(x), _), y), _) if x == y => Seq.empty
+              case (((Some(x), _), y), i) if x != y => Seq(i)
+              case _                                => Seq.empty
+            }
 
-            case (Some(o0), _) =>
-              // decrypt -> encrypt
-              LocalEncrypt(
-                Seq((0, o)),
-                LocalDecrypt(
-                  Seq(0),
-                  s1))
+          val enc =
+            s1.tupleDesc.zip(o).zipWithIndex.flatMap {
+              case (((Some(x), _), y), _) if x == y => Seq.empty
+              case (((Some(x), _), y), i) if x != y => Seq((i, y))
+              case ((_, y), i)                      => Seq((i, y))
+            }
 
-            case (None, _) =>
-              // encrypt
-              LocalEncrypt(
-                Seq((0, o)),
-                s1)
-          }
+          val first = if (dec.isEmpty) s1 else LocalDecrypt(dec, s1)
+          val second = if (enc.isEmpty) first else LocalEncrypt(enc, first)
+          second
         }
+    }
+  }
+
+  private def getPotentialCryptoOpts(e: Node): Option[(Seq[SqlExpr], Int)] = {
+    // TODO: this is kind of hacky, we shouldn't have to special case this
+    def specialCaseExprOpSubselect(expr: SqlExpr, subselectAgg: SqlAgg) = {
+      if (!expr.isLiteral) {
+        subselectAgg match {
+          case Min(expr0, _) =>
+            Some((Seq(expr, expr0), Onions.OPE))
+          case Max(expr0, _) =>
+            Some((Seq(expr, expr0), Onions.OPE))
+          case _ => None
+        }
+      } else None
+    }
+    e match {
+      case eq: EqualityLike =>
+        (eq.lhs, eq.rhs) match {
+          case (lhs, Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _)) =>
+            specialCaseExprOpSubselect(lhs, expr)
+          case (Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _), rhs) =>
+            specialCaseExprOpSubselect(rhs, expr)
+          case (lhs, rhs) =>
+            Some((Seq(lhs, rhs), Onions.DET))
+          case _ => None
+        }
+
+      case ieq: InequalityLike =>
+        (ieq.lhs, ieq.rhs) match {
+          case (lhs, rhs) if rhs.isLiteral =>
+            Some((Seq(lhs), Onions.OPE))
+          case (lhs, rhs) if lhs.isLiteral =>
+            Some((Seq(rhs), Onions.OPE))
+          case (lhs, Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _)) =>
+            specialCaseExprOpSubselect(lhs, expr)
+          case (Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _), rhs) =>
+            specialCaseExprOpSubselect(rhs, expr)
+          case (lhs, rhs) =>
+            Some((Seq(lhs, rhs), Onions.OPE))
+        }
+
+      case Like(lhs, rhs, _, _) if rhs.isLiteral =>
+        Some((Seq(lhs), Onions.SWP))
+      case Like(lhs, rhs, _, _) if lhs.isLiteral =>
+        Some((Seq(rhs), Onions.SWP))
+      case Like(lhs, rhs, _, _) =>
+        Some((Seq(lhs, rhs), Onions.SWP))
+
+      case Min(expr, _) =>
+        Some((Seq(expr), Onions.OPE))
+
+      case Max(expr, _) =>
+        Some((Seq(expr), Onions.OPE))
+
+      case Sum(expr, _, _) =>
+        Some((Seq(expr), Onions.HOM))
+
+      case Avg(expr, _, _) =>
+        Some((Seq(expr), Onions.HOM))
+
+      case SqlOrderBy(keys, _) =>
+        Some((keys.map(_._1), Onions.OPE))
+
+      case _ => None
     }
   }
 
@@ -918,104 +1147,35 @@ trait Generator extends Traversals with Transformers {
 
       var workingSet : Seq[OnionSet] = bootstrap
 
-      def add1(sym: SqlExpr, o: Int): Boolean =
-        findOnionableExpr(sym).map {
-          case (_, t, e) =>
-            workingSet.foreach(_.add(t, e, o))
-            true
-        }.getOrElse(false)
-
-      def add2(symL: SqlExpr, symR: SqlExpr, o: Int): Boolean =
-        CollectionUtils.opt2(
-          findOnionableExpr(symL),
-          findOnionableExpr(symR))
-        .map {
-          case ((_, t0, e0), (_, t1, e1)) =>
-            workingSet.foreach(_.add(t0, e0, o))
-            workingSet.foreach(_.add(t1, e1, o))
-            true
-        }.getOrElse(false)
+      def add(exprs: Seq[SqlExpr], o: Int): Boolean = {
+        val e0 = exprs.map(findOnionableExpr).flatten
+        if (e0.size == exprs.size) {
+          e0.foreach { case (_, t, e) => workingSet.foreach(_.add(t, e, o)) }
+          true
+        } else false
+      }
 
       def negate(f: Node => Boolean): Node => Boolean = (n: Node) => { !f(n) }
 
-
-      // TODO: this is kind of hacky, we shouldn't have to special case this
-      def specialCaseExprOpSubselect(expr: SqlExpr, subselectAgg: SqlAgg) = {
-        if (!expr.isLiteral) {
-          subselectAgg match {
-            case Min(expr0, _) =>
-              add2(expr, expr0, Onions.OPE)
-            case Max(expr0, _) =>
-              add2(expr, expr0, Onions.OPE)
-            case _ =>
-          }
+      topDownTraverseContext(start, ctx)(negate { e =>
+        getPotentialCryptoOpts(e) match {
+          case Some(( exprs, o )) =>
+            add(exprs, o)
+          case None =>
+            e match {
+              case Subselect(ss, _) =>
+                workingSet = selectFn(ss, workingSet)
+                true
+              case _ => false
+            }
         }
-        false // keep going
-      }
-
-      topDownTraverseContext(start, ctx)(negate {
-
-        case eq: EqualityLike =>
-          (eq.lhs, eq.rhs) match {
-            case (lhs, Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _)) =>
-              specialCaseExprOpSubselect(lhs, expr)
-            case (Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _), rhs) =>
-              specialCaseExprOpSubselect(rhs, expr)
-            case (lhs, rhs) =>
-              add2(lhs, rhs, Onions.DET)
-            case _ => false
-          }
-
-        case ieq: InequalityLike =>
-          (ieq.lhs, ieq.rhs) match {
-            case (lhs, rhs) if rhs.isLiteral =>
-              add1(lhs, Onions.OPE)
-            case (lhs, rhs) if lhs.isLiteral =>
-              add1(rhs, Onions.OPE)
-            case (lhs, Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _)) =>
-              specialCaseExprOpSubselect(lhs, expr)
-            case (Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _), rhs) =>
-              specialCaseExprOpSubselect(rhs, expr)
-            case (lhs, rhs) =>
-              add2(lhs, rhs, Onions.OPE)
-          }
-
-        case Like(lhs, rhs, _, _) if rhs.isLiteral =>
-          add1(lhs, Onions.SWP)
-        case Like(lhs, rhs, _, _) if lhs.isLiteral =>
-          add1(rhs, Onions.SWP)
-        case Like(lhs, rhs, _, _) =>
-          add2(lhs, rhs, Onions.SWP)
-
-        case Min(expr, _) =>
-          add1(expr, Onions.OPE)
-        case Max(expr, _) =>
-          add1(expr, Onions.OPE)
-
-        case Sum(expr, _, _) =>
-          add1(expr, Onions.HOM)
-
-        case Avg(expr, _, _) =>
-          add1(expr, Onions.HOM)
-
-        case SqlOrderBy(keys, _) =>
-          CollectionUtils.optSeq(keys.map(k => findOnionableExpr(k._1))).map { _ =>
-            keys.foreach(k => add1(k._1, Onions.OPE))
-            true
-          }.getOrElse(false)
-
-        case Subselect(ss, _) =>
-          workingSet = selectFn(ss, workingSet)
-          true
-
-        case _ => false
       })
 
       workingSet
     }
 
     def buildForSelectStmt(stmt: SelectStmt, bootstrap: Seq[OnionSet]): Seq[OnionSet] = {
-      val SelectStmt(p, _, f, g, o, _, ctx) = stmt
+      val SelectStmt(p, r, f, g, o, _, ctx) = stmt
       val s0 = {
         var workingSet = bootstrap.map(_.copy)
         p.foreach { e =>
@@ -1023,14 +1183,18 @@ trait Generator extends Traversals with Transformers {
         }
         workingSet
       }
-
-      val s1 = f.map(e => traverseContext(e, ctx, bootstrap.map(_.copy), buildForSelectStmt))
-
-      val s2 = g.map(e => traverseContext(e, ctx, bootstrap.map(_.copy), buildForSelectStmt))
-
-      val s3 = o.map(e => traverseContext(e, ctx, bootstrap.map(_.copy), buildForSelectStmt))
-
-      s0 ++ s1.getOrElse(Seq.empty) ++ s2.getOrElse(Seq.empty) ++ s3.getOrElse(Seq.empty)
+      def processRelation(r: SqlRelation): Seq[OnionSet] =
+        r match {
+          case SubqueryRelationAST(subq, _, _) => buildForSelectStmt(subq, bootstrap.map(_.copy))
+          case JoinRelation(l, r, _, _, _)     => processRelation(l) ++ processRelation(r)
+          case _                               => Seq.empty
+        }
+      val s1 = r.map(_.flatMap(processRelation))
+      val s2 = f.map(e => traverseContext(e, ctx, bootstrap.map(_.copy), buildForSelectStmt))
+      val s3 = g.map(e => traverseContext(e, ctx, bootstrap.map(_.copy), buildForSelectStmt))
+      val s4 = o.map(e => traverseContext(e, ctx, bootstrap.map(_.copy), buildForSelectStmt))
+      (s0 ++ s1.getOrElse(Seq.empty) ++ s2.getOrElse(Seq.empty) ++
+      s3.getOrElse(Seq.empty) ++ s4.getOrElse(Seq.empty)).filterNot(_.isEmpty)
     }
 
     buildForSelectStmt(stmt, Seq(new OnionSet))

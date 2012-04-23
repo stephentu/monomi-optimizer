@@ -37,6 +37,15 @@ class Context(val parent: Either[Definitions, Context]) {
   def lookupProjection(name: String): Option[SqlExpr] =
     lookupProjection0(name, true)
 
+  // ignores wildcards, and treats preceeding wildcards as a single projection
+  // in terms of index calculation
+  def lookupNamedProjectionIndex(name: String): Option[Int] = {
+    projections.zipWithIndex.flatMap {
+      case (NamedProjection(n0, _, _), idx) if n0 == name => Some(idx)
+      case _ => None
+    }.headOption
+  }
+
   private def lookupProjection0(name: String, allowWildcard: Boolean): Option[SqlExpr] = {
     projections.flatMap {
       case NamedProjection(n0, expr, _) if n0 == name => Some(expr)

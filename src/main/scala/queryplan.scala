@@ -14,9 +14,19 @@ trait PlanNode {
   def indent(lvl: Int) = " " * (lvl * 4)
   def endl: String = "\n"
 }
-case class RemoteSql(stmt: SelectStmt, projs: Seq[(Option[Int], Boolean)]) extends PlanNode {
+case class RemoteSql(stmt: SelectStmt,
+                     projs: Seq[(Option[Int], Boolean)],
+                     subrelations: Seq[PlanNode] = Seq.empty) extends PlanNode {
   def tupleDesc = projs
-  def pretty0(lvl: Int) = "* RemoteSql(sql = " + stmt.sql + ", projs = " + projs + ")"
+  def pretty0(lvl: Int) = {
+    "* RemoteSql(sql = " + stmt.sql + ", projs = " + projs + ")" +
+    subrelations.map(c => childPretty(lvl, c)).mkString("")
+  }
+}
+case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
+  def tupleDesc = child.tupleDesc
+  def pretty0(lvl: Int) =
+    "* RemoteMaterialize(name = " + name + ")" + childPretty(lvl, child)
 }
 case class LocalFilter(expr: SqlExpr, child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
   def tupleDesc = child.tupleDesc

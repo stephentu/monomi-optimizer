@@ -100,6 +100,8 @@ class OnionSet {
     cpy
   }
 
+  def isEmpty: Boolean = opts.isEmpty
+
   override def toString = "OnionSet(" + opts.toString + ")"
 }
 

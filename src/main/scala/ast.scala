@@ -348,17 +348,25 @@ case class TableRelationAST(name: String, alias: Option[String], ctx: Context = 
 }
 case class SubqueryRelationAST(subquery: SelectStmt, alias: String, ctx: Context = null) extends SqlRelation {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq("(", subquery.sql, ")", alias) mkString " "
+  def sql = Seq("(", subquery.sql, ")", "as", alias) mkString " "
 }
 
-sealed abstract trait JoinType
-case class LeftJoin(outer: Boolean) extends JoinType
-case class RightJoin(outer: Boolean) extends JoinType
-case object InnerJoin extends JoinType
+sealed abstract trait JoinType {
+  def sql: String
+}
+case object LeftJoin extends JoinType {
+  def sql = "left join"
+}
+case object RightJoin extends JoinType {
+  def sql = "right join"
+}
+case object InnerJoin extends JoinType {
+  def sql = "join"
+}
 
 case class JoinRelation(left: SqlRelation, right: SqlRelation, tpe: JoinType, clause: SqlExpr, ctx: Context = null) extends SqlRelation {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq(left.sql, "join", right.sql, "on", clause.sql) mkString " "
+  def sql = Seq(left.sql, tpe.sql, right.sql, "on", "(", clause.sql, ")") mkString " "
 }
 
 sealed abstract trait OrderType
