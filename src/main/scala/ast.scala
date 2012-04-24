@@ -150,7 +150,7 @@ case class In(elem: SqlExpr, set: Seq[SqlExpr], negate: Boolean, ctx: Context = 
     elem.isLiteral && set.filter(e => !e.isLiteral).isEmpty
   def gatherFields =
     elem.gatherFields ++ set.flatMap(_.gatherFields)
-  def sql = Seq(elem, "in", "(", set.map(_.sql).mkString(", "), ")") mkString " "
+  def sql = Seq(elem.sql, "in", "(", set.map(_.sql).mkString(", "), ")") mkString " "
 }
 case class Like(lhs: SqlExpr, rhs: SqlExpr, negate: Boolean, ctx: Context = null) extends Binop {
   val opStr = if (negate) "not like" else "like"

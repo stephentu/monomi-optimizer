@@ -473,6 +473,20 @@ trait Generator extends Traversals with Transformers {
                 bailOut
             }
 
+          case in @ In(e, s, _, _) =>
+            onionRetVal.set(mkOnionRetVal(0))
+
+            def tryOnion(o: Int) = {
+              val t =
+                Seq(getSupportedExpr(e, o)) ++
+                s.map(x => if (x.isLiteral) Some(NullLiteral()) else getSupportedExpr(x, o))
+              CollectionUtils.optSeq(t).map { s0 =>
+                (Some(in.copy(elem = s0.head, set = s0.tail)), false)
+              }
+            }
+
+            tryOnion(Onions.DET).orElse(tryOnion(Onions.OPE)).getOrElse(bailOut)
+
           case ex @ Exists(ss, _) =>
             val plan = generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveCardinality)
             plan match {
@@ -577,6 +591,7 @@ trait Generator extends Traversals with Transformers {
 
             curRewriteCtx match {
               case FilterCtx | GroupByHavingCtx =>
+                println("cannot handle expr: " + e.sql)
                 throw new RuntimeException("TODO: need to evaluate in boolean context")
               case ProjCtx(o) => handleProj(o)
               case ProjUnaggCtx(o) => handleProj(o)
@@ -1275,6 +1290,10 @@ trait Generator extends Traversals with Transformers {
           CollectionUtils.optSeq(
             cases.map(c => getPotentialCryptoOpts0(c, constraints))).map(_.flatten)
         }
+
+      case In(e, s, _, _) =>
+        CollectionUtils.optSeq(
+          (Seq(e) ++ s).map(x => getPotentialCryptoOpts0(x, Onions.DET))).map(_.flatten)
 
       case f : FieldIdent => Some(Seq((f, constraints)))
 
