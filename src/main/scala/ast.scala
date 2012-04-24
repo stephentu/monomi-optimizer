@@ -292,7 +292,7 @@ case class CaseExpr(expr: SqlExpr, cases: Seq[CaseExprCase], default: Option[Sql
   def gatherFields =
     expr.gatherFields ++
     cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields)
-  def sql = Seq(Some("case"), Some(expr.sql), Some(cases.map(_.sql) mkString " "), default.map(_.sql), Some("end")).flatten.mkString(" ")
+  def sql = Seq(Some("case"), Some(expr.sql), Some(cases.map(_.sql) mkString " "), default.map(d => "else " + d.sql), Some("end")).flatten.mkString(" ")
 }
 case class CaseWhenExpr(cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -300,7 +300,7 @@ case class CaseWhenExpr(cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx:
     cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty
   def gatherFields =
     cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields)
-  def sql = Seq(Some("case"), Some(cases.map(_.sql) mkString " "), default.map(_.sql), Some("end")).flatten.mkString(" ")
+  def sql = Seq(Some("case"), Some(cases.map(_.sql) mkString " "), default.map(d => "else " + d.sql), Some("end")).flatten.mkString(" ")
 }
 
 case class UnaryPlus(expr: SqlExpr, ctx: Context = null) extends Unop {

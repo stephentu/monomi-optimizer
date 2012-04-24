@@ -39,7 +39,7 @@ object CollectionUtils {
   def powerSetMinusEmpty[T](s: Seq[T]): Seq[Seq[T]] =
     powerSet(s).filterNot(_.isEmpty)
 
-  def opt2[T](t0: Option[T], t1: Option[T]): Option[(T, T)] = {
+  def optAnd2[T](t0: Option[T], t1: Option[T]): Option[(T, T)] = {
     if (t0.isDefined) {
       t1.map(x => (t0.get, x))
     } else None

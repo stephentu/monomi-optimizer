@@ -16,6 +16,8 @@ trait Generator extends Traversals with Transformers {
     }
   }
 
+  private def negate(f: Node => Boolean): Node => Boolean = (n: Node) => { !f(n) }
+
   //private def isSingleAggGroupStmt(stmt: SelectStmt): Boolean = {
   //  if (stmt.groupBy.isDefined) return false
   //  var found = false
@@ -43,6 +45,22 @@ trait Generator extends Traversals with Transformers {
     def split(e: SqlExpr, buffer: ArrayBuffer[SqlExpr]): ArrayBuffer[SqlExpr] = {
       e match {
         case And(lhs, rhs, _) =>
+          split(lhs, buffer)
+          split(rhs, buffer)
+        case _ => buffer += e
+      }
+      buffer
+    }
+    split(e, new ArrayBuffer[SqlExpr]).toSeq
+  }
+
+  private def splitTopLevelClauses(e: SqlExpr): Seq[SqlExpr] = {
+    def split(e: SqlExpr, buffer: ArrayBuffer[SqlExpr]): ArrayBuffer[SqlExpr] = {
+      e match {
+        case And(lhs, rhs, _) =>
+          split(lhs, buffer)
+          split(rhs, buffer)
+        case Or(lhs, rhs, _) =>
           split(lhs, buffer)
           split(rhs, buffer)
         case _ => buffer += e
@@ -211,6 +229,7 @@ trait Generator extends Traversals with Transformers {
         def mkExpr(expr0: SqlExpr): SqlExpr = {
           topDownTransformation(expr0) {
             case e: SqlExpr => testExpr(e).map(x => (Some(x), false)).getOrElse(keepGoing)
+            case _          => keepGoing
           }.asInstanceOf[SqlExpr]
         }
 
@@ -220,7 +239,8 @@ trait Generator extends Traversals with Transformers {
 
     var cur = stmt // the current statement, as we update it
 
-    val _generator = new NameGenerator("_projection")
+
+    val _hiddenNames = new NameGenerator("_hidden")
 
     val newLocalFilters = new ArrayBuffer[ClientComputation]
     val localFilterPosMaps = new ArrayBuffer[Map[SqlProj, Int]]
@@ -297,16 +317,20 @@ trait Generator extends Traversals with Transformers {
     def rewriteExprForServer(expr: SqlExpr, rewriteCtx: RewriteContext):
       (SqlExpr, Int, Option[ClientComputation]) = {
 
-      def mkOnionRetVal(o: Int) = rewriteCtx match {
-        case FilterCtx | GroupByHavingCtx => 0
-        case ProjCtx(_) | ProjUnaggCtx(_) => o
-        case _ => throw new RuntimeException("TODO: impl")
-      }
-
       // this is ok, b/c we remove units of conjunctions
       val cannotAnswerExpr = (Some(IntLiteral(1)), false)
 
-      def doTransform(e: SqlExpr): (SqlExpr, Int, Option[ClientComputation]) = {
+      // TODO: we need to really enforce curRewriteCtx (it's done very
+      // ad-hoc now)
+      def doTransform(e: SqlExpr, curRewriteCtx: RewriteContext):
+        (SqlExpr, Int, Option[ClientComputation]) = {
+
+        def mkOnionRetVal(o: Int) = curRewriteCtx match {
+          case FilterCtx | GroupByHavingCtx => 0
+          case ProjCtx(_) | ProjUnaggCtx(_) => o
+          case _ => throw new RuntimeException("TODO: impl")
+        }
+
         val onionRetVal = new SetOnce[Int] // TODO: FIX THIS HACK
         var _exprValid = true
         def bailOut = {
@@ -399,10 +423,10 @@ trait Generator extends Traversals with Transformers {
                 case (_, ss @ Subselect(_, _)) => handleOne(ss, lhs)
                 case _ =>
                   CollectionUtils.optOr2(
-                    CollectionUtils.opt2(
+                    CollectionUtils.optAnd2(
                       getSupportedExpr(lhs, Onions.DET),
                       getSupportedExpr(rhs, Onions.DET)),
-                    CollectionUtils.opt2(
+                    CollectionUtils.optAnd2(
                       getSupportedExpr(lhs, Onions.OPE),
                       getSupportedExpr(rhs, Onions.OPE)))
                   .map {
@@ -427,7 +451,7 @@ trait Generator extends Traversals with Transformers {
               case (lhs, rhs) if lhs.isLiteral =>
                 getSupportedExpr(rhs, Onions.OPE).map(fi => (Some(ieq.copyWithChildren(NullLiteral(), fi)), false)).getOrElse(bailOut)
               case (lhs, rhs) =>
-                CollectionUtils.opt2(
+                CollectionUtils.optAnd2(
                   getSupportedExpr(lhs, Onions.OPE),
                   getSupportedExpr(rhs, Onions.OPE))
                 .map {
@@ -457,29 +481,69 @@ trait Generator extends Traversals with Transformers {
               case _ => bailOut
             }
 
-          case cs @ CountStar(_) if rewriteCtx.aggsValid =>
+          case cs @ CountStar(_) if curRewriteCtx.aggsValid =>
             onionRetVal.set(mkOnionRetVal(0))
             answerWithoutModification(cs)
 
-          case m @ Min(f, _) if rewriteCtx.aggsValid =>
+          case m @ Min(f, _) if curRewriteCtx.aggsValid =>
             onionRetVal.set(mkOnionRetVal(Onions.OPE))
             getSupportedExpr(f, Onions.OPE).map(fi => (Some(Min(fi)), false)).getOrElse(bailOut)
 
-          case m @ Max(f, _) if rewriteCtx.aggsValid =>
+          case m @ Max(f, _) if curRewriteCtx.aggsValid =>
             onionRetVal.set(mkOnionRetVal(Onions.OPE))
             getSupportedExpr(f, Onions.OPE).map(fi => (Some(Max(fi)), false)).getOrElse(bailOut)
 
-          case s @ Sum(f, _, _) if rewriteCtx.aggsValid =>
+          case s @ Sum(f, _, _) if curRewriteCtx.aggsValid =>
             onionRetVal.set(mkOnionRetVal(Onions.HOM))
-            getSupportedExpr(f, Onions.HOM).map(fi => (Some(AggCall("hom_add", Seq(fi))), false)).getOrElse(bailOut)
+            doTransform(f, ProjCtx(Onions.HOM)) match {
+              case (f0, Onions.HOM, None) => (Some(AggCall("hom_add", Seq(f0))), false)
+              case _                      => bailOut
+            }
+
+          case CaseWhenExpr(cases, default, _) =>
+
+            // TODO: this is a temp hack for now
+            val innerCtx = curRewriteCtx match {
+              case c : ProjCtx => c
+              case _ => ProjCtx(Onions.DET)
+            }
+
+            onionRetVal.set(innerCtx.o)
+
+            def processCaseExprCase(c: CaseExprCase) = {
+              val CaseExprCase(cond, expr, _) = c
+              doTransform(cond, ProjCtx(Onions.DET)) match {
+                case (c0, _, None) =>
+                  doTransform(expr, innerCtx) match {
+                    case (e0, _, None) => Some(CaseExprCase(c0, e0))
+                    case _ => None
+                  }
+                case _ => None
+              }
+            }
+
+            CollectionUtils.optSeq(cases.map(processCaseExprCase)).map { cases0 =>
+              default match {
+                case Some(d) =>
+                  (doTransform(d, innerCtx) match {
+                    case (e0, _, None) => Some(e0)
+                    case _ => None
+                  }).map { d0 =>
+                    (Some(CaseWhenExpr(cases0, Some(d0))), false)
+                  }.getOrElse(bailOut)
+                case None =>
+                  (Some(CaseWhenExpr(cases0, None)), false)
+              }
+            }.getOrElse(bailOut)
 
           case e: SqlExpr =>
 
             def handleProj(onion: Int) = {
-              val d = getSupportedExpr(e, Onions.DET)
-              val o = getSupportedExpr(e, Onions.OPE)
-              val h = getSupportedExpr(e, Onions.HOM)
-              val s = getSupportedExpr(e, Onions.SWP)
+
+              val d = if (e.isLiteral) Some(NullLiteral()) else getSupportedExpr(e, Onions.DET)
+              val o = if (e.isLiteral) Some(NullLiteral()) else getSupportedExpr(e, Onions.OPE)
+              val h = if (e.isLiteral) Some(NullLiteral()) else getSupportedExpr(e, Onions.HOM)
+              val s = if (e.isLiteral) Some(NullLiteral()) else getSupportedExpr(e, Onions.SWP)
 
               // try to honor the given onions first
               if ((onion & Onions.DET) != 0 && d.isDefined) {
@@ -511,7 +575,7 @@ trait Generator extends Traversals with Transformers {
               }
             }
 
-            rewriteCtx match {
+            curRewriteCtx match {
               case FilterCtx | GroupByHavingCtx =>
                 throw new RuntimeException("TODO: need to evaluate in boolean context")
               case ProjCtx(o) => handleProj(o)
@@ -548,12 +612,41 @@ trait Generator extends Traversals with Transformers {
           // return value is:
           // ( expr to replace in e -> ( replacement expr, seq( projections needed ) ) )
           def mkOptimizations(e: SqlExpr): Map[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, Int, Boolean)])] = {
+
             val ret = new HashMap[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, Int, Boolean)])]
+
+            def handleBinopSpecialCase(op: Binop): Boolean = {
+              val a = doTransform(op.lhs, ProjCtx(Onions.ALL))
+              val b = doTransform(op.rhs, ProjCtx(Onions.ALL))
+
+              a match {
+                case (aexpr, ao, None) =>
+                  b match {
+                    case (bexpr, bo, None) =>
+                      val id0 = _hiddenNames.uniqueId()
+                      val id1 = _hiddenNames.uniqueId()
+
+                      val expr0 = FieldIdent(None, id0)
+                      val expr1 = FieldIdent(None, id1)
+
+                      val projs = Seq(
+                        (expr0, ExprProj(aexpr, None), ao, false),
+                        (expr1, ExprProj(bexpr, None), bo, false))
+
+                      ret += (op -> (op.copyWithChildren(expr0, expr1), projs))
+
+                      false // stop
+                    case _ => true
+                  }
+                case _ => true
+              }
+            }
+
             topDownTraverseContext(e, e.ctx) {
-              case avg @ Avg(f, _, _) if rewriteCtx.aggsValid =>
+              case avg @ Avg(f, _, _) if curRewriteCtx.aggsValid =>
                 getSupportedExpr(f, Onions.HOM).map(fi => {
-                  val id0 = _generator.uniqueId()
-                  val id1 = _generator.uniqueId()
+                  val id0 = _hiddenNames.uniqueId()
+                  val id1 = _hiddenNames.uniqueId()
 
                   val expr0 = FieldIdent(None, id0)
                   val expr1 = FieldIdent(None, id1)
@@ -567,11 +660,17 @@ trait Generator extends Traversals with Transformers {
                   false // stop
                 }).getOrElse(true) // keep traversing
 
+              case b: Div   => handleBinopSpecialCase(b)
+              case b: Mult  => handleBinopSpecialCase(b)
+              case b: Plus  => handleBinopSpecialCase(b)
+              case b: Minus => handleBinopSpecialCase(b)
+
               case _ => true // keep traversing
             }
             ret.toMap
           }
 
+          //val _generator = new NameGenerator("_projection")
           def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, Int, Boolean)] = {
 
             val fields = resolveAliases(e).gatherFields
@@ -589,10 +688,12 @@ trait Generator extends Traversals with Transformers {
             fields.map {
               case (f, false) =>
                 val (ft, o) = translateField(f)
-                (f, ExprProj(ft, Some(_generator.uniqueId())), o, false)
+                //(f, ExprProj(ft, Some(_generator.uniqueId())), o, false)
+                (f, ExprProj(ft, None), o, false)
               case (f, true) =>
                 val (ft, o) = translateField(f)
-                (f, ExprProj(GroupConcat(ft, ","), Some(_generator.uniqueId())), o, true)
+                //(f, ExprProj(GroupConcat(ft, ","), Some(_generator.uniqueId())), o, true)
+                (f, ExprProj(GroupConcat(ft, ","), None), o, true)
             }
           }
 
@@ -628,7 +729,7 @@ trait Generator extends Traversals with Transformers {
         }
       }
 
-      val exprs = splitTopLevelConjunctions(expr).map(doTransform)
+      val exprs = splitTopLevelConjunctions(expr).map(x => doTransform(x, rewriteCtx))
       assert(!exprs.isEmpty)
 
       val serverExpr = foldTopLevelConjunctions(exprs.map(_._1))
@@ -661,13 +762,13 @@ trait Generator extends Traversals with Transformers {
           ctx: Context,
           selectFn: (SelectStmt) => Unit): Unit = {
 
-          def add(exprs: Seq[SqlExpr], o: Int): Boolean = {
-            val e0 = exprs.map(e => getSupportedExpr(e, o)).flatten
+          def add(exprs: Seq[(SqlExpr, Int)]): Boolean = {
+            val e0 = exprs.map(e => getSupportedExpr(e._1, e._2)).flatten
             if (e0.size == exprs.size) {
               // look for references to elements from this subquery
               exprs.foreach { e =>
                 e match {
-                  case FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _) =>
+                  case (FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _), o) =>
                     if (ctx.relations(relation).isInstanceOf[SubqueryRelation]) {
                       val idx =
                         ctx
@@ -684,20 +785,30 @@ trait Generator extends Traversals with Transformers {
             } else false
           }
 
-          def negate(f: Node => Boolean): Node => Boolean = (n: Node) => { !f(n) }
-
-          topDownTraverseContext(start, ctx)(negate { e =>
-            getPotentialCryptoOpts(e) match {
-              case Some(( exprs, o )) =>
-                add(exprs, o)
+          def procNode(n: Node) = {
+            getPotentialCryptoOpts(n) match {
+              case Some(exprs) => add(exprs)
               case None =>
-                e match {
+                n match {
                   case Subselect(ss, _) =>
                     selectFn(ss)
                     true
                   case _ => false
                 }
             }
+          }
+
+          topDownTraverseContext(start, ctx)(negate {
+            case e: SqlExpr =>
+              val clauses = splitTopLevelClauses(e)
+              assert(!clauses.isEmpty)
+              if (clauses.size == 1) {
+                procNode(clauses.head)
+              } else {
+                clauses.foreach(c => traverseContext(c, ctx, selectFn))
+                true
+              }
+            case e => procNode(e)
           })
         }
 
@@ -1059,15 +1170,33 @@ trait Generator extends Traversals with Transformers {
     }
   }
 
-  private def getPotentialCryptoOpts(e: Node): Option[(Seq[SqlExpr], Int)] = {
+  // if we want to answer e all on the server (modulo some decryption),
+  // return the set of expressions and the corresponding bitmask of acceptable
+  // onions (that is, any of the onions given is sufficient for a server side
+  // rewrite), such that pre-computation is minimal
+  private def getPotentialCryptoOpts(e: Node): Option[Seq[(SqlExpr, Int)]] = {
+    def pickOne(o: Int): Int = {
+      assert(o != 0)
+      var i = 0x1
+      while (i < 0x70000000) {
+        if ((o & i) != 0) return i
+        i = i << 1
+      }
+      assert(false)
+      0
+    }
+    getPotentialCryptoOpts0(e, Onions.ALL).map(_.map(x => (x._1, pickOne(x._2))))
+  }
+
+  private def getPotentialCryptoOpts0(e: Node, constraints: Int): Option[Seq[(SqlExpr, Int)]] = {
     // TODO: this is kind of hacky, we shouldn't have to special case this
     def specialCaseExprOpSubselect(expr: SqlExpr, subselectAgg: SqlAgg) = {
       if (!expr.isLiteral) {
         subselectAgg match {
           case Min(expr0, _) =>
-            Some((Seq(expr, expr0), Onions.OPE))
+            getPotentialCryptoOpts0(expr0, Onions.OPE)
           case Max(expr0, _) =>
-            Some((Seq(expr, expr0), Onions.OPE))
+            getPotentialCryptoOpts0(expr0, Onions.OPE)
           case _ => None
         }
       } else None
@@ -1075,50 +1204,83 @@ trait Generator extends Traversals with Transformers {
     e match {
       case eq: EqualityLike =>
         (eq.lhs, eq.rhs) match {
+          case (lhs, rhs) if rhs.isLiteral =>
+            getPotentialCryptoOpts0(lhs, Onions.DET)
+          case (lhs, rhs) if lhs.isLiteral =>
+            getPotentialCryptoOpts0(rhs, Onions.DET)
           case (lhs, Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _)) =>
             specialCaseExprOpSubselect(lhs, expr)
           case (Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _), rhs) =>
             specialCaseExprOpSubselect(rhs, expr)
           case (lhs, rhs) =>
-            Some((Seq(lhs, rhs), Onions.DET))
-          case _ => None
+            CollectionUtils.optAnd2(
+              getPotentialCryptoOpts0(lhs, Onions.DET),
+              getPotentialCryptoOpts0(rhs, Onions.DET)).map { case (l, r) => l ++ r }
         }
 
       case ieq: InequalityLike =>
         (ieq.lhs, ieq.rhs) match {
           case (lhs, rhs) if rhs.isLiteral =>
-            Some((Seq(lhs), Onions.OPE))
+            getPotentialCryptoOpts0(lhs, Onions.OPE)
           case (lhs, rhs) if lhs.isLiteral =>
-            Some((Seq(rhs), Onions.OPE))
+            getPotentialCryptoOpts0(rhs, Onions.OPE)
           case (lhs, Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _)) =>
             specialCaseExprOpSubselect(lhs, expr)
           case (Subselect(SelectStmt(Seq(ExprProj(expr: SqlAgg, _, _)), _, _, _, _, _, _), _), rhs) =>
             specialCaseExprOpSubselect(rhs, expr)
           case (lhs, rhs) =>
-            Some((Seq(lhs, rhs), Onions.OPE))
+            CollectionUtils.optAnd2(
+              getPotentialCryptoOpts0(lhs, Onions.OPE),
+              getPotentialCryptoOpts0(rhs, Onions.OPE)).map { case (l, r) => l ++ r }
         }
 
       case Like(lhs, rhs, _, _) if rhs.isLiteral =>
-        Some((Seq(lhs), Onions.SWP))
+        getPotentialCryptoOpts0(lhs, Onions.SWP)
       case Like(lhs, rhs, _, _) if lhs.isLiteral =>
-        Some((Seq(rhs), Onions.SWP))
+        getPotentialCryptoOpts0(rhs, Onions.SWP)
       case Like(lhs, rhs, _, _) =>
-        Some((Seq(lhs, rhs), Onions.SWP))
+        CollectionUtils.optAnd2(
+          getPotentialCryptoOpts0(lhs, Onions.SWP),
+          getPotentialCryptoOpts0(rhs, Onions.SWP)).map { case (l, r) => l ++ r }
 
       case Min(expr, _) =>
-        Some((Seq(expr), Onions.OPE))
+        getPotentialCryptoOpts0(expr, Onions.OPE)
 
       case Max(expr, _) =>
-        Some((Seq(expr), Onions.OPE))
+        getPotentialCryptoOpts0(expr, Onions.OPE)
 
       case Sum(expr, _, _) =>
-        Some((Seq(expr), Onions.HOM))
+        getPotentialCryptoOpts0(expr, Onions.HOM)
 
       case Avg(expr, _, _) =>
-        Some((Seq(expr), Onions.HOM))
+        getPotentialCryptoOpts0(expr, Onions.HOM)
+
+      case CountStar(_) => Some(Seq.empty)
 
       case SqlOrderBy(keys, _) =>
-        Some((keys.map(_._1), Onions.OPE))
+        CollectionUtils.optSeq(
+          keys.map(x => getPotentialCryptoOpts0(x._1, Onions.OPE))).map(_.flatten)
+
+      case CaseExprCase(cond, expr, _) =>
+        CollectionUtils.optAnd2(
+          getPotentialCryptoOpts0(cond, Onions.ALL),
+          getPotentialCryptoOpts0(expr, constraints)).map { case (l, r) => l ++ r }
+
+      case CaseWhenExpr(cases, default, _) =>
+        default.flatMap { d =>
+          CollectionUtils.optSeq(
+            cases.map(c => getPotentialCryptoOpts0(c, constraints)) ++
+            Seq(getPotentialCryptoOpts0(d, constraints))).map(_.flatten)
+        }.orElse {
+          CollectionUtils.optSeq(
+            cases.map(c => getPotentialCryptoOpts0(c, constraints))).map(_.flatten)
+        }
+
+      case f : FieldIdent => Some(Seq((f, constraints)))
+
+      case e : SqlExpr if e.isLiteral => Some(Seq.empty)
+
+      case e : SqlExpr if e.getPrecomputableRelation.isDefined => Some(Seq((e, constraints)))
 
       case _ => None
     }
@@ -1147,28 +1309,41 @@ trait Generator extends Traversals with Transformers {
 
       var workingSet : Seq[OnionSet] = bootstrap
 
-      def add(exprs: Seq[SqlExpr], o: Int): Boolean = {
-        val e0 = exprs.map(findOnionableExpr).flatten
+      def add(exprs: Seq[(SqlExpr, Int)]): Boolean = {
+        val e0 = exprs.map { case (e, o) => findOnionableExpr(e).map(e0 => (e0, o)) }.flatten
         if (e0.size == exprs.size) {
-          e0.foreach { case (_, t, e) => workingSet.foreach(_.add(t, e, o)) }
+          e0.foreach { case ((_, t, e), o) => workingSet.foreach(_.add(t, e, o)) }
           true
         } else false
       }
 
-      def negate(f: Node => Boolean): Node => Boolean = (n: Node) => { !f(n) }
-
-      topDownTraverseContext(start, ctx)(negate { e =>
-        getPotentialCryptoOpts(e) match {
-          case Some(( exprs, o )) =>
-            add(exprs, o)
+      def procNode(n: Node) = {
+        getPotentialCryptoOpts(n) match {
+          case Some(exprs) => add(exprs)
           case None =>
-            e match {
+            n match {
               case Subselect(ss, _) =>
                 workingSet = selectFn(ss, workingSet)
                 true
               case _ => false
             }
         }
+      }
+
+      topDownTraverseContext(start, ctx)(negate {
+        case e: SqlExpr =>
+          val clauses = splitTopLevelClauses(e)
+          assert(!clauses.isEmpty)
+          if (clauses.size == 1) {
+            procNode(clauses.head)
+          } else {
+            val sets = clauses.flatMap(c => traverseContext(c, ctx, bootstrap, selectFn))
+            workingSet = workingSet.map { ws =>
+              sets.foldLeft(ws) { case (acc, elem) => acc.merge(elem) }
+            }
+            true
+          }
+        case e => procNode(e)
       })
 
       workingSet
