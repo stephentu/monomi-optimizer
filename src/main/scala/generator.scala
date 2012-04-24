@@ -508,9 +508,13 @@ trait Generator extends Traversals with Transformers {
             getSupportedExpr(f, Onions.OPE).map(fi => (Some(Max(fi)), false)).getOrElse(bailOut)
 
           case s @ Sum(f, _, _) if curRewriteCtx.aggsValid =>
-            onionRetVal.set(mkOnionRetVal(Onions.HOM))
-            doTransform(f, ProjCtx(Onions.HOM)) match {
+
+            val onion = if (f.isRValueLiteral) 0 else Onions.HOM
+
+            onionRetVal.set(mkOnionRetVal(onion))
+            doTransform(f, ProjCtx(onion)) match {
               case (f0, Onions.HOM, None) => (Some(AggCall("hom_add", Seq(f0))), false)
+              case (f0,          0, None) => (Some(s.copy(expr = f0)),           false)
               case _                      => bailOut
             }
 
@@ -552,7 +556,10 @@ trait Generator extends Traversals with Transformers {
 
           case e: SqlExpr =>
 
-            def handleProj(onion: Int) = {
+            def handleProj(onion: Int): (Option[SqlExpr], Boolean) = {
+
+              // special case
+              if (e.isLiteral && onion == 0) return (Some(e), false)
 
               val d = if (e.isLiteral) Some(NullLiteral()) else getSupportedExpr(e, Onions.DET)
               val o = if (e.isLiteral) Some(NullLiteral()) else getSupportedExpr(e, Onions.OPE)

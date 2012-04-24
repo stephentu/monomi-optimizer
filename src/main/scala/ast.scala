@@ -38,6 +38,9 @@ trait SqlExpr extends Node {
   def getType: DataType = UnknownType
   def isLiteral: Boolean = false
 
+  // is the r-value of this expression a literal?
+  def isRValueLiteral: Boolean = isLiteral
+
   // return value is:
   // ( (table) relation name for this node's ctx, global table name )
   def getPrecomputableRelation: Option[(String, String)] = {
@@ -288,18 +291,28 @@ case class CaseExpr(expr: SqlExpr, cases: Seq[CaseExprCase], default: Option[Sql
   def copyWithContext(c: Context) = copy(ctx = c)
   override def isLiteral =
     expr.isLiteral &&
-    cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty
+    cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty &&
+    default.map(_.isLiteral).getOrElse(true)
+  override def isRValueLiteral =
+    cases.filterNot(_.expr.isRValueLiteral).isEmpty &&
+    default.map(_.isRValueLiteral).getOrElse(true)
   def gatherFields =
     expr.gatherFields ++
-    cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields)
+    cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields) ++
+    default.map(_.gatherFields).getOrElse(Seq.empty)
   def sql = Seq(Some("case"), Some(expr.sql), Some(cases.map(_.sql) mkString " "), default.map(d => "else " + d.sql), Some("end")).flatten.mkString(" ")
 }
 case class CaseWhenExpr(cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   override def isLiteral =
-    cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty
+    cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty &&
+    default.map(_.isLiteral).getOrElse(true)
+  override def isRValueLiteral =
+    cases.filterNot(_.expr.isRValueLiteral).isEmpty &&
+    default.map(_.isRValueLiteral).getOrElse(true)
   def gatherFields =
-    cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields)
+    cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields) ++
+    default.map(_.gatherFields).getOrElse(Seq.empty)
   def sql = Seq(Some("case"), Some(cases.map(_.sql) mkString " "), default.map(d => "else " + d.sql), Some("end")).flatten.mkString(" ")
 }
 
