@@ -1,17 +1,55 @@
-import scala.collection.mutable.HashMap
+import scala.collection.mutable.{ ArrayBuffer, HashMap }
 
 object Onions {
-  final val DET = 0x1
-  final val OPE = 0x1 << 1
-  final val HOM = 0x1 << 2
-  final val SWP = 0x1 << 3
-  final val ALL = 0x7FFFFFFF
+  final val PLAIN = 0x1
+  final val DET   = 0x1 << 1
+  final val OPE   = 0x1 << 2
+  final val HOM   = 0x1 << 3
+  final val SWP   = 0x1 << 4
+  final val ALL   = 0x7FFFFFFF
+
+  // Convenience bitmasks
+  final val Countable        = PLAIN | DET | OPE
+  final val Comparable       = PLAIN | DET | OPE
+  final val EqualComparable  = PLAIN | DET
+  final val IEqualComparable = PLAIN | OPE
+  final val Addable          = PLAIN | HOM
+  final val Searchable       = PLAIN | SWP
 
   def str(o: Int): String = o match {
-    case DET => "DET"
-    case OPE => "OPE"
-    case HOM => "HOM"
-    case SWP => "SWP"
+    case PLAIN => "PLAIN"
+    case DET   => "DET"
+    case OPE   => "OPE"
+    case HOM   => "HOM"
+    case SWP   => "SWP"
+    case _     => "UNKNOWN(0x%x)".format(o)
+  }
+
+  def pickOne(o: Int): Int = {
+    def t(m: Int) = (o & m) != 0
+    if (t(PLAIN)) PLAIN
+    else if (t(DET)) DET
+    else if (t(OPE)) OPE
+    else if (t(HOM)) HOM
+    else if (t(SWP)) SWP
+    else throw new RuntimeException("could not pick one onion from: 0x%x".format(o))
+  }
+
+  def toSeq(o: Int): Seq[Int] = {
+    val buf = new ArrayBuffer[Int]
+    def t(m: Int) = (o & m) != 0
+    if (t(PLAIN)) buf += PLAIN
+    if (t(DET))   buf += DET
+    if (t(OPE))   buf += OPE
+    if (t(HOM))   buf += HOM
+    if (t(SWP))   buf += SWP
+    buf.toSeq
+  }
+
+  def completeSeqWithPreference(o: Int): Seq[Int] = {
+    val s = toSeq(o)
+    val s0 = s.toSet
+    s ++ Seq(PLAIN, DET, OPE, HOM, SWP).flatMap(x => if (s0.contains(x)) Seq.empty else Seq(x))
   }
 }
 
