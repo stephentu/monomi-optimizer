@@ -64,8 +64,6 @@ trait Generator extends Traversals with Transformers {
     s.reduceLeft( (acc: SqlExpr, elem: SqlExpr) => And(acc, elem) )
   }
 
-  private val subRelnGen = new NameGenerator("subrelation")
-
   // the return value is:
   // (relation name in e's ctx, global table name, expr out of the global table)
   //
@@ -152,6 +150,8 @@ trait Generator extends Traversals with Transformers {
         assert(stmt.ctx.projections.size == o.size)
       case _ =>
     }
+
+    val subRelnGen = new NameGenerator("subrelation")
 
     // return a *server-side expr* which is equivalent to e under onion o,
     // if possible. otherwise return None. o can be a bitmask of allowed
@@ -531,26 +531,37 @@ trait Generator extends Traversals with Transformers {
                 tryHom.getOrElse(bailOut)
               } else { bailOut }
 
-            case CaseWhenExpr(cases, default, _) =>
-              // TODO: try restricting to different onions (not just the first one)
-              onionRetVal.set(curRewriteCtx.onions.head)
-              def processCaseExprCase(c: CaseExprCase) = {
-                val CaseExprCase(cond, expr, _) = c
-                doTransformServer(cond, curRewriteCtx.restrictTo(Onions.PLAIN)).flatMap { case (c0, _) =>
-                  doTransformServer(expr, curRewriteCtx.restrict).map { case (e0, _) => CaseExprCase(c0, e0) }
+            case cw @ CaseWhenExpr(cases, default, _) =>
+              println("found cw: " + cw.sql)
+              println("onions: " + curRewriteCtx.onions)
+              def tryWith(o: Int): Option[SqlExpr] = {
+                def processCaseExprCase(c: CaseExprCase) = {
+                  val CaseExprCase(cond, expr, _) = c
+                  doTransformServer(cond, curRewriteCtx.restrictTo(Onions.PLAIN)).flatMap {
+                    case (c0, _) =>
+                      doTransformServer(expr, curRewriteCtx.restrictTo(o)).map {
+                        case (e0, _) => CaseExprCase(c0, e0)
+                      }
+                  }
+                }
+                CollectionUtils.optSeq(cases.map(processCaseExprCase)).flatMap { cases0 =>
+                  default match {
+                    case Some(d) =>
+                      doTransformServer(d, curRewriteCtx.restrictTo(o)).map {
+                        case (d0, _) =>
+                          onionRetVal.set(o)
+                          CaseWhenExpr(cases0, Some(d0))
+                      }
+                    case None =>
+                      onionRetVal.set(o)
+                      Some(CaseWhenExpr(cases0, None))
+                  }
                 }
               }
 
-              CollectionUtils.optSeq(cases.map(processCaseExprCase)).map { cases0 =>
-                default match {
-                  case Some(d) =>
-                    doTransformServer(d, curRewriteCtx.restrict).map { case (d0, _) =>
-                      replaceWith(CaseWhenExpr(cases0, Some(d0)))
-                    }.getOrElse(bailOut)
-                  case None =>
-                    replaceWith(CaseWhenExpr(cases0, None))
-                }
-              }.getOrElse(bailOut)
+              curRewriteCtx.onions.foldLeft( None : Option[SqlExpr] ) {
+                case (acc, onion) => acc.orElse(tryWith(onion))
+              }.map(replaceWith).getOrElse(bailOut)
 
             case e: SqlExpr if e.isLiteral =>
               onionRetVal.set(curRewriteCtx.onions.head)
@@ -611,9 +622,10 @@ trait Generator extends Traversals with Transformers {
               val ret = new HashMap[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, Int, Boolean)])]
 
               def handleBinopSpecialCase(op: Binop): Boolean = {
+                println("handleBinopSpecialCase(): op = " + op.sql)
                 // TODO: should get the agg context more correctly
-                val a = doTransformServer(op.lhs, RewriteContext(Onions.toSeq(Onions.ALL), false))
-                val b = doTransformServer(op.rhs, RewriteContext(Onions.toSeq(Onions.ALL), false))
+                val a = doTransformServer(op.lhs, RewriteContext(Onions.toSeq(Onions.ALL), true))
+                val b = doTransformServer(op.rhs, RewriteContext(Onions.toSeq(Onions.ALL), true))
 
                 a match {
                   case Some((aexpr, ao)) =>
@@ -622,12 +634,12 @@ trait Generator extends Traversals with Transformers {
                         val id0 = _hiddenNames.uniqueId()
                         val id1 = _hiddenNames.uniqueId()
 
-                        val expr0 = FieldIdent(None, id0)
-                        val expr1 = FieldIdent(None, id1)
+                        val expr0 = if (aexpr.isLiteral) aexpr else FieldIdent(None, id0)
+                        val expr1 = if (bexpr.isLiteral) bexpr else FieldIdent(None, id1)
 
-                        val projs = Seq(
-                          (expr0, ExprProj(aexpr, None), ao, false),
-                          (expr1, ExprProj(bexpr, None), bo, false))
+                        val projs =
+                          (if (aexpr.isLiteral) Seq.empty else Seq((expr0, ExprProj(aexpr, None), ao, false))) ++
+                          (if (bexpr.isLiteral) Seq.empty else Seq((expr1, ExprProj(bexpr, None), bo, false)))
 
                         ret += (op -> (op.copyWithChildren(expr0, expr1), projs))
 
@@ -680,7 +692,12 @@ trait Generator extends Traversals with Transformers {
                 CollectionUtils.optOrEither2(
                   getSupportedExpr(fi, Onions.DET, subrels),
                   getSupportedExpr(fi, Onions.OPE, subrels))
-                .getOrElse(throw new Exception("should not happen")) match {
+                .getOrElse {
+                  println("could not find DET/OPE enc for expr: " + fi)
+                  println("orig: " + e.sql)
+                  println("subrels: " + subrels)
+                  throw new Exception("should not happen")
+                } match {
                   case Left((e, _))  => (e, Onions.DET)
                   case Right((e, _)) => (e, Onions.OPE)
                 }
@@ -786,32 +803,46 @@ trait Generator extends Traversals with Transformers {
 
           def add(exprs: Seq[(SqlExpr, Int)]): Boolean = {
             // look for references to elements from this subquery
-            exprs.foreach { case (e, o) =>
-              e match {
-                case FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _) =>
-                  if (ctx.relations(relation).isInstanceOf[SubqueryRelation]) {
-                    val idx =
-                      ctx
-                        .relations(relation)
-                        .asInstanceOf[SubqueryRelation]
-                        .stmt.ctx.lookupNamedProjectionIndex(name)
-                    assert(idx.isDefined)
-                    encVec( idx.get ) |= o
-                  }
-                case _ =>
-              }
+            exprs.foreach {
+              case (e, o) if o != Onions.DET =>
+                e match {
+                  case FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _) =>
+                    if (ctx.relations(relation).isInstanceOf[SubqueryRelation]) {
+                      val idx =
+                        ctx
+                          .relations(relation)
+                          .asInstanceOf[SubqueryRelation]
+                          .stmt.ctx.lookupNamedProjectionIndex(name)
+                      assert(idx.isDefined)
+                      encVec( idx.get ) |= o
+                    }
+                  case _ =>
+                }
+              case _ =>
             }
             true
           }
 
           def procExprPrimitive(e: SqlExpr, o: Int) = {
+            def binopOp(l: SqlExpr, r: SqlExpr) = {
+              getPotentialCryptoOpts(l, Onions.ALL).foreach(add)
+              getPotentialCryptoOpts(r, Onions.ALL).foreach(add)
+            }
+
             getPotentialCryptoOpts(e, o) match {
               case Some(exprs) => add(exprs)
               case None =>
                 e match {
-                  case Subselect(ss, _)            => selectFn(ss)
-                  case Exists(Subselect(ss, _), _) => selectFn(ss)
-                  case _                           =>
+                  case Subselect(ss, _)                 => selectFn(ss)
+                  case Exists(Subselect(ss, _), _)      => selectFn(ss)
+
+                  // one-level deep binop optimizations
+                  case Plus(l, r, _)                    => binopOp(l, r)
+                  case Minus(l, r, _)                   => binopOp(l, r)
+                  case Mult(l, r, _)                    => binopOp(l, r)
+                  case Div(l, r, _)                     => binopOp(l, r)
+
+                  case _                                =>
                 }
             }
           }
@@ -1400,13 +1431,26 @@ trait Generator extends Traversals with Transformers {
       }
 
       def procExprPrimitive(e: SqlExpr, o: Int) = {
+        def binopOp(l: SqlExpr, r: SqlExpr) = {
+          getPotentialCryptoOpts(l, Onions.ALL).foreach(add)
+          getPotentialCryptoOpts(r, Onions.ALL).foreach(add)
+        }
+
         getPotentialCryptoOpts(e, o) match {
           case Some(exprs) => add(exprs)
           case None =>
             e match {
-              case Subselect(ss, _)            => workingSet = selectFn(ss, workingSet)
-              case Exists(Subselect(ss, _), _) => workingSet = selectFn(ss, workingSet)
-              case _                           =>
+              case Subselect(ss, _)                 => workingSet = selectFn(ss, workingSet)
+              case Exists(Subselect(ss, _), _)      => workingSet = selectFn(ss, workingSet)
+
+              // one-level deep binop optimizations
+              case Plus(l, r, _)                    => binopOp(l, r)
+              case Minus(l, r, _)                   => binopOp(l, r)
+              case Mult(l, r, _)                    => binopOp(l, r)
+              case Div(l, r, _)                     => binopOp(l, r)
+
+              // TODO: more opts?
+              case _                                =>
             }
         }
       }
