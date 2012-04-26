@@ -17,6 +17,7 @@ trait PlanNode {
 case class RemoteSql(stmt: SelectStmt,
                      projs: Seq[(Option[Int], Boolean)],
                      subrelations: Seq[PlanNode] = Seq.empty) extends PlanNode {
+  assert(stmt.projections.size == projs.size)
   def tupleDesc = projs
   def pretty0(lvl: Int) = {
     "* RemoteSql(sql = " + stmt.sql + ", projs = " + projs + ")" +

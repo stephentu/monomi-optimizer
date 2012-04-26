@@ -67,6 +67,10 @@ object CollectionUtils {
   }
 }
 
+object BitUtils {
+  def onlyOne(m: Int) = (m != 0) && (m & (m-1)) == 0
+}
+
 trait PrettyPrinters {
   // TODO: escape
   protected def _q(s: String): String = "\"" + s + "\""

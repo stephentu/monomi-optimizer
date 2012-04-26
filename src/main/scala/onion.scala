@@ -76,6 +76,8 @@ class OnionSet {
 
   // relation is global table name
   def add(relation: String, expr: SqlExpr, o: Int): Unit = {
+    assert((o & Onions.PLAIN) == 0)
+    assert(BitUtils.onlyOne(o))
     val key = mkKey(relation, expr)
     opts.get(key) match {
       case Some((v1, v2)) =>
