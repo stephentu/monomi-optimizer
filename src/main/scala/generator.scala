@@ -808,13 +808,16 @@ trait Generator extends Traversals with Transformers {
                 e match {
                   case FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _) =>
                     if (ctx.relations(relation).isInstanceOf[SubqueryRelation]) {
-                      val idx =
-                        ctx
-                          .relations(relation)
-                          .asInstanceOf[SubqueryRelation]
-                          .stmt.ctx.lookupNamedProjectionIndex(name)
-                      assert(idx.isDefined)
-                      encVec( idx.get ) |= o
+                      val sr = ctx.relations(relation).asInstanceOf[SubqueryRelation]
+                      val projExpr = sr.stmt.ctx.lookupProjection(name)
+                      assert(projExpr.isDefined)
+                      findOnionableExpr(projExpr.get).foreach { case (_, t, x) =>
+                        onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).foreach { _ =>
+                          val idx = sr.stmt.ctx.lookupNamedProjectionIndex(name)
+                          assert(idx.isDefined)
+                          encVec( idx.get ) |= o
+                        }
+                      }
                     }
                   case _ =>
                 }
