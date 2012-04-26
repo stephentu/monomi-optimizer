@@ -1111,7 +1111,7 @@ trait Generator extends Traversals with Transformers {
         }
       }
 
-      cur.copy(projections = finalProjs.map(_._1).toSeq ++ (if (encContext.needsProjections) Seq.empty else Seq(StarProj())))
+      cur.copy(projections = finalProjs.map(_._1).toSeq ++ (if (!finalProjs.isEmpty) Seq.empty else Seq(ExprProj(IntLiteral(1), None))))
     }
 
     def wrapDecryptionNodeSeq(p: PlanNode, m: Seq[Int]): PlanNode = {
@@ -1126,9 +1126,12 @@ trait Generator extends Traversals with Transformers {
       wrapDecryptionNodeSeq(p, m.values.toSeq)
 
     val tdesc =
-      finalProjs.map { p =>
-        assert(BitUtils.onlyOne(p._2))
-        if (p._2 == Onions.PLAIN) ((None, p._3)) else ((Some(p._2), p._3))
+      if (finalProjs.isEmpty) Seq((None, false))
+      else {
+        finalProjs.map { p =>
+          assert(BitUtils.onlyOne(p._2))
+          if (p._2 == Onions.PLAIN) ((None, p._3)) else ((Some(p._2), p._3))
+        }
       }
 
     val stage1 =
