@@ -141,9 +141,9 @@ trait Generator extends Traversals with Transformers {
   private def generatePlanFromOnionSet0(
     stmt: SelectStmt, onionSet: OnionSet, encContext: EncContext): PlanNode = {
 
-    println("generatePlanFromOnionSet0()")
-    println("stmt: " + stmt.sql)
-    println("encContext: " + encContext)
+    //println("generatePlanFromOnionSet0()")
+    //println("stmt: " + stmt.sql)
+    //println("encContext: " + encContext)
 
     encContext match {
       case EncProj(o, _) =>
@@ -532,8 +532,8 @@ trait Generator extends Traversals with Transformers {
               } else { bailOut }
 
             case cw @ CaseWhenExpr(cases, default, _) =>
-              println("found cw: " + cw.sql)
-              println("onions: " + curRewriteCtx.onions)
+              //println("found cw: " + cw.sql)
+              //println("onions: " + curRewriteCtx.onions)
               def tryWith(o: Int): Option[SqlExpr] = {
                 def processCaseExprCase(c: CaseExprCase) = {
                   val CaseExprCase(cond, expr, _) = c
@@ -622,7 +622,7 @@ trait Generator extends Traversals with Transformers {
               val ret = new HashMap[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, Int, Boolean)])]
 
               def handleBinopSpecialCase(op: Binop): Boolean = {
-                println("handleBinopSpecialCase(): op = " + op.sql)
+                //println("handleBinopSpecialCase(): op = " + op.sql)
                 // TODO: should get the agg context more correctly
                 val a = doTransformServer(op.lhs, RewriteContext(Onions.toSeq(Onions.ALL), true))
                 val b = doTransformServer(op.rhs, RewriteContext(Onions.toSeq(Onions.ALL), true))
@@ -891,7 +891,7 @@ trait Generator extends Traversals with Transformers {
            EncProj(encVec.map(x => if (x != 0) x else Onions.DET).toSeq, true)))
       }.toMap
 
-    println("subqplans: " + subqueryRelationPlans)
+    //println("subqplans: " + subqueryRelationPlans)
 
     // TODO: explicit join predicates (ie A JOIN B ON (pred)).
     // TODO: handle {LEFT,RIGHT} OUTER JOINS
@@ -1257,10 +1257,10 @@ trait Generator extends Traversals with Transformers {
           s1
         } else {
 
-          println("----")
-          println("s1: " + s1.pretty)
-          println("s1td: " + s1td)
-          println("o: " + o)
+          //println("----")
+          //println("s1: " + s1.pretty)
+          //println("s1td: " + s1td)
+          //println("o: " + o)
 
 
           val dec =
