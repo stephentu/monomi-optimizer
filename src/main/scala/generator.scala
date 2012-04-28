@@ -274,7 +274,12 @@ trait Generator extends Traversals with Transformers {
     val newLocalGroupBy = new ArrayBuffer[ClientComputation]
     val localGroupByPosMaps = new ArrayBuffer[Map[SqlProj, Int]]
 
-    val newLocalOrderBy = new ArrayBuffer[ClientComputation]
+    // left is position in (original) projection to order by,
+    // right is client comp
+    //
+    // NOTE: the position is NOT a position in the final projection list, but a logical
+    //       projection position. this assumes no STAR projections
+    val newLocalOrderBy = new ArrayBuffer[Either[Int, ClientComputation]]
     val localOrderByPosMaps = new ArrayBuffer[Map[SqlProj, Int]]
 
     var newLocalLimit: Option[Int] = None
@@ -999,21 +1004,32 @@ trait Generator extends Traversals with Transformers {
         def mkClientCompFromKeyInfo(f: SqlExpr, fi: SqlExpr, o: Int) = {
           ClientComputation(f, Seq((f, ExprProj(fi, None), o, false)), Seq.empty)
         }
-        val keyInfo = o.keys.map { case (f, _) => getKeyInfoForExpr(f) }
-        if (keyInfo.flatten.size == keyInfo.size) {
-          // easy unsupported case- all the keys have some
-          // expr form which we can work with as a single field- thus, we don't
-          // need to call rewriteExprForServer(), since we want to optimize to
-          // prefer OPE over DET (rewriteExprForServer() prefers DET over OPE)
-          newLocalOrderBy ++= (
-            keyInfo.flatten.map { case (f, fi, o) => mkClientCompFromKeyInfo(f, fi, o) })
-        } else {
-          // more general case-
-          val aggCtx = !(cur.groupBy.isDefined && !newLocalFilters.isEmpty)
-          newLocalOrderBy ++= (
-            o.keys.map { case (k, _) =>
+        def searchProjIndex(e: SqlExpr): Option[Int] = {
+          if (!e.ctx.projections.filter {
+                case WildcardProjection => true
+                case _ => false }.isEmpty) {
+            // for now, if wildcard projection, don't do this optimization
+            return None
+          }
+          e match {
+            case FieldIdent(_, _, ProjectionSymbol(name, _), _) =>
+              // named projection is easy
+              e.ctx.lookupNamedProjectionIndex(name)
+            case _ =>
+              // actually do a linear search through the projection list
+              e.ctx.projections.zipWithIndex.foldLeft(None : Option[Int]) {
+                case (acc, (NamedProjection(_, expr, _), idx)) if e == expr =>
+                  acc.orElse(Some(idx))
+                case (acc, _) => acc
+              }
+          }
+        }
+        val aggCtx = !(cur.groupBy.isDefined && !newLocalFilters.isEmpty)
+        newLocalOrderBy ++= (
+          o.keys.map { case (k, _) =>
+            searchProjIndex(k).map(idx => Left(idx)).getOrElse {
               getKeyInfoForExpr(k)
-                .map { case (f, fi, o) => mkClientCompFromKeyInfo(f, fi, o) }
+                .map { case (f, fi, o) => Right(mkClientCompFromKeyInfo(f, fi, o)) }
                 .getOrElse {
                   // TODO: why do we need to resolveAliases() here only??
                   rewriteExprForServer(
@@ -1021,17 +1037,17 @@ trait Generator extends Traversals with Transformers {
                     RewriteContext(Seq(Onions.OPE), aggCtx),
                     subqueryRelationPlans) match {
 
-                    case Left((expr, onion)) => mkClientCompFromKeyInfo(k, expr, onion)
-                    case Right((None, comp)) => comp
+                    case Left((expr, onion)) => Right(mkClientCompFromKeyInfo(k, expr, onion))
+                    case Right((None, comp)) => Right(comp)
                     case _                   =>
                       // TODO: in this case we prob need to merge the expr as a
                       // projection of the comp instead
                       throw new RuntimeException("TODO: unimpl")
                   }
                 }
-            }
-          )
-        }
+              }
+          }
+        )
         None
       }
       val newOrderBy = cur.orderBy.flatMap(o => {
@@ -1083,8 +1099,9 @@ trait Generator extends Traversals with Transformers {
         localGroupByPosMaps += processClientComputation(c)
       }
 
-      newLocalOrderBy.foreach { c =>
-        localOrderByPosMaps += processClientComputation(c)
+      newLocalOrderBy.foreach {
+        case Left(_)  => localOrderByPosMaps += Map.empty
+        case Right(c) => localOrderByPosMaps += processClientComputation(c)
       }
 
       if (encContext.needsProjections) {
@@ -1134,6 +1151,11 @@ trait Generator extends Traversals with Transformers {
         }
       }
 
+    // finalProjs is now useless, so clear it
+    finalProjs.clear
+
+    // --filters
+
     val stage1 =
       newLocalFilters
         .zip(localFilterPosMaps)
@@ -1144,6 +1166,8 @@ trait Generator extends Traversals with Transformers {
                         comp.subqueries.map(_._2))
         }
 
+    // --group bys
+
     val stage2 =
       newLocalGroupBy.zip(localGroupByPosMaps).foldLeft( stage1 : PlanNode ) {
         case (acc, (comp, mapping)) =>
@@ -1152,90 +1176,105 @@ trait Generator extends Traversals with Transformers {
                            comp.subqueries.map(_._2))
       }
 
-    val stage3 = {
-      if (!newLocalOrderBy.isEmpty) {
-        assert(newLocalOrderBy.size == stmt.orderBy.get.keys.size)
-        assert(newLocalOrderBy.size == localOrderByPosMaps.size)
+    // --projections
 
-        val skipDecryptPos = newLocalOrderBy.map {
-          case cc @ ClientComputation(expr, proj, sub) =>
-            (proj.size == 1 && proj.head._3 == Onions.OPE &&
-             proj.head._1 == expr && sub.isEmpty)
-        }
-
-        val decryptPos = localOrderByPosMaps.zip(skipDecryptPos).flatMap {
-          case (m, false) => m.values.toSeq
-          case (_, true) => Seq.empty
-        }
-
-        val orderPos =
-          (finalProjs.size until finalProjs.size + stmt.orderBy.get.keys.size).toSeq
-        val orderTrfms = newLocalOrderBy.zip(localOrderByPosMaps).map {
-          case (comp, mapping) => Right(comp.mkSqlExpr(mapping))
-        }
-
-        val allTrfms = (0 until finalProjs.size).map { i => Left(i) } ++ orderTrfms
-        LocalOrderBy(
-          orderPos.zip(stmt.orderBy.get.keys).map { case (p, (_, t)) => (p, t) },
-          LocalTransform(allTrfms,
-            if (!decryptPos.isEmpty) LocalDecrypt(decryptPos, stage2) else stage2))
-      } else {
-        stage2
-      }
-    }
-
-    val stage4 =
-      newLocalLimit.map(l => LocalLimit(l, stage3)).getOrElse(stage3)
-
-    // final stage
-    // 1) do all remaining decryptions to answer all the projections (in the clear)
-    val m = (
+    val decryptionVec = (
       projPosMaps.flatMap {
         case Right((_, m)) => Some(m.values)
         case _ => None
-      }.foldLeft(Seq.empty : Seq[Int])(_++_) ++ {
+      }.flatten ++ {
         projPosMaps.flatMap {
           case Left((p, o)) if o != Onions.PLAIN =>
             Some(p)
           case _ => None
         }
       }
-    ).toSeq
+    ).toSet.toSeq.sorted
 
-    //println("stage4: " + stage4.pretty)
-    //println("m: " + m)
+    val s0 =
+      if (decryptionVec.isEmpty) stage2
+      else wrapDecryptionNodeSeq(stage2, decryptionVec)
 
-    val s0 = if (m.isEmpty) stage4 else wrapDecryptionNodeSeq(stage4, m)
-
-    // 2) now do a final transformation
-    val trfms = projPosMaps.map {
+    val projTrfms = projPosMaps.map {
       case Right((comp, mapping)) =>
         assert(comp.subqueries.isEmpty)
         Right(comp.mkSqlExpr(mapping))
       case Left((p, _)) => Left(p)
     }
 
-    def checkTransforms(trfms: Seq[Either[Int, SqlExpr]]): Boolean = {
+    val auxTrfms = localOrderByPosMaps.flatMap { m =>
+      m.map { case (_, p) => Left(p) }
+    }
+
+    val trfms = projTrfms ++ auxTrfms
+
+    def isPrefixIdentityTransform(trfms: Seq[Either[Int, SqlExpr]]): Boolean = {
       trfms.zipWithIndex.foldLeft(true) {
         case (acc, (Left(p), idx)) => acc && p == idx
-        case (acc, (Right(_), _)) => false
+        case (acc, (Right(_), _))  => false
       }
     }
 
     // if trfms describes purely an identity transform, we can omit it
-    val s1 =
-      if (trfms.size == s0.tupleDesc.size && checkTransforms(trfms)) s0 else LocalTransform(trfms, s0)
+    val stage3 =
+      if (trfms.size == s0.tupleDesc.size && isPrefixIdentityTransform(trfms)) s0
+      else LocalTransform(trfms, s0)
 
-    //println("s1: " + s1.pretty)
+    // need to update localOrderByPosMaps with new proj info
+    val updateIdx = auxTrfms.zipWithIndex.map {
+      case (Left(p), idx) => (idx + projTrfms.size, p)
+    }.toMap
+
+    (0 until localOrderByPosMaps.size).foreach { i =>
+      localOrderByPosMaps(i) =
+        localOrderByPosMaps(i).map { case (p, i) => (p, updateIdx(i)) }.toMap
+    }
+
+    val stage4 = {
+      if (!newLocalOrderBy.isEmpty) {
+        assert(newLocalOrderBy.size == stmt.orderBy.get.keys.size)
+        assert(newLocalOrderBy.size == localOrderByPosMaps.size)
+
+        // do all the local computations to materialize keys
+
+        val decryptionVec =
+          newLocalOrderBy.zip(localOrderByPosMaps).flatMap {
+            case (Right(ClientComputation(expr, proj, sub)), m) =>
+              if (proj.size == 1 && m.size == 1 &&
+                  proj.head._3 == Onions.OPE &&
+                  proj.head._1 == expr && sub.isEmpty) Seq.empty else m.values
+            case _ => Seq.empty
+          }
+
+        val orderTrfms =
+          newLocalOrderBy.zip(localOrderByPosMaps).map {
+            case (Left(p), _)  => Left(p)
+            case (Right(c), m) => Right(c.mkSqlExpr(m))
+          }
+
+        val allTrfms = (0 until projPosMaps.size).map { i => Left(i) } ++ orderTrfms
+        LocalTransform(
+          (0 until projPosMaps.size).map { i => Left(i) },
+          LocalOrderBy(
+            (projPosMaps.size until (projPosMaps.size + orderTrfms.size))
+              .zip(stmt.orderBy.get.keys).map { case (p, (_, t)) => (p, t) },
+            LocalTransform(allTrfms,
+              if (!decryptionVec.isEmpty) LocalDecrypt(decryptionVec, stage3) else stage3)))
+      } else {
+        stage3
+      }
+    }
+
+    val stage5 =
+      newLocalLimit.map(l => LocalLimit(l, stage4)).getOrElse(stage4)
 
     encContext match {
-      case PreserveOriginal    => s1
-      case PreserveCardinality => stage4 // don't care about projections
+      case PreserveOriginal | PreserveCardinality => stage5
       case EncProj(o, require) =>
-        assert(s1.tupleDesc.size == o.size)
+        assert(stage5.tupleDesc.size == o.size)
 
-        // optimization: see if s1 is one layer covering a usable plan
-        val usuablePlan = s1 match {
+        // optimization: see if stage5 is one layer covering a usable plan
+        val usuablePlan = stage5 match {
           case LocalDecrypt(_, child) =>
             assert(child.tupleDesc.size == o.size)
             if (child.tupleDesc.zip(o).filterNot {
@@ -1245,39 +1284,38 @@ trait Generator extends Traversals with Transformers {
           case _ => None
         }
 
-        // special case if s1 is usuable
-        val s1td = s1.tupleDesc
+        // special case if stage5 is usuable
+        val stage5td = stage5.tupleDesc
 
         if (usuablePlan.isDefined) {
           usuablePlan.get
-        } else if (!require || (s1td.zip(o).filter {
+        } else if (!require || (stage5td.zip(o).filter {
               case ((Some(x), _), y) => (x & y) != 0
               case _                 => false
-            }.size == s1td.size)) {
-          s1
+            }.size == stage5td.size)) {
+          stage5
         } else {
 
           //println("----")
-          //println("s1: " + s1.pretty)
-          //println("s1td: " + s1td)
+          //println("stage5: " + stage5.pretty)
+          //println("stage5td: " + stage5td)
           //println("o: " + o)
 
-
           val dec =
-            s1td.zip(o).zipWithIndex.flatMap {
+            stage5td.zip(o).zipWithIndex.flatMap {
               case (((Some(x), _), y), _) if (x & y) != 0 => Seq.empty
               case (((Some(x), _), y), i) if (x & y) == 0 => Seq(i)
               case _                                      => Seq.empty
             }
 
           val enc =
-            s1td.zip(o).zipWithIndex.flatMap {
+            stage5td.zip(o).zipWithIndex.flatMap {
               case (((Some(x), _), y), _) if (x & y) != 0 => Seq.empty
               case (((Some(x), _), y), i) if (x & y) == 0 => Seq((i, Onions.pickOne(y)))
               case ((_, y), i)                            => Seq((i, Onions.pickOne(y)))
             }
 
-          val first  = if (dec.isEmpty) s1 else LocalDecrypt(dec, s1)
+          val first  = if (dec.isEmpty) stage5 else LocalDecrypt(dec, stage5)
           val second = if (enc.isEmpty) first else LocalEncrypt(enc, first)
           second
         }
