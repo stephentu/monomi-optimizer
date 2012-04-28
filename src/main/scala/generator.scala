@@ -307,6 +307,10 @@ trait Generator extends Traversals with Transformers {
       expr: SqlExpr, rewriteCtx: RewriteContext, subrels: Map[String, PlanNode]):
       Either[(SqlExpr, Int), (Option[(SqlExpr, Int)], ClientComputation)] = {
 
+      //println("rewriteExprForServer:")
+      //println("  expr: " + expr.sql)
+      //println("  rewriteCtx: " + rewriteCtx)
+
       // this is just a placeholder in the tree
       val cannotAnswerExpr = replaceWith(IntLiteral(1))
 
@@ -505,12 +509,12 @@ trait Generator extends Traversals with Transformers {
 
             case m @ Min(f, _) if curRewriteCtx.testOnion(Onions.OPE) && curRewriteCtx.aggContext =>
               onionRetVal.set(Onions.OPE)
-              doTransformServer(e, RewriteContext(Seq(Onions.OPE), false))
+              doTransformServer(f, RewriteContext(Seq(Onions.OPE), false))
                 .map { case (e0, _) => replaceWith(Min(e0)) }.getOrElse(bailOut)
 
             case m @ Max(f, _) if curRewriteCtx.testOnion(Onions.OPE) && curRewriteCtx.aggContext =>
               onionRetVal.set(Onions.OPE)
-              doTransformServer(e, RewriteContext(Seq(Onions.OPE), false))
+              doTransformServer(f, RewriteContext(Seq(Onions.OPE), false))
                 .map { case (e0, _) => replaceWith(Max(e0)) }.getOrElse(bailOut)
 
             // TODO: we should do something about distinct
@@ -579,10 +583,6 @@ trait Generator extends Traversals with Transformers {
                 .onions
                 .flatMap(o => getSupportedExpr(e, o, subrels))
                 .headOption.map { case (expr, onion) =>
-                  if (!BitUtils.onlyOne(onion)) {
-                    println("expr failed: " + expr.sql)
-                    println("onion = " + onion)
-                  }
                   assert(BitUtils.onlyOne(onion))
                   onionRetVal.set(onion)
                   replaceWith(expr)
@@ -1010,7 +1010,7 @@ trait Generator extends Traversals with Transformers {
             // for now, if wildcard projection, don't do this optimization
             return None
           }
-          val r = e match {
+          e match {
             case FieldIdent(_, _, ProjectionSymbol(name, _), _) =>
               // named projection is easy
               e.ctx.lookupNamedProjectionIndex(name)
@@ -1022,8 +1022,6 @@ trait Generator extends Traversals with Transformers {
                 case (acc, _) => acc
               }
           }
-          println("searchProjIndex: e = " + e.sql + " r = " + r)
-          r
         }
         val aggCtx = !(cur.groupBy.isDefined && !newLocalFilters.isEmpty)
         newLocalOrderBy ++= (
@@ -1220,8 +1218,6 @@ trait Generator extends Traversals with Transformers {
         Right(comp.mkSqlExpr(mapping))
       case Left((p, _)) => Left(p)
     }
-
-    println("newLocalOrderBy: " + newLocalOrderBy)
 
     var offset = projTrfms.size
     val auxTrfmMSeq = newLocalOrderBy.zip(localOrderByPosMaps).flatMap {
