@@ -153,15 +153,64 @@ trait Generator extends Traversals with Transformers {
 
     val subRelnGen = new NameGenerator("subrelation")
 
+    // don't call with a literal
+    // return value is sequence of hom_descriptors
+    def getSupportedHOMExpr(e: SqlExpr, subrels: Map[String, PlanNode]):
+      Option[Seq[SqlExpr]] = {
+      // TODO: support literal, w/ special "literal hom descriptor"
+      assert(!e.isLiteral)
+      val e0 = findOnionableExpr(e)
+      e0.map { case (r, t, x) =>
+
+        val qual = if (r == t) encTblName(t) else r
+
+        // TODO: not sure if this actually correct
+        val name = e match {
+          case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx), _)
+            if ctx.relations(relation).isInstanceOf[SubqueryRelation] => name0
+          case _ => "rowid"
+        }
+
+        val h = onionSet.lookupPackedHOM(t, x).map
+        if (h.isEmpty) None else Some((FieldIdent(Some(qual), "rowid"), t, h))
+
+      }.orElse {
+        // TODO: this is hacky -
+        // special case- if we looking at a field projection
+        // from a subquery relation
+        e match {
+          case fi @ FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _)
+            if ctx.relations(relation).isInstanceOf[SubqueryRelation] =>
+
+            val idx =
+              ctx
+                .relations(relation)
+                .asInstanceOf[SubqueryRelation]
+                .stmt.ctx.lookupNamedProjectionIndex(name).get
+
+            // TODO: what do we do if the relation tupleDesc is in vector context
+            assert(!subrels(relation).tupleDesc(idx)._2)
+            val po = subrels(relation).tupleDesc(idx)._1.getOrElse(Onions.PLAIN)
+            if ((po & Onions.HOM) != 0) Some(Seq(fi.copyWithContext(null)))
+            else None
+
+          case _ => None
+        }
+      }
+    }
+
     // return a *server-side expr* which is equivalent to e under onion o,
     // if possible. otherwise return None. o can be a bitmask of allowed
     // onions. use the return value to determine which onion was chosen.
     //
     // handles literals properly
     //
+    // do not call getSupportedExpr for HOM. use getSupportedHOMExpr() instead
+    //
     // postcondition: if ret is not None, (o & ret._2) != 0
     def getSupportedExpr(e: SqlExpr, o: Int, subrels: Map[String, PlanNode]):
       Option[(SqlExpr, Int)] = {
+      assert((o & Onions.HOM) == 0)
       if (e.isLiteral) {
         // easy case
         Onions.pickOne(o) match {
@@ -1508,7 +1557,11 @@ trait Generator extends Traversals with Transformers {
       def add(exprs: Seq[(SqlExpr, Int)]): Boolean = {
         val e0 = exprs.map { case (e, o) => findOnionableExpr(e).map(e0 => (e0, o)) }.flatten
         if (e0.size == exprs.size) {
-          e0.foreach { case ((_, t, e), o) => workingSet.foreach(_.add(t, e, o)) }
+          e0.foreach {
+            case ((_, t, e), o) =>
+              if (o != Onions.HOM) workingSet.foreach(_.add(t, e, o))
+              else workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
+          }
           true
         } else false
       }

@@ -1,4 +1,4 @@
-import scala.collection.mutable.{ ArrayBuffer, HashMap }
+import scala.collection.mutable.{ ArrayBuffer, HashMap, Seq => MSeq }
 
 object Onions {
   final val PLAIN = 0x1
@@ -67,6 +67,10 @@ class OnionSet {
   // string is enc name, int is Onions bitmask
   private val opts = new HashMap[(String, Either[String, SqlExpr]), (String, Int)]
 
+  // relation -> sequence of groups
+  private type HomGroup = MSeq[SqlExpr]
+  private val packedHOMs = new HashMap[String, MSeq[HomGroup]]
+
   private def mkKey(relation: String, expr: SqlExpr) = {
     ((relation, expr match {
       case FieldIdent(_, n, _, _) => Left(n)
@@ -88,6 +92,28 @@ class OnionSet {
           case _ => _gen.uniqueId()
           }, o))
     }
+  }
+
+  // adds to previous existing group. if no groups exist, adds to last
+  def addPackedHOMToLastGroup(relation: String, expr: SqlExpr): Unit = {
+    val expr0 = expr.copyWithContext(null).asInstanceOf[SqlExpr]
+    packedHOMs.get(relation) match {
+      case Some(groups) =>
+        assert(!groups.empty)
+        val f = groups.last.toSet
+        if (!f.contains(expr0)) groups.last += expr0
+      case None =>
+        packedHOMs.put(relation, MSeq(MSeq(expr0)))
+    }
+  }
+
+  // return value is:
+  // (group number (unique per relation), in group position (unique per group))
+  def lookupPackedHOM(relation: String, expr: SqlExpr): Seq[(Int, Int)] = {
+    val expr0 = expr.copyWithContext(null).asInstanceOf[SqlExpr]
+    packedHOMs.get(relation).map { _.zipWithIndex.flatMap { case (group, gidx) =>
+      group.zipWithIndex.filter { _._1 == expr0 }.map { case (_, pidx) => (gidx, pidx) }
+    }}.getOrElse(Seq.empty)
   }
 
   // relation is global table name
