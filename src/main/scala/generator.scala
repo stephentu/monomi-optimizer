@@ -1,4 +1,4 @@
-import scala.collection.mutable.{ ArrayBuffer, HashMap }
+import scala.collection.mutable.{ ArrayBuffer, HashMap, Seq => MSeq, Map => MMap }
 
 trait Generator extends Traversals with Transformers {
 
@@ -126,6 +126,27 @@ trait Generator extends Traversals with Transformers {
     assert(onions.filter(_ == 0).isEmpty)
   }
 
+  private def buildHomGroupPreference(uses: Seq[Seq[HomDesc]]):
+    Map[String, Seq[Int]] = {
+    // filter out all non-explicit hom-descriptors
+    val uses0 = uses.filterNot(_.isEmpty).flatten
+
+    // build counts for each unique descriptor
+    val counts = new HashMap[String, MMap[Int, Int]]
+    uses0.foreach { hd =>
+      val m = counts.getOrElseUpdate(hd.table, new HashMap[Int, Int])
+      m.put(hd.group, m.getOrElse(hd.group, 0) + 1)
+    }
+
+    counts.map {
+      case (k, vs) => (k, vs.toSeq.sortWith(_._2 < _._2).map(_._1)) }.toMap
+  }
+
+  case class RewriteAnalysisContext(subrels: Map[String, PlanNode],
+                                    homGroupPreferences: Map[String, Seq[Int]])
+
+  case class HomDesc(table: String, group: Int, pos: Int)
+
   // if encContext is PreserveOriginal, then the plan node generated faithfully
   // recreates the original statement- that is, the result set has the same
   // (unencrypted) type as the result set of stmt.
@@ -153,48 +174,59 @@ trait Generator extends Traversals with Transformers {
 
     val subRelnGen = new NameGenerator("subrelation")
 
-    // don't call with a literal
-    // return value is sequence of hom_descriptors
-    def getSupportedHOMExpr(e: SqlExpr, subrels: Map[String, PlanNode]):
-      Option[Seq[SqlExpr]] = {
-      // TODO: support literal, w/ special "literal hom descriptor"
-      assert(!e.isLiteral)
-      val e0 = findOnionableExpr(e)
-      e0.map { case (r, t, x) =>
-
-        val qual = if (r == t) encTblName(t) else r
-
-        // TODO: not sure if this actually correct
-        val name = e match {
-          case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx), _)
-            if ctx.relations(relation).isInstanceOf[SubqueryRelation] => name0
-          case _ => "rowid"
+    // empty seq signifies wildcard
+    def getSupportedHOMRowDescExpr(e: SqlExpr, subrels: Map[String, PlanNode]):
+      Option[(SqlExpr, Seq[HomDesc])] = {
+      if (e.isLiteral) {
+        // TODO: coerce to integer?
+        Some((FunctionCall("hom_row_desc_lit", Seq(e)), Seq.empty))
+      } else {
+        def procSubqueryRef(e: SqlExpr): Option[(SqlExpr, Seq[HomDesc])] = {
+          e match {
+            case fi @ FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _)
+              if ctx.relations(relation).isInstanceOf[SubqueryRelation] =>
+              val idx =
+                ctx
+                  .relations(relation)
+                  .asInstanceOf[SubqueryRelation]
+                  .stmt.ctx.lookupNamedProjectionIndex(name).get
+              // TODO: what do we do if the relation tupleDesc is in vector context
+              assert(!subrels(relation).tupleDesc(idx)._2)
+              val po = subrels(relation).tupleDesc(idx)._1.getOrElse(Onions.PLAIN)
+              if ((po & Onions.HOM_ROW_DESC) != 0) {
+                findOnionableExpr(e).flatMap { case (_, t, x) =>
+                  val h = onionSet.lookupPackedHOM(t, x)
+                  if (h.isEmpty) {
+                    None
+                  } else {
+                    Some((fi.copyWithContext(null).asInstanceOf[FieldIdent].copy(qualifier = Some(relation)),
+                          h.map { case (g, p) => HomDesc(t, g, p) }))
+                  }
+                }
+              } else None
+            case _ => None
+          }
         }
+        findOnionableExpr(e).flatMap { case (r, t, x) =>
+          e match {
+            case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx), _)
+              if ctx.relations(relation).isInstanceOf[SubqueryRelation] => procSubqueryRef(e)
+            case _ =>
+              val qual = if (r == t) encTblName(t) else r
+              val h = onionSet.lookupPackedHOM(t, x)
 
-        val h = onionSet.lookupPackedHOM(t, x).map
-        if (h.isEmpty) None else Some((FieldIdent(Some(qual), "rowid"), t, h))
+              //println("onionSet: " + onionSet)
+              //println("t = %s, x = %s".format(t, x.sql))
 
-      }.orElse {
-        // TODO: this is hacky -
-        // special case- if we looking at a field projection
-        // from a subquery relation
-        e match {
-          case fi @ FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _)
-            if ctx.relations(relation).isInstanceOf[SubqueryRelation] =>
-
-            val idx =
-              ctx
-                .relations(relation)
-                .asInstanceOf[SubqueryRelation]
-                .stmt.ctx.lookupNamedProjectionIndex(name).get
-
-            // TODO: what do we do if the relation tupleDesc is in vector context
-            assert(!subrels(relation).tupleDesc(idx)._2)
-            val po = subrels(relation).tupleDesc(idx)._1.getOrElse(Onions.PLAIN)
-            if ((po & Onions.HOM) != 0) Some(Seq(fi.copyWithContext(null)))
-            else None
-
-          case _ => None
+              if (h.isEmpty) None else {
+                //println("FOUND")
+                //println("e = " + e.sql)
+                //println("x = " + x.sql)
+                //println("t = " + t)
+                //println("h = " + h)
+                Some((FieldIdent(Some(qual), "rowid"), h.map { case (g, p) => HomDesc(t, g, p) }))
+              }
+          }
         }
       }
     }
@@ -205,12 +237,9 @@ trait Generator extends Traversals with Transformers {
     //
     // handles literals properly
     //
-    // do not call getSupportedExpr for HOM. use getSupportedHOMExpr() instead
-    //
     // postcondition: if ret is not None, (o & ret._2) != 0
     def getSupportedExpr(e: SqlExpr, o: Int, subrels: Map[String, PlanNode]):
       Option[(SqlExpr, Int)] = {
-      assert((o & Onions.HOM) == 0)
       if (e.isLiteral) {
         // easy case
         Onions.pickOne(o) match {
@@ -218,44 +247,42 @@ trait Generator extends Traversals with Transformers {
           case o0           => Some((NullLiteral(), o0)) // TODO: encryption
         }
       } else {
-        val e0 = findOnionableExpr(e)
-        e0.flatMap { case (r, t, x) =>
-          onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).map {
-            case (basename, o0) =>
-              val qual = if (r == t) encTblName(t) else r
-              val choice = Onions.pickOne(o0 & o)
-
-              // TODO: not sure if this actually correct
-              val name = e match {
-                case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx), _)
-                  if ctx.relations(relation).isInstanceOf[SubqueryRelation] => name0
-                case _ => basename + "_" + Onions.str(choice)
-              }
-
-              ((FieldIdent(Some(qual), name), choice))
-          }
-        }.orElse {
-          // TODO: this is hacky -
-          // special case- if we looking at a field projection
-          // from a subquery relation
+        def procSubqueryRef(e: SqlExpr) = {
           e match {
             case fi @ FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _)
               if ctx.relations(relation).isInstanceOf[SubqueryRelation] =>
-
               val idx =
                 ctx
                   .relations(relation)
                   .asInstanceOf[SubqueryRelation]
                   .stmt.ctx.lookupNamedProjectionIndex(name).get
-
               // TODO: what do we do if the relation tupleDesc is in vector context
               assert(!subrels(relation).tupleDesc(idx)._2)
               val po = subrels(relation).tupleDesc(idx)._1.getOrElse(Onions.PLAIN)
-              if ((po & o) != 0) Some((fi.copyWithContext(null), po))
+              if ((po & o) != 0) Some((fi.copyWithContext(null).copy(qualifier = Some(relation)), po))
               else None
-
             case _ => None
           }
+        }
+        val e0 = findOnionableExpr(e)
+        e0.flatMap { case (r, t, x) =>
+          e match {
+            case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx), _)
+              if ctx.relations(relation).isInstanceOf[SubqueryRelation] => procSubqueryRef(e)
+            case _ =>
+              onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).map {
+                case (basename, o0) =>
+                  val qual = if (r == t) encTblName(t) else r
+                  val choice = Onions.pickOne(o0 & o)
+                  val name = basename + "_" + Onions.str(choice)
+                  ((FieldIdent(Some(qual), name), choice))
+              }
+          }
+        }.orElse {
+          // TODO: this is hacky -
+          // special case- if we looking at a field projection
+          // from a subquery relation
+          procSubqueryRef(e)
         }
       }
     }
@@ -340,7 +367,7 @@ trait Generator extends Traversals with Transformers {
     val finalProjs = new ArrayBuffer[(SqlProj, Int, Boolean)]
 
     case class RewriteContext(onions: Seq[Int], aggContext: Boolean) {
-      def this(onion: Int, aggContext: Boolean) = this(Seq(onion), aggContext)
+      def this(onion: Int, aggContext: Boolean) = this(Onions.toSeq(onion), aggContext)
 
       assert(!onions.isEmpty)
       assert(onions.filterNot(BitUtils.onlyOne).isEmpty)
@@ -353,7 +380,7 @@ trait Generator extends Traversals with Transformers {
     }
 
     def rewriteExprForServer(
-      expr: SqlExpr, rewriteCtx: RewriteContext, subrels: Map[String, PlanNode]):
+      expr: SqlExpr, rewriteCtx: RewriteContext, analysis: RewriteAnalysisContext):
       Either[(SqlExpr, Int), (Option[(SqlExpr, Int)], ClientComputation)] = {
 
       //println("rewriteExprForServer:")
@@ -579,7 +606,7 @@ trait Generator extends Traversals with Transformers {
                 doTransformServer(f, RewriteContext(Seq(Onions.HOM), false))
                   .map { case (e0, _) =>
                     onionRetVal.set(Onions.HOM)
-                    replaceWith(AggCall("hom_add", Seq(e0)))
+                    replaceWith(AggCall("hom_agg", Seq(e0)))
                   }
               }
               if (curRewriteCtx.inClear && curRewriteCtx.testOnion(Onions.HOM)) {
@@ -630,8 +657,13 @@ trait Generator extends Traversals with Transformers {
             case e: SqlExpr =>
               curRewriteCtx
                 .onions
-                .flatMap(o => getSupportedExpr(e, o, subrels))
-                .headOption.map { case (expr, onion) =>
+                .flatMap { case o =>
+                  assert(BitUtils.onlyOne(o))
+                  if (o == Onions.HOM_ROW_DESC) {
+                    getSupportedHOMRowDescExpr(e, analysis.subrels)
+                      .map(x => (x._1, Onions.HOM_ROW_DESC))
+                  } else getSupportedExpr(e, o, analysis.subrels)
+                }.headOption.map { case (expr, onion) =>
                   assert(BitUtils.onlyOne(onion))
                   onionRetVal.set(onion)
                   replaceWith(expr)
@@ -669,57 +701,134 @@ trait Generator extends Traversals with Transformers {
 
             // return value is:
             // ( expr to replace in e -> ( replacement expr, seq( projections needed ) ) )
-            def mkOptimizations(e: SqlExpr):
+            def mkOptimizations(e: SqlExpr, curRewriteCtx: RewriteContext):
               Map[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, Int, Boolean)])] = {
 
               val ret = new HashMap[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, Int, Boolean)])]
 
               def handleBinopSpecialCase(op: Binop): Boolean = {
-                //println("handleBinopSpecialCase(): op = " + op.sql)
-                // TODO: should get the agg context more correctly
-                val a = doTransformServer(op.lhs, RewriteContext(Onions.toSeq(Onions.ALL), true))
-                val b = doTransformServer(op.rhs, RewriteContext(Onions.toSeq(Onions.ALL), true))
-
-                a match {
-                  case Some((aexpr, ao)) =>
-                    b match {
-                      case Some((bexpr, bo)) =>
-                        val id0 = _hiddenNames.uniqueId()
-                        val id1 = _hiddenNames.uniqueId()
-
-                        val expr0 = if (aexpr.isLiteral) aexpr else FieldIdent(None, id0)
-                        val expr1 = if (bexpr.isLiteral) bexpr else FieldIdent(None, id1)
-
-                        val projs =
-                          (if (aexpr.isLiteral) Seq.empty else Seq((expr0, ExprProj(aexpr, None), ao, false))) ++
-                          (if (bexpr.isLiteral) Seq.empty else Seq((expr1, ExprProj(bexpr, None), bo, false)))
-
-                        ret += (op -> (op.copyWithChildren(expr0, expr1), projs))
-
-                        false // stop
+                val a = mkOptimizations(op.lhs, curRewriteCtx.restrictTo(Onions.ALL))
+                val b = mkOptimizations(op.rhs, curRewriteCtx.restrictTo(Onions.ALL))
+                a.get(op.lhs) match {
+                  case Some((aexpr, aprojs)) =>
+                    b.get(op.rhs) match {
+                      case Some((bexpr, bprojs)) =>
+                        ret += (op -> (op.copyWithChildren(aexpr, bexpr), aprojs ++ bprojs))
+                        false
                       case _ => true
                     }
                   case _ => true
                 }
               }
 
-              topDownTraverseContext(e, e.ctx) {
-                case avg @ Avg(f, _, _) if curRewriteCtx.aggContext =>
-                  doTransformServer(f, RewriteContext(Seq(Onions.HOM), false)).map { case (fi, _) =>
+              // takes s and translates it into a server hom_agg expr, plus a
+              // post-hom_agg-decrypt local sql projection (which extracts the individual
+              // expression from the group)
+              def handleHomSumSpecialCase(s: Sum) = {
+
+                def pickOne(hd: Seq[HomDesc]): HomDesc = {
+                  assert(!hd.isEmpty)
+                  // need to pick which homdesc to use, based on given analysis preference
+                  val m = hd.map(_.group).toSet
+                  assert( hd.map(_.table).toSet.size == 1 )
+                  val useIdx =
+                    analysis.homGroupPreferences.get(hd.head.table).flatMap { prefs =>
+                      prefs.foldLeft( None : Option[Int] ) {
+                        case (acc, elem) =>
+                          acc.orElse(if (m.contains(elem)) Some(elem) else None)
+                      }
+                    }.getOrElse(0)
+                  hd(useIdx)
+                }
+
+                def translateForUniqueHomID(e: SqlExpr, aggContext: Boolean): Option[(SqlExpr, Seq[HomDesc])] = {
+                  e match {
+                    case Sum(f, _, _) if aggContext =>
+                      translateForUniqueHomID(f, false).map {
+                        case (f0, hd) if !hd.isEmpty =>
+                          val hd0 = pickOne(hd)
+                          (FunctionCall("hom_agg", Seq(f0, StringLiteral(hd0.table), IntLiteral(hd0.group))), Seq(hd0))
+                      }
+
+                    case CaseWhenExpr(cases, default, _) =>
+                      def procCaseExprCase(c: CaseExprCase): Option[(CaseExprCase, Seq[HomDesc])] = {
+                        CollectionUtils.optAnd2(
+                          doTransformServer(c.cond, RewriteContext(Seq(Onions.PLAIN), aggContext)),
+                          translateForUniqueHomID(c.expr, aggContext)).map {
+                            case ((l, _), (r, hd)) => (CaseExprCase(l, r), hd)
+                          }
+                      }
+
+                      def findCommonHomDesc(hds: Seq[Seq[HomDesc]]): Seq[HomDesc] = {
+                        assert(!hds.isEmpty)
+                        hds.tail.foldLeft( hds.head.toSet ) {
+                          case (acc, elem) if !elem.isEmpty => acc & elem.toSet
+                          case (acc, _)                     => acc
+                        }.toSeq
+                      }
+
+                      default.flatMap { d =>
+                        CollectionUtils.optAnd2(
+                          CollectionUtils.optSeq(cases.map(procCaseExprCase)),
+                          translateForUniqueHomID(d, aggContext)).flatMap {
+                            case (cases0, (d0, hd)) =>
+                              // check that all hds are not empty
+                              val hds = cases0.map(_._2) ++ Seq(hd)
+                              if (hds.filter(_.isEmpty).isEmpty) {
+                                val inCommon = findCommonHomDesc(hds)
+                                if (inCommon.isEmpty) None else {
+                                  Some((CaseWhenExpr(cases0.map(_._1), Some(d0)), inCommon))
+                                }
+                              } else None
+                          }
+                      }.orElse {
+                        CollectionUtils.optSeq(cases.map(procCaseExprCase)).flatMap {
+                          case cases0 =>
+                            // check that all hds are not empty
+                            val hds = cases0.map(_._2)
+                            if (hds.filter(_.isEmpty).isEmpty) {
+                              val inCommon = findCommonHomDesc(hds)
+                              if (inCommon.isEmpty) None else {
+                                Some((CaseWhenExpr(cases0.map(_._1), None), inCommon))
+                              }
+                            } else None
+                        }
+                      }
+
+                    case e: SqlExpr =>
+                      val ret = getSupportedHOMRowDescExpr(e, analysis.subrels)
+                      println("calling getSupportedHOMRowDescExpr on e: " + e.sql)
+                      println("  ret = " + ret)
+                      ret
+                    case _ => None
+                  }
+                }
+
+                translateForUniqueHomID(s, true).map {
+                  case (expr, hds) =>
+                    assert(hds.size == 1)
                     val id0 = _hiddenNames.uniqueId()
-                    val id1 = _hiddenNames.uniqueId()
-
                     val expr0 = FieldIdent(None, id0)
-                    val expr1 = FieldIdent(None, id1)
+                    val projs = Seq((expr0, ExprProj(expr, None), Onions.HOM_AGG, false))
+                    (FunctionCall("hom_get_pos", Seq(expr0, IntLiteral(hds(0).pos))), projs)
+                }
+              }
 
-                    val projs = Seq(
-                      (expr0, ExprProj(AggCall("hom_add", Seq(fi)), None), Onions.HOM, false),
-                      (expr1, ExprProj(CountStar(), None), Onions.PLAIN, false))
+              topDownTraverseContext(e, e.ctx) {
+                case avg @ Avg(f, d, _) if curRewriteCtx.aggContext =>
+                  handleHomSumSpecialCase(Sum(f, d)).map { case (expr, projs) =>
+                    val cnt = FieldIdent(None, _hiddenNames.uniqueId())
+                    ret += (avg -> (Div(expr, cnt), projs ++ Seq((cnt, ExprProj(CountStar(), None), Onions.PLAIN, false))))
+                    false
+                  }.getOrElse(true)
 
-                    ret += (avg -> (Div(expr0, expr1), projs))
-
-                    false // stop
-                  }.getOrElse(true) // keep traversing
+                // TODO: do something about distinct
+                case s: Sum if curRewriteCtx.aggContext =>
+                  println("found sum s: " + s.sql)
+                  handleHomSumSpecialCase(s).map { value =>
+                      ret += (s -> value)
+                      false
+                  }.getOrElse(true)
 
                 case _: SqlAgg =>
                   false // don't try to optimize exprs within an agg, b/c that
@@ -743,12 +852,12 @@ trait Generator extends Traversals with Transformers {
               val fields = resolveAliases(e).gatherFields
               def translateField(fi: FieldIdent) = {
                 CollectionUtils.optOrEither2(
-                  getSupportedExpr(fi, Onions.DET, subrels),
-                  getSupportedExpr(fi, Onions.OPE, subrels))
+                  getSupportedExpr(fi, Onions.DET, analysis.subrels),
+                  getSupportedExpr(fi, Onions.OPE, analysis.subrels))
                 .getOrElse {
                   println("could not find DET/OPE enc for expr: " + fi)
                   println("orig: " + e.sql)
-                  println("subrels: " + subrels)
+                  println("subrels: " + analysis.subrels)
                   throw new Exception("should not happen")
                 } match {
                   case Left((e, _))  => (e, Onions.DET)
@@ -768,7 +877,7 @@ trait Generator extends Traversals with Transformers {
               }
             }
 
-            val opts = mkOptimizations(e)
+            val opts = mkOptimizations(e, curRewriteCtx)
 
             val e0ForProj = topDownTransformContext(e, e.ctx) {
               // replace w/ something dumb, so we can gather fields w/o worrying about it
@@ -865,10 +974,16 @@ trait Generator extends Traversals with Transformers {
                       val projExpr = sr.stmt.ctx.lookupProjection(name)
                       assert(projExpr.isDefined)
                       findOnionableExpr(projExpr.get).foreach { case (_, t, x) =>
-                        onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).foreach { _ =>
+                        def doSet = {
                           val idx = sr.stmt.ctx.lookupNamedProjectionIndex(name)
                           assert(idx.isDefined)
                           encVec( idx.get ) |= o
+                        }
+
+                        if (o == Onions.HOM_ROW_DESC) {
+                          if (!onionSet.lookupPackedHOM(t, x).isEmpty) doSet
+                        } else {
+                          onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).foreach { _ => doSet }
                         }
                       }
                     }
@@ -977,10 +1092,38 @@ trait Generator extends Traversals with Transformers {
       cur.copy(relations = Some(r.map(rewriteSqlRelation)))
     }.getOrElse(cur)
 
+    val homGroupChoices = new ArrayBuffer[Seq[HomDesc]]
+
+    def gatherHomRowDesc(e: SqlExpr) = {
+      topDownTraverseContext(e, e.ctx) {
+        case e: SqlExpr =>
+          getSupportedHOMRowDescExpr(e, subqueryRelationPlans).map { case (_, hds) =>
+            homGroupChoices += hds
+            false
+          }.getOrElse(true)
+        case _ => true
+      }
+    }
+
+    topDownTraverseContext(cur, cur.ctx) {
+      case Sum(f, _, _) =>
+        gatherHomRowDesc(f)
+        false
+      case Avg(f, _, _) =>
+        gatherHomRowDesc(f)
+        false
+      case _ => true
+    }
+
+    // figure out a total preference ordering for all the hom groups
+    val analysis =
+      RewriteAnalysisContext(subqueryRelationPlans,
+                             buildHomGroupPreference(homGroupChoices.toSeq))
+
     // filters
     cur = cur
       .filter
-      .map(x => rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), false), subqueryRelationPlans))
+      .map(x => rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), false), analysis))
       .map {
         case Left((expr, onion)) =>
           assert(onion == Onions.PLAIN)
@@ -1013,7 +1156,7 @@ trait Generator extends Traversals with Transformers {
           .groupBy
           .map { gb =>
             gb.having.map { x =>
-              (rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), true), subqueryRelationPlans) match {
+              (rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), true), analysis) match {
                 case Left((expr, onion)) =>
                   assert(onion == Onions.PLAIN)
                   gb.copy(having = Some(expr))
@@ -1083,7 +1226,7 @@ trait Generator extends Traversals with Transformers {
                   rewriteExprForServer(
                     resolveAliases(k),
                     RewriteContext(Seq(Onions.OPE), aggCtx),
-                    subqueryRelationPlans) match {
+                    analysis) match {
 
                     case Left((expr, onion)) => Right(mkClientCompFromKeyInfo(k, expr, onion))
                     case Right((None, comp)) => Right(comp)
@@ -1180,7 +1323,7 @@ trait Generator extends Traversals with Transformers {
               case _             => Onions.toSeq(Onions.ALL)
             }
             val aggCtx = !(cur.groupBy.isDefined && !newLocalFilters.isEmpty)
-            rewriteExprForServer(e, RewriteContext(onions, aggCtx), subqueryRelationPlans) match {
+            rewriteExprForServer(e, RewriteContext(onions, aggCtx), analysis) match {
               case Left((expr, onion)) =>
                 assert(BitUtils.onlyOne(onion))
                 val stmtIdx = projectionInsert(ExprProj(expr, a), onion, false)
@@ -1486,11 +1629,11 @@ trait Generator extends Traversals with Transformers {
       case Max(expr, _) if test(Onions.OPE) =>
         getPotentialCryptoOpts0(expr, Onions.OPE)
 
-      case s @ Sum(expr, _, _) if test(Onions.HOM) =>
-        getPotentialCryptoOpts0(expr, Onions.HOM)
+      case s @ Sum(expr, _, _) if test(Onions.HOM_AGG) =>
+        getPotentialCryptoOpts0(expr, Onions.HOM_ROW_DESC)
 
-      case Avg(expr, _, _) if test(Onions.HOM) =>
-        getPotentialCryptoOpts0(expr, Onions.HOM)
+      case Avg(expr, _, _) if test(Onions.HOM_AGG) =>
+        getPotentialCryptoOpts0(expr, Onions.HOM_ROW_DESC)
 
       case CountStar(_) => Some(Seq.empty)
 
@@ -1559,8 +1702,12 @@ trait Generator extends Traversals with Transformers {
         if (e0.size == exprs.size) {
           e0.foreach {
             case ((_, t, e), o) =>
-              if (o != Onions.HOM) workingSet.foreach(_.add(t, e, o))
-              else workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
+              if (o == Onions.HOM_ROW_DESC) {
+                println("adding e with HOM_ROW_DESC: " + e.sql)
+                workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
+              } else {
+                workingSet.foreach(_.add(t, e, o))
+              }
           }
           true
         } else false
