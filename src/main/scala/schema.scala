@@ -64,6 +64,9 @@ where table_schema = 'public' and table_name = ?
           case "integer" =>
             assert(rs.getInt(4) % 8 == 0)
             IntType(rs.getInt(4) / 8)
+          case "bigint" => IntType(8)
+          case "smallint" => IntType(2)
+          case "bytea" => VariableLenByteArray(None)
           case e => sys.error("unknown type: " + e)
         })
       })
