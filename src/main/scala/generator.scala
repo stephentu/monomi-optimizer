@@ -741,7 +741,22 @@ trait Generator extends Traversals with Transformers {
                   hd(useIdx)
                 }
 
+                def findCommonHomDesc(hds: Seq[Seq[HomDesc]]): Seq[HomDesc] = {
+                  assert(!hds.isEmpty)
+                  hds.tail.foldLeft( hds.head.toSet ) {
+                    case (acc, elem) if !elem.isEmpty => acc & elem.toSet
+                    case (acc, _)                     => acc
+                  }.toSeq
+                }
+
                 def translateForUniqueHomID(e: SqlExpr, aggContext: Boolean): Option[(SqlExpr, Seq[HomDesc])] = {
+                  def procCaseExprCase(c: CaseExprCase): Option[(CaseExprCase, Seq[HomDesc])] = {
+                    CollectionUtils.optAnd2(
+                      doTransformServer(c.cond, RewriteContext(Seq(Onions.PLAIN), aggContext)),
+                      translateForUniqueHomID(c.expr, aggContext)).map {
+                        case ((l, _), (r, hd)) => (CaseExprCase(l, r), hd)
+                      }
+                  }
                   e match {
                     case Sum(f, _, _) if aggContext =>
                       translateForUniqueHomID(f, false).map {
@@ -750,49 +765,32 @@ trait Generator extends Traversals with Transformers {
                           (FunctionCall("hom_agg", Seq(f0, StringLiteral(hd0.table), IntLiteral(hd0.group))), Seq(hd0))
                       }
 
-                    case CaseWhenExpr(cases, default, _) =>
-                      def procCaseExprCase(c: CaseExprCase): Option[(CaseExprCase, Seq[HomDesc])] = {
-                        CollectionUtils.optAnd2(
-                          doTransformServer(c.cond, RewriteContext(Seq(Onions.PLAIN), aggContext)),
-                          translateForUniqueHomID(c.expr, aggContext)).map {
-                            case ((l, _), (r, hd)) => (CaseExprCase(l, r), hd)
-                          }
-                      }
-
-                      def findCommonHomDesc(hds: Seq[Seq[HomDesc]]): Seq[HomDesc] = {
-                        assert(!hds.isEmpty)
-                        hds.tail.foldLeft( hds.head.toSet ) {
-                          case (acc, elem) if !elem.isEmpty => acc & elem.toSet
-                          case (acc, _)                     => acc
-                        }.toSeq
-                      }
-
-                      default.flatMap { d =>
-                        CollectionUtils.optAnd2(
-                          CollectionUtils.optSeq(cases.map(procCaseExprCase)),
-                          translateForUniqueHomID(d, aggContext)).flatMap {
-                            case (cases0, (d0, hd)) =>
-                              // check that all hds are not empty
-                              val hds = cases0.map(_._2) ++ Seq(hd)
-                              if (hds.filter(_.isEmpty).isEmpty) {
-                                val inCommon = findCommonHomDesc(hds)
-                                if (inCommon.isEmpty) None else {
-                                  Some((CaseWhenExpr(cases0.map(_._1), Some(d0)), inCommon))
-                                }
-                              } else None
-                          }
-                      }.orElse {
-                        CollectionUtils.optSeq(cases.map(procCaseExprCase)).flatMap {
-                          case cases0 =>
+                    case CaseWhenExpr(cases, Some(d), _) =>
+                      CollectionUtils.optAnd2(
+                        CollectionUtils.optSeq(cases.map(procCaseExprCase)),
+                        translateForUniqueHomID(d, aggContext)).flatMap {
+                          case (cases0, (d0, hd)) =>
                             // check that all hds are not empty
-                            val hds = cases0.map(_._2)
-                            if (hds.filter(_.isEmpty).isEmpty) {
-                              val inCommon = findCommonHomDesc(hds)
-                              if (inCommon.isEmpty) None else {
-                                Some((CaseWhenExpr(cases0.map(_._1), None), inCommon))
-                              }
-                            } else None
+                            val hds = cases0.map(_._2) ++ Seq(hd)
+                            // should have at least one non-empty
+                            assert(!hds.filterNot(_.isEmpty).isEmpty)
+                            val inCommon = findCommonHomDesc(hds)
+                            if (inCommon.isEmpty) None else {
+                              Some((CaseWhenExpr(cases0.map(_._1), Some(d0)), inCommon))
+                            }
                         }
+
+                    case CaseWhenExpr(cases, None, _) =>
+                      CollectionUtils.optSeq(cases.map(procCaseExprCase)).flatMap {
+                        case cases0 =>
+                          // check that all hds are not empty
+                          val hds = cases0.map(_._2)
+                          // should have at least one non-empty
+                          assert(!hds.filterNot(_.isEmpty).isEmpty)
+                          val inCommon = findCommonHomDesc(hds)
+                          if (inCommon.isEmpty) None else {
+                            Some((CaseWhenExpr(cases0.map(_._1), None), inCommon))
+                          }
                       }
 
                     case e: SqlExpr =>
@@ -1646,13 +1644,14 @@ trait Generator extends Traversals with Transformers {
             getPotentialCryptoOpts0(c.cond, Onions.ALL),
             getPotentialCryptoOpts0(c.expr, constraints)).map { case (l, r) => l ++ r }
         }
-        default.flatMap { d =>
-          CollectionUtils.optSeq(
-            cases.map(c => procCaseExprCase(c, constraints)) ++
-            Seq(getPotentialCryptoOpts0(d, constraints))).map(_.flatten)
-        }.orElse {
-          CollectionUtils.optSeq(
-            cases.map(c => procCaseExprCase(c, constraints))).map(_.flatten)
+        default match {
+          case Some(d) =>
+            CollectionUtils.optSeq(
+              cases.map(c => procCaseExprCase(c, constraints)) ++
+              Seq(getPotentialCryptoOpts0(d, constraints))).map(_.flatten)
+          case None =>
+            CollectionUtils.optSeq(
+              cases.map(c => procCaseExprCase(c, constraints))).map(_.flatten)
         }
 
       case Not(e, _) =>
