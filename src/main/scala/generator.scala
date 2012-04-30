@@ -1388,63 +1388,73 @@ trait Generator extends Traversals with Transformers {
 
     // --projections
 
-    val decryptionVec = (
-      projPosMaps.flatMap {
-        case Right((_, m)) => Some(m.values)
-        case _ => None
-      }.flatten ++ {
-        projPosMaps.flatMap {
-          case Left((p, o)) if o != Onions.PLAIN => Some(p)
-          case _ => None
-        }
-      }
-    ).toSet.toSeq.sorted
-
-    val s0 =
-      if (decryptionVec.isEmpty) stage2
-      else wrapDecryptionNodeSeq(stage2, decryptionVec)
-
-    val projTrfms = projPosMaps.map {
-      case Right((comp, mapping)) =>
-        assert(comp.subqueries.isEmpty)
-        Right(comp.mkSqlExpr(mapping))
-      case Left((p, _)) => Left(p)
-    }
-
-    var offset = projTrfms.size
-    val auxTrfmMSeq = newLocalOrderBy.zip(localOrderByPosMaps).flatMap {
-      case (Left(p), _) => Seq.empty
-      case (_, m)       =>
-        val r = m.values.zipWithIndex.map {
-          case (p, idx) => (p, offset + idx)
-        }.toSeq
-        offset += m.size
-        r
-    }
-    val auxTrfms = auxTrfmMSeq.map { case (k, _) => Left(k) }
-
-    val trfms = projTrfms ++ auxTrfms
-
-    def isPrefixIdentityTransform(trfms: Seq[Either[Int, SqlExpr]]): Boolean = {
-      trfms.zipWithIndex.foldLeft(true) {
-        case (acc, (Left(p), idx)) => acc && p == idx
-        case (acc, (Right(_), _))  => false
-      }
-    }
-
-    // if trfms describes purely an identity transform, we can omit it
     val stage3 =
-      if (trfms.size == s0.tupleDesc.size &&
-          isPrefixIdentityTransform(trfms)) s0
-      else LocalTransform(trfms, s0)
+      if (encContext.needsProjections) {
+        assert(!projPosMaps.isEmpty)
 
-    // need to update localOrderByPosMaps with new proj info
-    val updateIdx = auxTrfmMSeq.toMap
+        val decryptionVec = (
+          projPosMaps.flatMap {
+            case Right((_, m)) => Some(m.values)
+            case _ => None
+          }.flatten ++ {
+            projPosMaps.flatMap {
+              case Left((p, o)) if o != Onions.PLAIN => Some(p)
+              case _ => None
+            }
+          }
+        ).toSet.toSeq.sorted
 
-    (0 until localOrderByPosMaps.size).foreach { i =>
-      localOrderByPosMaps(i) =
-        localOrderByPosMaps(i).map { case (p, i) => (p, updateIdx(i)) }.toMap
-    }
+        val s0 =
+          if (decryptionVec.isEmpty) stage2
+          else wrapDecryptionNodeSeq(stage2, decryptionVec)
+
+        val projTrfms = projPosMaps.map {
+          case Right((comp, mapping)) =>
+            assert(comp.subqueries.isEmpty)
+            Right(comp.mkSqlExpr(mapping))
+          case Left((p, _)) => Left(p)
+        }
+
+        var offset = projTrfms.size
+        val auxTrfmMSeq = newLocalOrderBy.zip(localOrderByPosMaps).flatMap {
+          case (Left(p), _) => Seq.empty
+          case (_, m)       =>
+            val r = m.values.zipWithIndex.map {
+              case (p, idx) => (p, offset + idx)
+            }.toSeq
+            offset += m.size
+            r
+        }
+        val auxTrfms = auxTrfmMSeq.map { case (k, _) => Left(k) }
+
+        val trfms = projTrfms ++ auxTrfms
+
+        def isPrefixIdentityTransform(trfms: Seq[Either[Int, SqlExpr]]): Boolean = {
+          trfms.zipWithIndex.foldLeft(true) {
+            case (acc, (Left(p), idx)) => acc && p == idx
+            case (acc, (Right(_), _))  => false
+          }
+        }
+
+        // if trfms describes purely an identity transform, we can omit it
+        val stage3 =
+          if (trfms.size == s0.tupleDesc.size &&
+              isPrefixIdentityTransform(trfms)) s0
+          else LocalTransform(trfms, s0)
+
+        // need to update localOrderByPosMaps with new proj info
+        val updateIdx = auxTrfmMSeq.toMap
+
+        (0 until localOrderByPosMaps.size).foreach { i =>
+          localOrderByPosMaps(i) =
+            localOrderByPosMaps(i).map { case (p, i) => (p, updateIdx(i)) }.toMap
+        }
+
+        stage3
+      } else {
+        assert(projPosMaps.isEmpty)
+        stage2
+      }
 
     val stage4 = {
       if (!newLocalOrderBy.isEmpty) {
@@ -1500,7 +1510,22 @@ trait Generator extends Traversals with Transformers {
       newLocalLimit.map(l => LocalLimit(l, stage4)).getOrElse(stage4)
 
     encContext match {
-      case PreserveOriginal | PreserveCardinality => stage5
+      case PreserveCardinality => stage5
+      case PreserveOriginal    =>
+
+        // make sure everything is decrypted now
+        val decryptionVec = stage5.tupleDesc.map(_._1).zipWithIndex.flatMap {
+          case (oo, idx) =>
+            oo.map { o =>
+              assert(BitUtils.onlyOne(o))
+              assert(o != Onions.PLAIN)
+              idx
+            }
+        }
+
+        assert(decryptionVec.isEmpty)
+        stage5
+
       case EncProj(o, require) =>
         assert(stage5.tupleDesc.size == o.size)
 

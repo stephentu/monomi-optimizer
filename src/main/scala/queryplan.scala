@@ -38,6 +38,7 @@ case class LocalFilter(expr: SqlExpr, child: PlanNode, subqueries: Seq[PlanNode]
   }
 }
 case class LocalTransform(trfms: Seq[Either[Int, SqlExpr]], child: PlanNode) extends PlanNode {
+  assert(!trfms.isEmpty)
   def tupleDesc = {
     val td = child.tupleDesc
     trfms.map {
