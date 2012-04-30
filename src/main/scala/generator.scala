@@ -613,6 +613,8 @@ trait Generator extends Traversals with Transformers {
                 tryPlain.orElse(tryHom).getOrElse(bailOut)
               } else if (curRewriteCtx.testOnion(Onions.HOM)) {
                 tryHom.getOrElse(bailOut)
+              } else if (curRewriteCtx.inClear) {
+                tryPlain.getOrElse(bailOut)
               } else { bailOut }
 
             case cw @ CaseWhenExpr(cases, default, _) =>
@@ -795,8 +797,8 @@ trait Generator extends Traversals with Transformers {
 
                     case e: SqlExpr =>
                       val ret = getSupportedHOMRowDescExpr(e, analysis.subrels)
-                      println("calling getSupportedHOMRowDescExpr on e: " + e.sql)
-                      println("  ret = " + ret)
+                      //println("calling getSupportedHOMRowDescExpr on e: " + e.sql)
+                      //println("  ret = " + ret)
                       ret
                     case _ => None
                   }
@@ -822,7 +824,7 @@ trait Generator extends Traversals with Transformers {
 
                 // TODO: do something about distinct
                 case s: Sum if curRewriteCtx.aggContext =>
-                  println("found sum s: " + s.sql)
+                  //println("found sum s: " + s.sql)
                   handleHomSumSpecialCase(s).map { value =>
                       ret += (s -> value)
                       false
@@ -1702,7 +1704,7 @@ trait Generator extends Traversals with Transformers {
           e0.foreach {
             case ((_, t, e), o) =>
               if (o == Onions.HOM_ROW_DESC) {
-                println("adding e with HOM_ROW_DESC: " + e.sql)
+                //println("adding e with HOM_ROW_DESC: " + e.sql)
                 workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
               } else {
                 workingSet.foreach(_.add(t, e, o))
