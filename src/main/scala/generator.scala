@@ -186,6 +186,13 @@ trait Generator extends Traversals with Transformers {
     }
   }
 
+  private def encLiteral(e: SqlExpr, o: Int): SqlExpr = {
+    assert(BitUtils.onlyOne(o))
+    assert(e.isLiteral)
+    // TODO: actual encryption
+    FunctionCall("encrypt", Seq(e, IntLiteral(o)))
+  }
+
   // if encContext is PreserveOriginal, then the plan node generated faithfully
   // recreates the original statement- that is, the result set has the same
   // (unencrypted) type as the result set of stmt.
@@ -277,7 +284,7 @@ trait Generator extends Traversals with Transformers {
           // easy case
           Onions.pickOne(o) match {
             case Onions.PLAIN => Some((e.copyWithContext(null).asInstanceOf[SqlExpr], Onions.PLAIN))
-            case o0           => Some((NullLiteral(), o0)) // TODO: encryption
+            case o0           => Some((encLiteral(e,o0), o0)) // TODO: encryption
           }
 
         case d: DependentFieldPlaceholder =>
@@ -705,7 +712,7 @@ trait Generator extends Traversals with Transformers {
               onionRetVal.set(curRewriteCtx.onions.head)
               curRewriteCtx.onions.head match {
                 case Onions.PLAIN => replaceWith(e.copyWithContext(null).asInstanceOf[SqlExpr])
-                case _            => replaceWith(NullLiteral()) // TODO : actual encryption
+                case o            => replaceWith(encLiteral(e, o))
               }
 
             case e: SqlExpr =>

@@ -85,6 +85,10 @@ case class RemoteSql(stmt: SelectStmt,
         } else {
           (None, false)
         }
+
+      case FunctionCall("encrypt", Seq(e, _), _) =>
+        (Some(e), false)
+
       case _ => (None, true)
     }.asInstanceOf[SelectStmt]
 
