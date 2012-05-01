@@ -206,6 +206,7 @@ case class FieldIdent(qualifier: Option[String], name: String, symbol: Symbol = 
   def gatherFields = Seq((this, false))
   def sql = Seq(qualifier, Some(name)).flatten.mkString(".")
 }
+
 case class Subselect(subquery: SelectStmt, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = Seq.empty
@@ -403,20 +404,32 @@ case class TuplePosition(pos: Int, ctx: Context = null) extends SqlExpr {
   def sql = "pos$" + pos
 }
 
-case class DependentFieldPlaceholder(placeholder: FieldIdent, ctx: Context = null)
-  extends LiteralExpr {
+// this node shouldn't appear in a re-written subquery
+// it is merely a placeholder
+case class DependentFieldPlaceholder(pos: Int, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = "<placeholder>"
+  def gatherFields = Seq.empty
+  def sql = "<should_not_appear>$" + pos
+  def bind(onion: Int): BoundDependentFieldPlaceholder =
+    BoundDependentFieldPlaceholder(pos, onion, ctx)
 }
 
-case class SubqueryPosition(pos: Int, ctx: Context = null) extends SqlExpr {
+case class BoundDependentFieldPlaceholder(pos: Int, onion: Int, ctx: Context = null)
+  extends SqlExpr {
+  assert(BitUtils.onlyOne(onion))
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = throw new RuntimeException("error")
-  def sql = "subquery$" + pos
+  def sql = "param$" + pos + "$" + Onions.str(onion)
 }
 
-case class ExistsSubqueryPosition(pos: Int, ctx: Context = null) extends SqlExpr {
+case class SubqueryPosition(pos: Int, args: Seq[SqlExpr], ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = throw new RuntimeException("error")
-  def sql = "exists(subquery$" + pos + ")"
+  def sql = (Seq("subquery$" + pos, "(", args.map(_.sql).mkString(", "), ")")).mkString("")
+}
+
+case class ExistsSubqueryPosition(pos: Int, args: Seq[SqlExpr], ctx: Context = null) extends SqlExpr {
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def gatherFields = throw new RuntimeException("error")
+  def sql = (Seq("exists(subquery$" + pos, "(", args.map(_.sql).mkString(", "), "))")).mkString("")
 }

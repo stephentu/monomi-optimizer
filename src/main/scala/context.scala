@@ -26,6 +26,7 @@ class Context(val parent: Either[Definitions, Context]) {
     var cur = that.parent.right.toOption.orNull
     while (cur ne null) {
       if (cur eq this) return true
+      cur = cur.parent.right.toOption.orNull
     }
     false
   }
