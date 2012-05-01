@@ -13,6 +13,9 @@ case class TableColumn(name: String, tpe: DataType) extends PrettyPrinters {
 }
 
 class Definitions(val defns : Map[String, Seq[TableColumn]]) extends PrettyPrinters {
+
+  def tableExists(table: String): Boolean = defns.contains(table)
+
   def lookup(table: String, col: String): Option[TableColumn] = {
     defns.get(table).flatMap(_.filter(_.name == col).headOption)
   }

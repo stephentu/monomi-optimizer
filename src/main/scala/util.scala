@@ -19,10 +19,10 @@ class ResultSetWrapper(rs: ResultSet) {
 }
 
 // NOT THREAD SAFE
-class NameGenerator(prefix: String, reserved: String = "$") {
+class NameGenerator(prefix: String) {
   private var _ctr: Long = 0L
   def uniqueId(): String = {
-    val ret = prefix + reserved + _ctr
+    val ret = prefix + _ctr
     _ctr += 1
     ret
   }

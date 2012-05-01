@@ -105,7 +105,7 @@ trait Generator extends Traversals with Transformers {
     }
   }
 
-  private def encTblName(t: String) = t + "_enc"
+  private def encTblName(t: String) = t + "$enc"
 
   def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode =
     generatePlanFromOnionSet0(stmt, onionSet, PreserveOriginal)
@@ -312,7 +312,7 @@ trait Generator extends Traversals with Transformers {
                   case (basename, o0) =>
                     val qual = if (r == t) encTblName(t) else r
                     val choice = Onions.pickOne(o0 & o)
-                    val name = basename + "_" + Onions.str(choice)
+                    val name = basename + "$" + Onions.str(choice)
                     ((FieldIdent(Some(qual), name), choice))
                 }
             }
@@ -851,10 +851,7 @@ trait Generator extends Traversals with Transformers {
                       }
 
                     case e: SqlExpr =>
-                      val ret = getSupportedHOMRowDescExpr(e, analysis.subrels)
-                      //println("calling getSupportedHOMRowDescExpr on e: " + e.sql)
-                      //println("  ret = " + ret)
-                      ret
+                      getSupportedHOMRowDescExpr(e, analysis.subrels)
                     case _ => None
                   }
                 }
@@ -1765,7 +1762,7 @@ trait Generator extends Traversals with Transformers {
     }
   }
 
-  def generateCandidatePlans(stmt: SelectStmt): Seq[PlanNode] = {
+  def generateCandidatePlans(stmt: SelectStmt): Seq[(PlanNode, EstimateContext)] = {
     val o = generateOnionSets(stmt)
     val perms = CollectionUtils.powerSetMinusEmpty(o)
     // merge all perms, then unique
@@ -1773,7 +1770,12 @@ trait Generator extends Traversals with Transformers {
     def fillOnionSet(o: OnionSet): OnionSet = {
       o.complete(stmt.ctx.defns)
     }
-    candidates.map(fillOnionSet).map(o => generatePlanFromOnionSet(stmt, o)).toSet.toSeq
+    def estimateContextFromOnionSet(o: OnionSet): EstimateContext = {
+      EstimateContext(stmt.ctx.defns, o.getPrecomputedExprs)
+    }
+    candidates.map(fillOnionSet).map {
+      o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(o))
+    }.toMap.toSeq
   }
 
   def generateOnionSets(stmt: SelectStmt): Seq[OnionSet] = {

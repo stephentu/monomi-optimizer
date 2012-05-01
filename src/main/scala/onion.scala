@@ -77,7 +77,7 @@ object OnionSet {
 }
 
 class OnionSet {
-  private val _gen = new NameGenerator("_virtual")
+  private val _gen = new NameGenerator("virtual")
 
   // string is enc name, int is Onions bitmask
   private val opts = new HashMap[(String, Either[String, SqlExpr]), (String, Int)]
@@ -91,6 +91,13 @@ class OnionSet {
       case FieldIdent(_, n, _, _) => Left(n)
       case _ => Right(expr.copyWithContext(null).asInstanceOf[SqlExpr])
     }))
+  }
+
+  def getPrecomputedExprs: Map[String, SqlExpr] = {
+    opts.flatMap {
+      case ((_, Right(expr)), (basename, _)) => Some((basename, expr))
+      case _                                 => None
+    }.toMap
   }
 
   // relation is global table name

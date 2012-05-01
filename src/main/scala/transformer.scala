@@ -48,6 +48,7 @@ trait Transformers {
       case node @ Avg(e, _, _) => node.copy(expr = recur(e))
       case node @ Min(e, _) => node.copy(expr = recur(e))
       case node @ Max(e, _) => node.copy(expr = recur(e))
+      case node @ GroupConcat(e, _, _) => node.copy(expr = recur(e))
       case node @ FunctionCall(_, a, _) => node.copy(args = a.map(recur))
       case node @ Extract(e, _, _) => node.copy(expr = recur(e))
       case node @ Substring(e, _, _, _) => node.copy(expr = recur(e))
