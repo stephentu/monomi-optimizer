@@ -8,9 +8,17 @@
 //
 //}
 
+import scala.util.parsing.json._
+
 case class EstimateContext(
   defns: Definitions,
-  precomputed: Map[String, SqlExpr])
+  precomputed: Map[String, SqlExpr],
+  needsRowIDs: Set[String])
+
+case class Estimate(
+  cost: Double,
+  rows: Long,
+  rowsPerRow: Long /* estimate cardinality within each aggregate group */)
 
 trait PlanNode {
   // actual useful stuff
@@ -18,7 +26,7 @@ trait PlanNode {
   // ( enc info, true if in vector ctx, false otherwise )
   def tupleDesc: Seq[(Option[Int], Boolean)]
 
-  def costEstimate(ctx: EstimateContext): Long
+  def costEstimate(ctx: EstimateContext): Estimate
 
   // printing stuff
   def pretty: String = pretty0(0)
@@ -49,7 +57,9 @@ case class RemoteSql(stmt: SelectStmt,
     // node replacement information, so we just use some text
     // substitution for now, and wait to implement a real solution
 
-    def basename(s: String): String = s.split("\\$").dropRight(1).mkString("$")
+    def basename(s: String): String =
+      if (s.contains("$")) s.split("\\$").dropRight(1).mkString("$")
+      else s
 
     def rewriteWithQual[N <: Node](n: N, q: String): N =
       topDownTransformation(n) {
@@ -70,9 +80,16 @@ case class RemoteSql(stmt: SelectStmt,
               (Some(FieldIdent(Some(qual0), name0)), false) }
           }
           .orElse {
-            // try to rewrite just table
             if (ctx.defns.tableExists(qual0)) {
-              Some((Some(FieldIdent(Some(qual0), name)), false))
+              // rowids are rewritten to 0
+              println("ctx.needsRowIDs: " + ctx.needsRowIDs)
+              println("name0: " + name0)
+              if (ctx.needsRowIDs.contains(qual0) && name0 == "rowid") {
+                Some((Some(IntLiteral(0)), false))
+              } else {
+                // try to rewrite just table
+                Some((Some(FieldIdent(Some(qual0), name)), false))
+              }
             } else {
               None
             }
@@ -92,9 +109,70 @@ case class RemoteSql(stmt: SelectStmt,
       case _ => (None, true)
     }.asInstanceOf[SelectStmt]
 
-    println(reverseStmt.sql)
+    // taken from:
+    // http://stackoverflow.com/questions/4170949/how-to-parse-json-in-scala-using-standard-scala-classes
+    class CC[T] {
+      def unapply(a: Any): Option[T] = Some(a.asInstanceOf[T])
+    }
+    object M extends CC[Map[String, Any]]
+    object L extends CC[List[Any]]
 
-    0L
+    object S extends CC[String]
+    object D extends CC[Double]
+    object B extends CC[Boolean]
+
+    def extractInfoFromQueryPlan(node: Map[String, Any]):
+      (Double, Long, Option[Long]) = {
+
+      val firstChild =
+        for (L(children) <- node.get("Plans");
+             M(child) = children.head) yield extractInfoFromQueryPlan(child)
+
+      val Some((totalCost, planRows)) = for (
+        D(totalCost) <- node.get("Total Cost");
+        D(planRows)  <- node.get("Plan Rows")
+      ) yield ((totalCost, planRows.toLong))
+
+      node("Node Type") match {
+        case "Aggregate" =>
+          // must have firstChild
+          assert(firstChild.isDefined)
+
+          firstChild.get match {
+            case (_, rows, None) =>
+              (totalCost,
+               planRows,
+               Some(math.ceil(rows.toDouble / planRows.toDouble).toLong))
+
+            // TODO: agg of aggs??
+          }
+
+        case _ =>
+          // simple case, just read from this node only
+          firstChild.map {
+            case (_, _, x) => (totalCost, planRows, x)
+          }.getOrElse((totalCost, planRows, None))
+      }
+    }
+
+    val sql = reverseStmt.sqlFromDialect(PostgresDialect)
+
+    println(sql)
+
+    import Conversions._
+
+    val r = ctx.defns.dbconn.get.getConn.createStatement.executeQuery("EXPLAIN (FORMAT JSON) " + sql)
+    val res = r.map { rs =>
+      val planJson = JSON.parseFull(rs.getString(1))
+      //println(planJson)
+      (for (L(l) <- planJson;
+            M(m) = l.head;
+            M(p) <- m.get("Plan")) yield extractInfoFromQueryPlan(p)).getOrElse(
+        throw new RuntimeException("unexpected return from postgres: " + planJson)
+      )
+    }
+
+    Estimate(res.head._1, res.head._2, res.head._3.getOrElse(1))
   }
 }
 

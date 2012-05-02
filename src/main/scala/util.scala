@@ -16,6 +16,9 @@ class ResultSetWrapper(rs: ResultSet) {
     } finally { rs.close() }
     buf.toSeq
   }
+
+  @inline
+  def foreach[U](f: ResultSet => U): Unit = map(f)
 }
 
 // NOT THREAD SAFE
@@ -63,5 +66,6 @@ object BitUtils {
 
 trait PrettyPrinters {
   // TODO: escape
-  protected def _q(s: String): String = "\"" + s + "\""
+  protected def quoteSingle(s: String): String = "'" + s + "'"
+  protected def quoteDbl(s: String): String = "\"" + s + "\""
 }

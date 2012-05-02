@@ -1,10 +1,16 @@
+sealed abstract trait SqlDialect
+case object MySQLDialect extends SqlDialect
+case object PostgresDialect extends SqlDialect
+
 trait Node extends PrettyPrinters {
   val ctx: Context
 
   def copyWithContext(ctx: Context): Node
 
   // emit sql repr of node
-  def sql: String
+  def sql: String = sqlFromDialect(PostgresDialect)
+
+  def sqlFromDialect(dialect: SqlDialect): String
 }
 
 case class SelectStmt(projections: Seq[SqlProj],
@@ -14,24 +20,24 @@ case class SelectStmt(projections: Seq[SqlProj],
                       orderBy: Option[SqlOrderBy],
                       limit: Option[Int], ctx: Context = null) extends Node {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql =
+  def sqlFromDialect(dialect: SqlDialect) =
     Seq(Some("select"),
-        Some(projections.map(_.sql).mkString(", ")),
-        relations.map(x => "from " + x.map(_.sql).mkString(", ")),
-        filter.map(x => "where " + x.sql),
-        groupBy.map(_.sql),
-        orderBy.map(_.sql),
+        Some(projections.map(_.sqlFromDialect(dialect)).mkString(", ")),
+        relations.map(x => "from " + x.map(_.sqlFromDialect(dialect)).mkString(", ")),
+        filter.map(x => "where " + x.sqlFromDialect(dialect)),
+        groupBy.map(_.sqlFromDialect(dialect)),
+        orderBy.map(_.sqlFromDialect(dialect)),
         limit.map(x => "limit " + x.toString)).flatten.mkString(" ")
 }
 
 trait SqlProj extends Node
 case class ExprProj(expr: SqlExpr, alias: Option[String], ctx: Context = null) extends SqlProj {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq(Some(expr.sql), alias).flatten.mkString(" as ")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(Some(expr.sqlFromDialect(dialect)), alias).flatten.mkString(" as ")
 }
 case class StarProj(ctx: Context = null) extends SqlProj {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = "*"
+  def sqlFromDialect(dialect: SqlDialect) = "*"
 }
 
 trait SqlExpr extends Node {
@@ -99,7 +105,7 @@ trait Binop extends SqlExpr {
 
   def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr): Binop
 
-  def sql = Seq("(" + lhs.sql + ")", opStr, "(" + rhs.sql + ")") mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq("(" + lhs.sqlFromDialect(dialect) + ")", opStr, "(" + rhs.sqlFromDialect(dialect) + ")") mkString " "
 }
 
 case class Or(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
@@ -153,7 +159,7 @@ case class In(elem: SqlExpr, set: Seq[SqlExpr], negate: Boolean, ctx: Context = 
     elem.isLiteral && set.filter(e => !e.isLiteral).isEmpty
   def gatherFields =
     elem.gatherFields ++ set.flatMap(_.gatherFields)
-  def sql = Seq(elem.sql, "in", "(", set.map(_.sql).mkString(", "), ")") mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq(elem.sqlFromDialect(dialect), "in", "(", set.map(_.sqlFromDialect(dialect)).mkString(", "), ")") mkString " "
 }
 case class Like(lhs: SqlExpr, rhs: SqlExpr, negate: Boolean, ctx: Context = null) extends Binop {
   val opStr = if (negate) "not like" else "like"
@@ -188,7 +194,7 @@ trait Unop extends SqlExpr {
   val opStr: String
   override def isLiteral = expr.isLiteral
   def gatherFields = expr.gatherFields
-  def sql = Seq(opStr, "(", expr.sql, ")") mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq(opStr, "(", expr.sqlFromDialect(dialect), ")") mkString " "
 }
 
 case class Not(expr: SqlExpr, ctx: Context = null) extends Unop {
@@ -198,61 +204,66 @@ case class Not(expr: SqlExpr, ctx: Context = null) extends Unop {
 case class Exists(select: Subselect, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = Seq.empty
-  def sql = Seq("exists", "(", select.sql, ")") mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq("exists", "(", select.sqlFromDialect(dialect), ")") mkString " "
 }
 
 case class FieldIdent(qualifier: Option[String], name: String, symbol: Symbol = null, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(symbol = null, ctx = c)
   def gatherFields = Seq((this, false))
-  def sql = Seq(qualifier, Some(name)).flatten.mkString(".")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(qualifier, Some(name)).flatten.mkString(".")
 }
 
 case class Subselect(subquery: SelectStmt, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = Seq.empty
-  def sql = "(" + subquery.sql + ")"
+  def sqlFromDialect(dialect: SqlDialect) = "(" + subquery.sqlFromDialect(dialect) + ")"
 }
 
 trait SqlAgg extends SqlExpr
 case class CountStar(ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = Seq.empty
-  def sql = "count(*)"
+  def sqlFromDialect(dialect: SqlDialect) = "count(*)"
 }
 case class CountExpr(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
-  def sql = Seq(Some("count("), if (distinct) Some("distinct ") else None, Some(expr.sql), Some(")")).flatten.mkString("")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(Some("count("), if (distinct) Some("distinct ") else None, Some(expr.sqlFromDialect(dialect)), Some(")")).flatten.mkString("")
 }
 case class Sum(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
-  def sql = Seq(Some("sum("), if (distinct) Some("distinct ") else None, Some(expr.sql), Some(")")).flatten.mkString("")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(Some("sum("), if (distinct) Some("distinct ") else None, Some(expr.sqlFromDialect(dialect)), Some(")")).flatten.mkString("")
 }
 case class Avg(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
-  def sql = Seq(Some("avg("), if (distinct) Some("distinct ") else None, Some(expr.sql), Some(")")).flatten.mkString("")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(Some("avg("), if (distinct) Some("distinct ") else None, Some(expr.sqlFromDialect(dialect)), Some(")")).flatten.mkString("")
 }
 case class Min(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
-  def sql = "min(" + expr.sql + ")"
+  def sqlFromDialect(dialect: SqlDialect) = "min(" + expr.sqlFromDialect(dialect) + ")"
 }
 case class Max(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
-  def sql = "max(" + expr.sql + ")"
+  def sqlFromDialect(dialect: SqlDialect) = "max(" + expr.sqlFromDialect(dialect) + ")"
 }
 case class GroupConcat(expr: SqlExpr, sep: String, ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
-  def sql = Seq("group_concat(", Seq(expr.sql, _q(sep)).mkString(", "), ")").mkString("")
+  def sqlFromDialect(dialect: SqlDialect) = dialect match {
+    case MySQLDialect =>
+      Seq("group_concat(", Seq(expr.sqlFromDialect(dialect), quoteSingle(sep)).mkString(", "), ")").mkString("")
+    case PostgresDialect =>
+      Seq("array_to_string(array_agg(", expr.sqlFromDialect(dialect), "), ", quoteSingle(sep), ")").mkString("")
+  }
 }
 case class AggCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extends SqlAgg {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = args.flatMap(_.gatherFields)
-  def sql = Seq(name, "(", args.map(_.sql).mkString(", "), ")").mkString("")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(name, "(", args.map(_.sqlFromDialect(dialect)).mkString(", "), ")").mkString("")
 }
 
 trait SqlFunction extends SqlExpr {
@@ -260,7 +271,7 @@ trait SqlFunction extends SqlExpr {
   val args: Seq[SqlExpr]
   override def isLiteral = args.foldLeft(true)(_ && _.isLiteral)
   def gatherFields = args.flatMap(_.gatherFields)
-  def sql = Seq(name, "(", args.map(_.sql) mkString ", ", ")") mkString ""
+  def sqlFromDialect(dialect: SqlDialect) = Seq(name, "(", args.map(_.sqlFromDialect(dialect)) mkString ", ", ")") mkString ""
 }
 
 case class FunctionCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extends SqlFunction {
@@ -286,7 +297,7 @@ case class Substring(expr: SqlExpr, from: Int, length: Option[Int], ctx: Context
 
 case class CaseExprCase(cond: SqlExpr, expr: SqlExpr, ctx: Context = null) extends Node {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq("when", cond.sql, "then", expr.sql) mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq("when", cond.sqlFromDialect(dialect), "then", expr.sqlFromDialect(dialect)) mkString " "
 }
 case class CaseExpr(expr: SqlExpr, cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -301,7 +312,7 @@ case class CaseExpr(expr: SqlExpr, cases: Seq[CaseExprCase], default: Option[Sql
     expr.gatherFields ++
     cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields) ++
     default.map(_.gatherFields).getOrElse(Seq.empty)
-  def sql = Seq(Some("case"), Some(expr.sql), Some(cases.map(_.sql) mkString " "), default.map(d => "else " + d.sql), Some("end")).flatten.mkString(" ")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(Some("case"), Some(expr.sqlFromDialect(dialect)), Some(cases.map(_.sqlFromDialect(dialect)) mkString " "), default.map(d => "else " + d.sqlFromDialect(dialect)), Some("end")).flatten.mkString(" ")
 }
 case class CaseWhenExpr(cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -314,7 +325,7 @@ case class CaseWhenExpr(cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx:
   def gatherFields =
     cases.flatMap(x => x.cond.gatherFields ++ x.expr.gatherFields) ++
     default.map(_.gatherFields).getOrElse(Seq.empty)
-  def sql = Seq(Some("case"), Some(cases.map(_.sql) mkString " "), default.map(d => "else " + d.sql), Some("end")).flatten.mkString(" ")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(Some("case"), Some(cases.map(_.sqlFromDialect(dialect)) mkString " "), default.map(d => "else " + d.sqlFromDialect(dialect)), Some("end")).flatten.mkString(" ")
 }
 
 case class UnaryPlus(expr: SqlExpr, ctx: Context = null) extends Unop {
@@ -332,55 +343,56 @@ trait LiteralExpr extends SqlExpr {
 }
 case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = v.toString
+  def sqlFromDialect(dialect: SqlDialect) = v.toString
 }
 case class FloatLiteral(v: Double, ctx: Context = null) extends LiteralExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = v.toString
+  def sqlFromDialect(dialect: SqlDialect) = v.toString
 }
 case class StringLiteral(v: String, ctx: Context = null) extends LiteralExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = "\"" + v.toString + "\"" // TODO: escape...
+  def sqlFromDialect(dialect: SqlDialect) = quoteSingle(v)
 }
 case class NullLiteral(ctx: Context = null) extends LiteralExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = "null"
+  def sqlFromDialect(dialect: SqlDialect) = "null"
 }
 case class DateLiteral(d: String, ctx: Context = null) extends LiteralExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq("date", "\"" + d + "\"") mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq("date", quoteSingle(d)) mkString " "
 }
 case class IntervalLiteral(e: String, unit: ExtractType, ctx: Context = null) extends LiteralExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq("interval", "\"" + e + "\"", unit.toString) mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq("interval", quoteSingle(e), unit.toString) mkString " "
 }
 
 trait SqlRelation extends Node
 case class TableRelationAST(name: String, alias: Option[String], ctx: Context = null) extends SqlRelation {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq(Some(name), alias).flatten.mkString(" ")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(Some(name), alias).flatten.mkString(" ")
 }
 case class SubqueryRelationAST(subquery: SelectStmt, alias: String, ctx: Context = null) extends SqlRelation {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq("(", subquery.sql, ")", "as", alias) mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq("(", subquery.sqlFromDialect(dialect), ")", "as", alias) mkString " "
 }
 
 sealed abstract trait JoinType {
-  def sql: String
+  def sql: String = sqlFromDialect(PostgresDialect)
+  def sqlFromDialect(dialect: SqlDialect): String
 }
 case object LeftJoin extends JoinType {
-  def sql = "left join"
+  def sqlFromDialect(dialect: SqlDialect) = "left join"
 }
 case object RightJoin extends JoinType {
-  def sql = "right join"
+  def sqlFromDialect(dialect: SqlDialect) = "right join"
 }
 case object InnerJoin extends JoinType {
-  def sql = "join"
+  def sqlFromDialect(dialect: SqlDialect) = "join"
 }
 
 case class JoinRelation(left: SqlRelation, right: SqlRelation, tpe: JoinType, clause: SqlExpr, ctx: Context = null) extends SqlRelation {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq(left.sql, tpe.sql, right.sql, "on", "(", clause.sql, ")") mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq(left.sqlFromDialect(dialect), tpe.sqlFromDialect(dialect), right.sqlFromDialect(dialect), "on", "(", clause.sqlFromDialect(dialect), ")") mkString " "
 }
 
 sealed abstract trait OrderType
@@ -389,11 +401,11 @@ case object DESC extends OrderType
 
 case class SqlGroupBy(keys: Seq[SqlExpr], having: Option[SqlExpr], ctx: Context = null) extends Node {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq(Some("group by"), Some(keys.map(_.sql).mkString(", ")), having.map(e => "having " + e.sql)).flatten.mkString(" ")
+  def sqlFromDialect(dialect: SqlDialect) = Seq(Some("group by"), Some(keys.map(_.sqlFromDialect(dialect)).mkString(", ")), having.map(e => "having " + e.sqlFromDialect(dialect))).flatten.mkString(" ")
 }
 case class SqlOrderBy(keys: Seq[(SqlExpr, OrderType)], ctx: Context = null) extends Node {
   def copyWithContext(c: Context) = copy(ctx = c)
-  def sql = Seq("order by", keys map (x => x._1.sql + " " + x._2.toString) mkString ", ") mkString " "
+  def sqlFromDialect(dialect: SqlDialect) = Seq("order by", keys map (x => x._1.sqlFromDialect(dialect) + " " + x._2.toString) mkString ", ") mkString " "
 }
 
 // synthetic nodes
@@ -401,7 +413,7 @@ case class SqlOrderBy(keys: Seq[(SqlExpr, OrderType)], ctx: Context = null) exte
 case class TuplePosition(pos: Int, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = throw new RuntimeException("error")
-  def sql = "pos$" + pos
+  def sqlFromDialect(dialect: SqlDialect) = "pos$" + pos
 }
 
 // this node shouldn't appear in a re-written subquery
@@ -409,7 +421,7 @@ case class TuplePosition(pos: Int, ctx: Context = null) extends SqlExpr {
 case class DependentFieldPlaceholder(pos: Int, ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = Seq.empty
-  def sql = "<should_not_appear>$" + pos
+  def sqlFromDialect(dialect: SqlDialect) = "<should_not_appear>$" + pos
   def bind(onion: Int): BoundDependentFieldPlaceholder =
     BoundDependentFieldPlaceholder(pos, onion, ctx)
 }
@@ -419,17 +431,17 @@ case class BoundDependentFieldPlaceholder(pos: Int, onion: Int, ctx: Context = n
   assert(BitUtils.onlyOne(onion))
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = throw new RuntimeException("error")
-  def sql = "param$" + pos + "$" + Onions.str(onion)
+  def sqlFromDialect(dialect: SqlDialect) = "param$" + pos + "$" + Onions.str(onion)
 }
 
 case class SubqueryPosition(pos: Int, args: Seq[SqlExpr], ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = throw new RuntimeException("error")
-  def sql = (Seq("subquery$" + pos, "(", args.map(_.sql).mkString(", "), ")")).mkString("")
+  def sqlFromDialect(dialect: SqlDialect) = (Seq("subquery$" + pos, "(", args.map(_.sqlFromDialect(dialect)).mkString(", "), ")")).mkString("")
 }
 
 case class ExistsSubqueryPosition(pos: Int, args: Seq[SqlExpr], ctx: Context = null) extends SqlExpr {
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = throw new RuntimeException("error")
-  def sql = (Seq("exists(subquery$" + pos, "(", args.map(_.sql).mkString(", "), "))")).mkString("")
+  def sqlFromDialect(dialect: SqlDialect) = (Seq("exists(subquery$" + pos, "(", args.map(_.sqlFromDialect(dialect)).mkString(", "), "))")).mkString("")
 }

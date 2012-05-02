@@ -1,13 +1,6 @@
 trait Resolver extends Transformers with Traversals {
   case class ResolutionException(msg: String) extends RuntimeException(msg)
 
-  private var ctr = 0
-  private def anonName = {
-    val r = "anon$" + ctr
-    ctr += 1
-    r
-  }
-
   def resolve(stmt: SelectStmt, schema: Definitions): SelectStmt = {
     // init contexts
     val n1 = topDownTransformationWithParent(stmt)((parent: Option[Node], child: Node) => child match {

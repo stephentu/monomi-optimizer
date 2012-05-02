@@ -1818,7 +1818,8 @@ trait Generator extends Traversals with Transformers {
       o.complete(stmt.ctx.defns)
     }
     def estimateContextFromOnionSet(o: OnionSet): EstimateContext = {
-      EstimateContext(stmt.ctx.defns, o.getPrecomputedExprs)
+      EstimateContext(
+        stmt.ctx.defns, o.getPrecomputedExprs, o.getRelationsWithHOMGroups.toSet)
     }
     candidates.map(fillOnionSet).map {
       o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(o))

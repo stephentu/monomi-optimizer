@@ -9,10 +9,11 @@ case class SubqueryRelation(stmt: SelectStmt) extends Relation
 
 case class TableColumn(name: String, tpe: DataType) extends PrettyPrinters {
   def scalaStr: String =
-    "TableColumn(" + _q(name) + ", " + tpe.toString + ")"
+    "TableColumn(" + quoteDbl(name) + ", " + tpe.toString + ")"
 }
 
-class Definitions(val defns : Map[String, Seq[TableColumn]]) extends PrettyPrinters {
+class Definitions(val defns: Map[String, Seq[TableColumn]], val dbconn: Option[DbConn])
+  extends PrettyPrinters {
 
   def tableExists(table: String): Boolean = defns.contains(table)
 
@@ -22,9 +23,19 @@ class Definitions(val defns : Map[String, Seq[TableColumn]]) extends PrettyPrint
 
   def scalaStr: String = {
     "new Definitions(Map(" + (defns.map { case (k, v) =>
-      (_q(k), "Seq(" + v.map(_.scalaStr).mkString(", ") + ")")
-    }.map { case (k, v) => k + " -> " + v }.mkString(", ")) + "))"
+      (quoteDbl(k), "Seq(" + v.map(_.scalaStr).mkString(", ") + ")")
+    }.map { case (k, v) => k + " -> " + v }.mkString(", ")) + "), None)"
   }
+}
+
+trait DbConn {
+  def getConn: Connection
+}
+
+class PgDbConn(hostname: String, port: Int, db: String, props: Properties) extends DbConn {
+  Class.forName("org.postgresql.Driver")
+  val getConn = DriverManager.getConnection(
+    "jdbc:postgresql://%s:%d/%s".format(hostname, port, db), props)
 }
 
 trait Schema {
@@ -32,9 +43,9 @@ trait Schema {
 }
 
 class PgSchema(hostname: String, port: Int, db: String, props: Properties) extends Schema {
-  Class.forName("org.postgresql.Driver")
-  private val conn = DriverManager.getConnection(
-    "jdbc:postgresql://%s:%d/%s".format(hostname, port, db), props)
+
+  private val _dbconn = new PgDbConn(hostname, port, db, props)
+  private val conn = _dbconn.getConn
 
   def loadSchema() = {
     import Conversions._
@@ -75,6 +86,6 @@ where table_schema = 'public' and table_name = ?
       })
       s.close()
       (name, columns)
-    }).toMap)
+    }).toMap, Some(_dbconn))
   }
 }
