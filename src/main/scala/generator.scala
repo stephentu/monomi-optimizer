@@ -356,6 +356,9 @@ trait Generator extends Traversals with Transformers {
         * to be un-encrypted */
        expr: SqlExpr,
 
+       /* unmodified, original expression, used later for cost analysis */
+       origExpr: SqlExpr,
+
        /* additional encrypted projections needed for conjunction. the tuple is as follows:
         *   ( (original) expr from the client expr which will be replaced with proj,
         *     the actual projection to append to the *server side* query,
@@ -377,6 +380,7 @@ trait Generator extends Traversals with Transformers {
       def mergeConjunctions(that: ClientComputation): ClientComputation = {
         ClientComputation(
           And(this.expr, that.expr),
+          And(this.origExpr, that.origExpr),
           this.projections ++ that.projections,
           this.subqueryProjections ++ that.subqueryProjections,
           this.subqueries ++ that.subqueries)
@@ -970,6 +974,7 @@ trait Generator extends Traversals with Transformers {
             Right(
               ClientComputation(
                 e0,
+                e,
                 opts.values.flatMap(_._2).toSeq ++ mkProjections(e0ForProj),
                 subselects.map(_._3).flatMap(x => x.map(_._2).flatMap(mkProjections)).toSeq,
                 subselects.toSeq))
@@ -1213,7 +1218,7 @@ trait Generator extends Traversals with Transformers {
           val comp0 =
             if (cur.groupBy.isDefined) {
               // need to group_concat the projections then, because we have a groupBy context
-              val ClientComputation(_, p, s, _) = comp
+              val ClientComputation(_, _, p, s, _) = comp
               comp.copy(
                 projections = p.map {
                   case (expr, ExprProj(e, a, _), o, _) =>
@@ -1295,7 +1300,7 @@ trait Generator extends Traversals with Transformers {
           }
         }
         def mkClientCompFromKeyInfo(f: SqlExpr, fi: SqlExpr, o: Int) = {
-          ClientComputation(f, Seq((f, ExprProj(fi, None), o, false)), Seq.empty, Seq.empty)
+          ClientComputation(f, f, Seq((f, ExprProj(fi, None), o, false)), Seq.empty, Seq.empty)
         }
         def searchProjIndex(e: SqlExpr): Option[Int] = {
           if (!e.ctx.projections.filter {
@@ -1479,6 +1484,7 @@ trait Generator extends Traversals with Transformers {
         .foldLeft( RemoteSql(cur, tdesc, finalSubqueryRelationPlans.toSeq) : PlanNode ) {
           case (acc, (comp, mapping)) =>
             LocalFilter(comp.mkSqlExpr(mapping),
+                        comp.origExpr,
                         wrapDecryptionNodeMap(acc, mapping),
                         comp.subqueries.map(_._2))
         }
@@ -1571,7 +1577,7 @@ trait Generator extends Traversals with Transformers {
 
         val decryptionVec =
           newLocalOrderBy.zip(localOrderByPosMaps).flatMap {
-            case (Right(ClientComputation(expr, proj, subProjs, sub)), m) =>
+            case (Right(ClientComputation(expr, _, proj, subProjs, sub)), m) =>
               if (proj.size == 1 && m.size == 1 &&
                   proj.head._3 == Onions.OPE &&
                   proj.head._1 == expr && sub.isEmpty) Seq.empty else m.values
