@@ -307,6 +307,12 @@ case class LocalGroupFilter(filter: SqlExpr, child: PlanNode, subqueries: Seq[Pl
 }
 
 case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extends PlanNode {
+  {
+    val td = child.tupleDesc
+    // all sort keys must not be in vector context (b/c that would not make sense)
+    sortKeys.foreach { case (idx, _) => assert(!td(idx)._2) }
+  }
+
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
     "* LocalOrderBy(keys = " + sortKeys.map(_._1.toString).toSeq + ")" + childPretty(lvl, child)
