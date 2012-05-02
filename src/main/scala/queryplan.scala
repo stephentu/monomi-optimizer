@@ -19,7 +19,7 @@ case class Estimate(
   cost: Double,
   rows: Long,
   rowsPerRow: Long /* estimate cardinality within each aggregate group */,
-  equivStmt: SelectStmt) {
+  equivStmt: SelectStmt /* statement which estimates the equivalent CARDINALITY */) {
 
   override def toString = {
     case class Estimate(c: Double, r: Long, rr: Long)
@@ -61,11 +61,12 @@ object CostConstants {
   }
 }
 
+case class PosDesc(onion: OnionType, vectorCtx: Boolean)
+
 trait PlanNode {
   // actual useful stuff
 
-  // ( enc info, true if in vector ctx, false otherwise )
-  def tupleDesc: Seq[(Option[Int], Boolean)]
+  def tupleDesc: Seq[PosDesc]
 
   def costEstimate(ctx: EstimateContext): Estimate
 
@@ -146,7 +147,7 @@ trait PlanNode {
 }
 
 case class RemoteSql(stmt: SelectStmt,
-                     projs: Seq[(Option[Int], Boolean)],
+                     projs: Seq[PosDesc],
                      subrelations: Seq[PlanNode] = Seq.empty)
   extends PlanNode with Transformers {
 
@@ -265,33 +266,32 @@ case class LocalTransform(trfms: Seq[Either[Int, SqlExpr]], child: PlanNode) ext
     val td = child.tupleDesc
     trfms.map {
       case Left(pos) => td(pos)
+
       // TODO: allow for transforms to not remove vector context
-      case Right(_) => (None, false)
+      case Right(_)  => PosDesc(PlainOnion, false)
     }
   }
   def pretty0(lvl: Int) =
     "* LocalTransform(transformation = " + trfms + ")" + childPretty(lvl, child)
 
   def costEstimate(ctx: EstimateContext) = {
-    // do stuff
-
+    // we assume these operations are cheap
     child.costEstimate(ctx)
   }
 }
 
+// class currently un-used
 case class LocalGroupBy(keys: Seq[SqlExpr], filter: Option[SqlExpr], child: PlanNode) extends PlanNode {
   def tupleDesc = throw new RuntimeException("unimpl")
   def pretty0(lvl: Int) =
     "* LocalGroupBy(keys = " + keys.map(_.sql).mkString(", ") + ", group_filter = " + filter.map(_.sql).getOrElse("none") + ")" + childPretty(lvl, child)
 
-  def costEstimate(ctx: EstimateContext) = {
-    // do stuff
-
-    child.costEstimate(ctx)
-  }
+  def costEstimate(ctx: EstimateContext) = throw new RuntimeException("unimpl")
 }
 
-case class LocalGroupFilter(filter: SqlExpr, child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
+case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
+                            child: PlanNode, subqueries: Seq[PlanNode])
+  extends PlanNode {
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) = {
     "* LocalGroupFilter(filter = " + filter.sql + ")" +
@@ -300,9 +300,21 @@ case class LocalGroupFilter(filter: SqlExpr, child: PlanNode, subqueries: Seq[Pl
   }
 
   def costEstimate(ctx: EstimateContext) = {
-    // do stuff
+    val ch = child.costEstimate(ctx)
+    // assume that the group keys are always available, for now
+    assert(ch.equivStmt.groupBy.isDefined)
+    val stmt =
+      ch.equivStmt.copy(
+        groupBy =
+          ch.equivStmt.groupBy.map(_.copy(having =
+            ch.equivStmt.groupBy.get.having.map(x => And(x, origFilter)).orElse(Some(origFilter)))))
 
-    child.costEstimate(ctx)
+    println(stmt.sqlFromDialect(PostgresDialect))
+
+    val (_, r, Some(rr)) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
+
+    // TODO: how do we cost filters?
+    Estimate(ch.cost, r, rr, stmt)
   }
 }
 
@@ -310,7 +322,7 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
   {
     val td = child.tupleDesc
     // all sort keys must not be in vector context (b/c that would not make sense)
-    sortKeys.foreach { case (idx, _) => assert(!td(idx)._2) }
+    sortKeys.foreach { case (idx, _) => assert(!td(idx).vectorCtx) }
   }
 
   def tupleDesc = child.tupleDesc
@@ -330,20 +342,26 @@ case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
     "* LocalLimit(limit = " + limit + ")" + childPretty(lvl, child)
 
   def costEstimate(ctx: EstimateContext) = {
-    // do stuff
-
-    child.costEstimate(ctx)
+    val ch = child.costEstimate(ctx)
+    // TODO: currently assuming everything must be completely materialized
+    // before the limit. this isn't strictly true, but is true in the case
+    // of TPC-H
+    Estimate(ch.cost, math.min(limit, ch.rows), ch.rowsPerRow, ch.equivStmt)
   }
 }
 
 case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
   def tupleDesc = {
     val td = child.tupleDesc
-    assert(positions.filter(p => !td(p)._1.isDefined).isEmpty)
+    assert(positions.filter(p => td(p).onion.isPlain).isEmpty)
+    assert(positions.filter(p => td(p).onion match {
+            case _: HomRowDescOnion => true
+            case _ => false
+           }).isEmpty)
     val p0 = positions.toSet
     td.zipWithIndex.map {
-      case ((Some(_), c), i) if p0.contains(i) => (None, c)
-      case (e, _) => e
+      case (pd, i) if p0.contains(i) => pd.copy(onion = PlainOnion)
+      case (pd, _)                   => pd
     }
   }
   def pretty0(lvl: Int) =
@@ -354,16 +372,13 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
     val td = child.tupleDesc
     def costPos(p: Int): Double = {
       td(p) match {
-        case (Some(Onions.HOM_AGG), _) =>
-          // TODO: don't guess on the packing factor (actually propagate this
-          // info somewhere)
-
-          // TODO: also need to figure out a way to guess the sequential-ness
+        case PosDesc(HomGroupOnion(tbl, grp), _) =>
+          // TODO: need to figure out a way to guess the sequential-ness
           // of the rowids...
 
           val c = CostConstants.secToPGUnit(CostConstants.DecryptCostMap(Onions.HOM))
-          c * ch.rows.toDouble * ch.rowsPerRow.toDouble / 3.0
-        case (Some(o), vecCtx) =>
+          c * ch.rows.toDouble * ch.rowsPerRow.toDouble / 3.0 // TODO: use (tbl,grp) info for packing factor
+        case PosDesc(RegularOnion(o), vecCtx) =>
           val c = CostConstants.secToPGUnit(CostConstants.DecryptCostMap(o))
           c * ch.rows.toDouble * (if (vecCtx) ch.rowsPerRow.toDouble else 1.0)
 
@@ -378,15 +393,15 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
 
 case class LocalEncrypt(
   /* (tuple pos to enc, onion to enc) */
-  positions: Seq[(Int, Int)],
+  positions: Seq[(Int, OnionType)],
   child: PlanNode) extends PlanNode {
   def tupleDesc = {
     val td = child.tupleDesc
-    assert(positions.filter { case (p, _) => td(p)._1.isDefined }.isEmpty)
+    assert(positions.filter { case (p, _) => !td(p).onion.isPlain }.isEmpty)
     val p0 = positions.toMap
     td.zipWithIndex.map {
-      case ((None, c), i) if p0.contains(i) => (Some(p0(i)), c)
-      case (e, _) => e
+      case (pd, i) if p0.contains(i) => pd.copy(onion = p0(i))
+      case (pd, _)                   => pd
     }
   }
   def pretty0(lvl: Int) =

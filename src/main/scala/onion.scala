@@ -19,6 +19,14 @@ object Onions {
   final val IEqualComparable = PLAIN | OPE
   final val Searchable       = PLAIN | SWP
 
+  def isDecryptable(o: Int): Boolean = {
+    assert(BitUtils.onlyOne(o))
+    o match {
+      case PLAIN | HOM_ROW_DESC => false
+      case _                    => true
+    }
+  }
+
   def str(o: Int): String = {
     if (BitUtils.onlyOne(o)) {
       o match {
@@ -66,6 +74,38 @@ object Onions {
       toSeq(Onions.ALL)
        .flatMap(x => if (s0.contains(x)) Seq.empty else Seq(x)) }
   }
+}
+
+// binds a specific selection of an onion (including plain)
+object OnionType {
+  def buildIndividual(onion: Int): OnionType = {
+    assert(BitUtils.onlyOne(onion))
+    assert((onion & (Onions.HOM_AGG | Onions.HOM_ROW_DESC)) == 0)
+    if (onion == Onions.PLAIN) PlainOnion else RegularOnion(onion)
+  }
+}
+
+sealed abstract trait OnionType {
+  def onion: Int
+  @inline def isOneOf(mask: Int): Boolean = (onion & mask) != 0
+  @inline def isPlain: Boolean = onion == Onions.PLAIN
+}
+
+case object PlainOnion extends OnionType {
+  val onion = Onions.PLAIN
+}
+
+case class RegularOnion(onion: Int) extends OnionType {
+  assert(BitUtils.onlyOne(onion))
+  assert((onion & (Onions.PLAIN | Onions.HOM_AGG | Onions.HOM_ROW_DESC)) == 0)
+}
+
+case class HomGroupOnion(relation: String, group: Int) extends OnionType {
+  val onion = Onions.HOM_AGG
+}
+
+case class HomRowDescOnion(relation: String) extends OnionType {
+  val onion = Onions.HOM_ROW_DESC
 }
 
 object OnionSet {
