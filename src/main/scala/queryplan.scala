@@ -33,6 +33,8 @@ object CostConstants {
   // this needs to be tuned per machine
   final val SecPerPGUnit: Double = 1.0
 
+  final val NetworkXferBytesPerSec: Double = 10485760.0 // bytes/sec
+
 //DET_ENC    = 0.0151  / 1000.0
 //DET_DEC    = 0.0173  / 1000.0
 //OPE_ENC    = 13.359  / 1000.0
@@ -216,8 +218,20 @@ case class RemoteSql(stmt: SelectStmt,
       case _ => (None, true)
     }.asInstanceOf[SelectStmt]
 
+    // server query execution cost
     val (c, r, rr) = extractCostFromDB(reverseStmt, ctx.defns.dbconn.get)
-    Estimate(c, r, rr.getOrElse(1), reverseStmt)
+
+    // data xfer to client cost
+    val td = tupleDesc
+    val bytesToXfer = td.map {
+      case PosDesc(onion, vecCtx) =>
+        // assume everything is 4 bytes now
+        if (vecCtx) 4.0 * rr.get else 4.0
+    }.sum
+
+    Estimate(
+      c + CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec),
+      r, rr.getOrElse(1), reverseStmt)
   }
 }
 
@@ -378,12 +392,13 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
 
           val c = CostConstants.secToPGUnit(CostConstants.DecryptCostMap(Onions.HOM))
           c * ch.rows.toDouble * ch.rowsPerRow.toDouble / 3.0 // TODO: use (tbl,grp) info for packing factor
+
         case PosDesc(RegularOnion(o), vecCtx) =>
           val c = CostConstants.secToPGUnit(CostConstants.DecryptCostMap(o))
           c * ch.rows.toDouble * (if (vecCtx) ch.rowsPerRow.toDouble else 1.0)
 
-      case _ =>
-        throw new RuntimeException("should not happen")
+        case _ =>
+          throw new RuntimeException("should not happen")
       }
     }
     val contrib = positions.map(costPos).sum
@@ -397,7 +412,11 @@ case class LocalEncrypt(
   child: PlanNode) extends PlanNode {
   def tupleDesc = {
     val td = child.tupleDesc
-    assert(positions.filter { case (p, _) => !td(p).onion.isPlain }.isEmpty)
+    assert(positions.filter { case (p, _) => !td(p).onion.isPlain || td(p).vectorCtx }.isEmpty)
+    assert(positions.filter(p => p._2 match {
+            case _: HomRowDescOnion => true
+            case _ => false
+           }).isEmpty)
     val p0 = positions.toMap
     td.zipWithIndex.map {
       case (pd, i) if p0.contains(i) => pd.copy(onion = p0(i))
@@ -408,8 +427,19 @@ case class LocalEncrypt(
     "* LocalEncrypt(positions = " + positions + ")" + childPretty(lvl, child)
 
   def costEstimate(ctx: EstimateContext) = {
-    // do stuff
+    val ch = child.costEstimate(ctx)
+    val td = child.tupleDesc
+    def costPos(p: (Int, OnionType)): Double = {
+      p._2 match {
+        case RegularOnion(o) =>
+          val c = CostConstants.secToPGUnit(CostConstants.EncryptCostMap(o))
+          c * ch.rows.toDouble
 
-    child.costEstimate(ctx)
+        case _ =>
+          throw new RuntimeException("should not happen")
+      }
+    }
+    val contrib = positions.map(costPos).sum
+    ch.copy(cost = ch.cost + contrib)
   }
 }
