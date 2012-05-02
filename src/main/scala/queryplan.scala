@@ -9,6 +9,7 @@
 //}
 
 import scala.util.parsing.json._
+import scala.collection.mutable.{ ArrayBuffer, HashMap }
 
 case class EstimateContext(
   defns: Definitions,
@@ -65,7 +66,7 @@ object CostConstants {
 
 case class PosDesc(onion: OnionType, vectorCtx: Boolean)
 
-trait PlanNode {
+trait PlanNode extends Traversals {
   // actual useful stuff
 
   def tupleDesc: Seq[PosDesc]
@@ -122,9 +123,18 @@ trait PlanNode {
 
     val sql = stmt.sqlFromDialect(PostgresDialect)
 
+
     import Conversions._
 
-    val r = dbconn.getConn.createStatement.executeQuery("EXPLAIN (FORMAT JSON) " + sql)
+    val r =
+      try {
+        dbconn.getConn.createStatement.executeQuery("EXPLAIN (FORMAT JSON) " + sql)
+      } catch {
+        case e =>
+          println("bad sql:")
+          println(sql)
+          throw e
+      }
     val res = r.map { rs =>
       val planJson = JSON.parseFull(rs.getString(1))
       (for (L(l) <- planJson;
@@ -191,8 +201,6 @@ case class RemoteSql(stmt: SelectStmt,
           .orElse {
             if (ctx.defns.tableExists(qual0)) {
               // rowids are rewritten to 0
-              println("ctx.needsRowIDs: " + ctx.needsRowIDs)
-              println("name0: " + name0)
               if (ctx.needsRowIDs.contains(qual0) && name0 == "rowid") {
                 Some((Some(IntLiteral(0)), false))
               } else {
@@ -215,10 +223,17 @@ case class RemoteSql(stmt: SelectStmt,
       case FunctionCall("encrypt", Seq(e, _), _) =>
         (Some(e), false)
 
+      case _: BoundDependentFieldPlaceholder =>
+        // TODO: we should generate something smarter than this
+        // - at least the # should be a reasonable number for what it is
+        // - replacing
+        (Some(IntLiteral(12345)), false)
+
       case _ => (None, true)
     }.asInstanceOf[SelectStmt]
 
     // server query execution cost
+    println("REMOTE SQL TO PSQL: " + reverseStmt.sqlFromDialect(PostgresDialect))
     val (c, r, rr) = extractCostFromDB(reverseStmt, ctx.defns.dbconn.get)
 
     // data xfer to client cost
@@ -257,9 +272,46 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
   }
 
   def costEstimate(ctx: EstimateContext) = {
-    // TODO: handle subqueries
 
+    // find one-time-invoke subqueries (so we can charge them once, instead of for each
+    // per-row invocation)
+
+    // returns the dependent tuple positions for each subquery
+    def makeSubqueryDepMap(e: SqlExpr): Map[Int, Seq[Int]] = {
+      def findTuplePositions(e: SqlExpr): Seq[Int] = {
+        val m = new ArrayBuffer[Int]
+        topDownTraversal(e) {
+          case TuplePosition(p, _) => m += p; false
+          case _                   => true
+        }
+        m.toSeq
+      }
+      val m = new HashMap[Int, Seq[Int]]
+      topDownTraversal(e) {
+        case SubqueryPosition(p, args, _) =>
+          m += ((p -> args.flatMap(findTuplePositions))); false
+        case ExistsSubqueryPosition(p, args, _) =>
+          m += ((p -> args.flatMap(findTuplePositions))); false
+        case _ => true
+      }
+      m.toMap
+    }
+
+    val m = makeSubqueryDepMap(expr)
+    val td = child.tupleDesc
     val ch = child.costEstimate(ctx)
+
+    val subCosts = subqueries.map(_.costEstimate(ctx)).zipWithIndex.map {
+      case (costPerInvocation, idx) =>
+        m.get(idx).filterNot(_.isEmpty).map { pos =>
+          // check any pos in agg ctx
+          if (!pos.filter(p => td(p).vectorCtx).isEmpty) {
+            costPerInvocation.cost * ch.rows * ch.rowsPerRow
+          } else {
+            costPerInvocation.cost * ch.rows
+          }
+        }.getOrElse(costPerInvocation.cost)
+    }.sum
 
     val stmt =
       ch.equivStmt.copy(
@@ -270,7 +322,7 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
     val (_, r, rr) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
 
     // TODO: how do we cost filters?
-    Estimate(ch.cost, r, rr.getOrElse(1L), stmt)
+    Estimate(ch.cost + subCosts, r, rr.getOrElse(1L), stmt)
   }
 }
 
