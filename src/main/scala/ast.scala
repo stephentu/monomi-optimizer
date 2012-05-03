@@ -28,6 +28,21 @@ case class SelectStmt(projections: Seq[SqlProj],
         groupBy.map(_.sqlFromDialect(dialect)),
         orderBy.map(_.sqlFromDialect(dialect)),
         limit.map(x => "limit " + x.toString)).flatten.mkString(" ")
+
+  // is there some sort of grouping going on?
+  def projectionsInAggContext: Boolean = {
+    object traversal extends Traversals
+    groupBy.isDefined || !projections.filter {
+      case ExprProj(e, _, _) =>
+        var foundAgg = false
+        traversal.topDownTraversal(e) {
+          case _: SqlAgg => foundAgg = true; false
+          case _ => !foundAgg
+        }
+        foundAgg
+      case _ => false
+    }.isEmpty
+  }
 }
 
 trait SqlProj extends Node

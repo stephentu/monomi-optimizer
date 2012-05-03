@@ -1218,9 +1218,16 @@ trait Generator extends Traversals with Transformers {
           cur.copy(filter = Some(expr))
 
         case Right((optExpr, comp)) =>
+          // TODO: this agg context stuff is sloppy and we don't really get it
+          // right all the time. we should rework how rewriteExprForServer() passes
+          // expressions back up to the caller for projection. really a combination of
+          // both the caller's scope + the expression determines how to project
           val comp0 =
-            if (cur.groupBy.isDefined) {
+            if (cur.projectionsInAggContext) {
               // need to group_concat the projections then, because we have a groupBy context
+              // TODO: we need to check if a group by's expr is being projected- if so,
+              // we *don't* need to wrap in a GroupConcat (although it's technically still
+              // correct, just wasteful)
               val ClientComputation(_, _, p, s, _) = comp
               comp.copy(
                 projections = p.map {
