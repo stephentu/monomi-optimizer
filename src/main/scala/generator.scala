@@ -1,3 +1,5 @@
+package edu.mit.cryptdb
+
 import scala.collection.mutable.{ ArrayBuffer, HashMap, Seq => MSeq, Map => MMap }
 
 trait Generator extends Traversals with Transformers {

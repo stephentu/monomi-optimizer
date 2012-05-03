@@ -1,3 +1,5 @@
+package edu.mit.cryptdb
+
 import java.sql._
 import java.util.Properties
 

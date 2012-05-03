@@ -1,3 +1,5 @@
+package edu.mit.cryptdb
+
 import org.specs2.mutable._
 
 class CosterSpec extends Specification {

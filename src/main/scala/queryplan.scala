@@ -1,3 +1,5 @@
+package edu.mit.cryptdb
+
 //case class EstimateContext(
 //  // translate encrypted identifiers back into plain text identifiers
 //  // (but keep the structure of the query the same)

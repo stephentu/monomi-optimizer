@@ -1,3 +1,5 @@
+package edu.mit.cryptdb
+
 import scala.util.matching.Regex
 
 import scala.util.parsing.combinator._

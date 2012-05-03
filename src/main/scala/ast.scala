@@ -1,3 +1,5 @@
+package edu.mit.cryptdb
+
 sealed abstract trait SqlDialect
 case object MySQLDialect extends SqlDialect
 case object PostgresDialect extends SqlDialect

@@ -1,3 +1,5 @@
+package edu.mit.cryptdb
+
 import scala.collection.mutable.{ ArrayBuffer, HashMap, Seq => MSeq }
 
 object Onions {
