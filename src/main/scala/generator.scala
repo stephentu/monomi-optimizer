@@ -463,7 +463,8 @@ trait Generator extends Traversals with Transformers {
     }
 
     def rewriteExprForServer(
-      expr: SqlExpr, rewriteCtx: RewriteContext, analysis: RewriteAnalysisContext):
+      expr: SqlExpr, rewriteCtx: RewriteContext,
+      analysis: RewriteAnalysisContext, forceClient: Boolean = false):
       Either[(SqlExpr, OnionType), (Option[(SqlExpr, OnionType)], ClientComputation)] = {
 
       //println("rewriteExprForServer:")
@@ -764,226 +765,224 @@ trait Generator extends Traversals with Transformers {
           if (_exprValid) Some(newExpr, onionRetVal.get.get) else None
         }
 
-        doTransformServer(e, curRewriteCtx) match {
-          case Some((e0, o)) =>
-            // nice, easy case
-            Left((e0, o))
-          case None =>
-            // ugly, messy case- in this case, we have to project enough clauses
-            // to compute the entirety of e locally. we can still make optimizations,
-            // however, like replacing subexpressions within the expression with
-            // more optimized variants
+        def doTransformClient(e: SqlExpr, curRewriteCtx: RewriteContext):
+          ClientComputation = {
+          // take care of all subselects first
+          val subselects =
+            new ArrayBuffer[(Subselect, PlanNode, Seq[(DependentFieldPlaceholder, FieldIdent)])]
+          topDownTraversalWithParent(e) {
+            case (Some(_: Exists), s @ Subselect(ss, _)) =>
+              val (ss0, m) = rewriteOuterReferences(ss)
+              val p = generatePlanFromOnionSet0(ss0, onionSet, PreserveCardinality)
+              subselects += ((s, p, m))
+              false
+            case (_, s @ Subselect(ss, _)) =>
+              val (ss0, m) = rewriteOuterReferences(ss)
+              val p = generatePlanFromOnionSet0(ss0, onionSet, PreserveOriginal)
+              subselects += ((s, p, m))
+              false
+            case _ => true
+          }
 
-            // take care of all subselects first
-            val subselects =
-              new ArrayBuffer[(Subselect, PlanNode, Seq[(DependentFieldPlaceholder, FieldIdent)])]
-            topDownTraversalWithParent(e) {
-              case (Some(_: Exists), s @ Subselect(ss, _)) =>
-                val (ss0, m) = rewriteOuterReferences(ss)
-                val p = generatePlanFromOnionSet0(ss0, onionSet, PreserveCardinality)
-                subselects += ((s, p, m))
-                false
-              case (_, s @ Subselect(ss, _)) =>
-                val (ss0, m) = rewriteOuterReferences(ss)
-                val p = generatePlanFromOnionSet0(ss0, onionSet, PreserveOriginal)
-                subselects += ((s, p, m))
-                false
-              case _ => true
+          // return value is:
+          // ( expr to replace in e -> ( replacement expr, seq( projections needed ) ) )
+          def mkOptimizations(e: SqlExpr, curRewriteCtx: RewriteContext):
+            Map[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, OnionType, Boolean)])] = {
+
+            val ret = new HashMap[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, OnionType, Boolean)])]
+
+            def handleBinopSpecialCase(op: Binop): Boolean = {
+              val a = mkOptimizations(op.lhs, curRewriteCtx.restrictTo(Onions.ALL))
+              val b = mkOptimizations(op.rhs, curRewriteCtx.restrictTo(Onions.ALL))
+              a.get(op.lhs) match {
+                case Some((aexpr, aprojs)) =>
+                  b.get(op.rhs) match {
+                    case Some((bexpr, bprojs)) =>
+                      ret += (op -> (op.copyWithChildren(aexpr, bexpr), aprojs ++ bprojs))
+                      false
+                    case _ => true
+                  }
+                case _ => true
+              }
             }
 
-            // return value is:
-            // ( expr to replace in e -> ( replacement expr, seq( projections needed ) ) )
-            def mkOptimizations(e: SqlExpr, curRewriteCtx: RewriteContext):
-              Map[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, OnionType, Boolean)])] = {
+            // takes s and translates it into a server hom_agg expr, plus a
+            // post-hom_agg-decrypt local sql projection (which extracts the individual
+            // expression from the group)
+            def handleHomSumSpecialCase(s: Sum) = {
 
-              val ret = new HashMap[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, OnionType, Boolean)])]
-
-              def handleBinopSpecialCase(op: Binop): Boolean = {
-                val a = mkOptimizations(op.lhs, curRewriteCtx.restrictTo(Onions.ALL))
-                val b = mkOptimizations(op.rhs, curRewriteCtx.restrictTo(Onions.ALL))
-                a.get(op.lhs) match {
-                  case Some((aexpr, aprojs)) =>
-                    b.get(op.rhs) match {
-                      case Some((bexpr, bprojs)) =>
-                        ret += (op -> (op.copyWithChildren(aexpr, bexpr), aprojs ++ bprojs))
-                        false
-                      case _ => true
+              def pickOne(hd: Seq[HomDesc]): HomDesc = {
+                assert(!hd.isEmpty)
+                // need to pick which homdesc to use, based on given analysis preference
+                val m = hd.map(_.group).toSet
+                assert( hd.map(_.table).toSet.size == 1 )
+                val useIdx =
+                  analysis.homGroupPreferences.get(hd.head.table).flatMap { prefs =>
+                    prefs.foldLeft( None : Option[Int] ) {
+                      case (acc, elem) =>
+                        acc.orElse(if (m.contains(elem)) Some(elem) else None)
                     }
-                  case _ => true
-                }
+                  }.getOrElse(0)
+                hd(useIdx)
               }
 
-              // takes s and translates it into a server hom_agg expr, plus a
-              // post-hom_agg-decrypt local sql projection (which extracts the individual
-              // expression from the group)
-              def handleHomSumSpecialCase(s: Sum) = {
+              def findCommonHomDesc(hds: Seq[Seq[HomDesc]]): Seq[HomDesc] = {
+                assert(!hds.isEmpty)
+                hds.tail.foldLeft( hds.head.toSet ) {
+                  case (acc, elem) if !elem.isEmpty => acc & elem.toSet
+                  case (acc, _)                     => acc
+                }.toSeq
+              }
 
-                def pickOne(hd: Seq[HomDesc]): HomDesc = {
-                  assert(!hd.isEmpty)
-                  // need to pick which homdesc to use, based on given analysis preference
-                  val m = hd.map(_.group).toSet
-                  assert( hd.map(_.table).toSet.size == 1 )
-                  val useIdx =
-                    analysis.homGroupPreferences.get(hd.head.table).flatMap { prefs =>
-                      prefs.foldLeft( None : Option[Int] ) {
-                        case (acc, elem) =>
-                          acc.orElse(if (m.contains(elem)) Some(elem) else None)
-                      }
-                    }.getOrElse(0)
-                  hd(useIdx)
+              def translateForUniqueHomID(e: SqlExpr, aggContext: Boolean): Option[(SqlExpr, Seq[HomDesc])] = {
+                def procCaseExprCase(c: CaseExprCase): Option[(CaseExprCase, Seq[HomDesc])] = {
+                  CollectionUtils.optAnd2(
+                    doTransformServer(c.cond, RewriteContext(Seq(Onions.PLAIN), aggContext)),
+                    translateForUniqueHomID(c.expr, aggContext)).map {
+                      case ((l, _), (r, hd)) => (CaseExprCase(l, r), hd)
+                    }
                 }
+                e match {
+                  case Sum(f, _, _) if aggContext =>
+                    translateForUniqueHomID(f, false).map {
+                      case (f0, hd) if !hd.isEmpty =>
+                        val hd0 = pickOne(hd)
+                        (FunctionCall("hom_agg", Seq(f0, StringLiteral(hd0.table), IntLiteral(hd0.group))), Seq(hd0))
+                    }
 
-                def findCommonHomDesc(hds: Seq[Seq[HomDesc]]): Seq[HomDesc] = {
-                  assert(!hds.isEmpty)
-                  hds.tail.foldLeft( hds.head.toSet ) {
-                    case (acc, elem) if !elem.isEmpty => acc & elem.toSet
-                    case (acc, _)                     => acc
-                  }.toSeq
-                }
-
-                def translateForUniqueHomID(e: SqlExpr, aggContext: Boolean): Option[(SqlExpr, Seq[HomDesc])] = {
-                  def procCaseExprCase(c: CaseExprCase): Option[(CaseExprCase, Seq[HomDesc])] = {
+                  case CaseWhenExpr(cases, Some(d), _) =>
                     CollectionUtils.optAnd2(
-                      doTransformServer(c.cond, RewriteContext(Seq(Onions.PLAIN), aggContext)),
-                      translateForUniqueHomID(c.expr, aggContext)).map {
-                        case ((l, _), (r, hd)) => (CaseExprCase(l, r), hd)
-                      }
-                  }
-                  e match {
-                    case Sum(f, _, _) if aggContext =>
-                      translateForUniqueHomID(f, false).map {
-                        case (f0, hd) if !hd.isEmpty =>
-                          val hd0 = pickOne(hd)
-                          (FunctionCall("hom_agg", Seq(f0, StringLiteral(hd0.table), IntLiteral(hd0.group))), Seq(hd0))
-                      }
-
-                    case CaseWhenExpr(cases, Some(d), _) =>
-                      CollectionUtils.optAnd2(
-                        CollectionUtils.optSeq(cases.map(procCaseExprCase)),
-                        translateForUniqueHomID(d, aggContext)).flatMap {
-                          case (cases0, (d0, hd)) =>
-                            // check that all hds are not empty
-                            val hds = cases0.map(_._2) ++ Seq(hd)
-                            // should have at least one non-empty
-                            assert(!hds.filterNot(_.isEmpty).isEmpty)
-                            val inCommon = findCommonHomDesc(hds)
-                            if (inCommon.isEmpty) None else {
-                              Some((CaseWhenExpr(cases0.map(_._1), Some(d0)), inCommon))
-                            }
-                        }
-
-                    case CaseWhenExpr(cases, None, _) =>
-                      CollectionUtils.optSeq(cases.map(procCaseExprCase)).flatMap {
-                        case cases0 =>
+                      CollectionUtils.optSeq(cases.map(procCaseExprCase)),
+                      translateForUniqueHomID(d, aggContext)).flatMap {
+                        case (cases0, (d0, hd)) =>
                           // check that all hds are not empty
-                          val hds = cases0.map(_._2)
+                          val hds = cases0.map(_._2) ++ Seq(hd)
                           // should have at least one non-empty
                           assert(!hds.filterNot(_.isEmpty).isEmpty)
                           val inCommon = findCommonHomDesc(hds)
                           if (inCommon.isEmpty) None else {
-                            Some((CaseWhenExpr(cases0.map(_._1), None), inCommon))
+                            Some((CaseWhenExpr(cases0.map(_._1), Some(d0)), inCommon))
                           }
                       }
 
-                    case e: SqlExpr =>
-                      getSupportedHOMRowDescExpr(e, analysis.subrels)
-                    case _ => None
-                  }
-                }
+                  case CaseWhenExpr(cases, None, _) =>
+                    CollectionUtils.optSeq(cases.map(procCaseExprCase)).flatMap {
+                      case cases0 =>
+                        // check that all hds are not empty
+                        val hds = cases0.map(_._2)
+                        // should have at least one non-empty
+                        assert(!hds.filterNot(_.isEmpty).isEmpty)
+                        val inCommon = findCommonHomDesc(hds)
+                        if (inCommon.isEmpty) None else {
+                          Some((CaseWhenExpr(cases0.map(_._1), None), inCommon))
+                        }
+                    }
 
-                translateForUniqueHomID(s, true).map {
-                  case (expr, hds) =>
-                    assert(hds.size == 1)
-                    val id0 = _hiddenNames.uniqueId()
-                    val expr0 = FieldIdent(None, id0)
-                    val projs =
-                      Seq((expr0, ExprProj(expr, None),
-                           HomGroupOnion(hds(0).table, hds(0).group), false))
-                    (FunctionCall("hom_get_pos", Seq(expr0, IntLiteral(hds(0).pos))), projs)
+                  case e: SqlExpr =>
+                    getSupportedHOMRowDescExpr(e, analysis.subrels)
+                  case _ => None
                 }
               }
 
-              topDownTraverseContext(e, e.ctx) {
-                case avg @ Avg(f, d, _) if curRewriteCtx.aggContext =>
-                  handleHomSumSpecialCase(Sum(f, d)).map { case (expr, projs) =>
-                    val cnt = FieldIdent(None, _hiddenNames.uniqueId())
-                    ret +=
-                      (avg ->
-                       (Div(expr, cnt), projs ++ Seq((cnt, ExprProj(CountStar(), None),
-                        PlainOnion, false))))
+              translateForUniqueHomID(s, true).map {
+                case (expr, hds) =>
+                  assert(hds.size == 1)
+                  val id0 = _hiddenNames.uniqueId()
+                  val expr0 = FieldIdent(None, id0)
+                  val projs =
+                    Seq((expr0, ExprProj(expr, None),
+                         HomGroupOnion(hds(0).table, hds(0).group), false))
+                  (FunctionCall("hom_get_pos", Seq(expr0, IntLiteral(hds(0).pos))), projs)
+              }
+            }
+
+            topDownTraverseContext(e, e.ctx) {
+              case avg @ Avg(f, d, _) if curRewriteCtx.aggContext =>
+                handleHomSumSpecialCase(Sum(f, d)).map { case (expr, projs) =>
+                  val cnt = FieldIdent(None, _hiddenNames.uniqueId())
+                  ret +=
+                    (avg ->
+                     (Div(expr, cnt), projs ++ Seq((cnt, ExprProj(CountStar(), None),
+                      PlainOnion, false))))
+                  false
+                }.getOrElse(true)
+
+              // TODO: do something about distinct
+              case s: Sum if curRewriteCtx.aggContext =>
+                //println("found sum s: " + s.sql)
+                handleHomSumSpecialCase(s).map { value =>
+                    ret += (s -> value)
                     false
-                  }.getOrElse(true)
+                }.getOrElse(true)
 
-                // TODO: do something about distinct
-                case s: Sum if curRewriteCtx.aggContext =>
-                  //println("found sum s: " + s.sql)
-                  handleHomSumSpecialCase(s).map { value =>
-                      ret += (s -> value)
-                      false
-                  }.getOrElse(true)
+              case _: SqlAgg =>
+                false // don't try to optimize exprs within an agg, b/c that
+                      // just messes everything up
 
-                case _: SqlAgg =>
-                  false // don't try to optimize exprs within an agg, b/c that
-                        // just messes everything up
+              case e: SqlExpr if e.isLiteral => false
+                // literals don't need any optimization
 
-                case e: SqlExpr if e.isLiteral => false
-                  // literals don't need any optimization
+              case b: Div   => handleBinopSpecialCase(b)
+              case b: Mult  => handleBinopSpecialCase(b)
+              case b: Plus  => handleBinopSpecialCase(b)
+              case b: Minus => handleBinopSpecialCase(b)
 
-                case b: Div   => handleBinopSpecialCase(b)
-                case b: Mult  => handleBinopSpecialCase(b)
-                case b: Plus  => handleBinopSpecialCase(b)
-                case b: Minus => handleBinopSpecialCase(b)
-
-                case _ => true // keep traversing
-              }
-              ret.toMap
+              case _ => true // keep traversing
             }
-
-            def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, OnionType, Boolean)] = {
-              val fields = resolveAliases(e).gatherFields
-              def translateField(fi: FieldIdent, aggContext: Boolean) = {
-                getSupportedExprConstraintAware(
-                  fi, Onions.DET | Onions.OPE, analysis.subrels,
-                  analysis.groupKeys, curRewriteCtx.aggContext)
-                .getOrElse {
-                  println("could not find DET/OPE enc for expr: " + fi)
-                  println("orig: " + e.sql)
-                  println("subrels: " + analysis.subrels)
-                  throw new RuntimeException("should not happen")
-                }
-              }
-
-              fields.map {
-                case (f, false) =>
-                  val (ft, o) = translateField(f, false)
-                  (f, ExprProj(ft, None), o, false)
-                case (f, true) =>
-                  val (ft, o) = translateField(f, true)
-                  (f, ExprProj(GroupConcat(ft, ","), None), o, true)
-              }
-            }
-
-            val opts = mkOptimizations(e, curRewriteCtx)
-
-            val e0ForProj = topDownTransformContext(e, e.ctx) {
-              // replace w/ something dumb, so we can gather fields w/o worrying about it
-              case e: SqlExpr if opts.contains(e) => replaceWith(IntLiteral(1))
-              case _ => keepGoing
-            }.asInstanceOf[SqlExpr]
-
-            val e0 = topDownTransformContext(e, e.ctx) {
-              case e: SqlExpr if opts.contains(e) => replaceWith(opts(e)._1)
-              case _ => keepGoing
-            }.asInstanceOf[SqlExpr]
-
-            Right(
-              ClientComputation(
-                e0,
-                e,
-                opts.values.flatMap(_._2).toSeq ++ mkProjections(e0ForProj),
-                subselects.map(_._3).flatMap(x => x.map(_._2).flatMap(mkProjections)).toSeq,
-                subselects.toSeq))
+            ret.toMap
           }
+
+          def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, OnionType, Boolean)] = {
+            val fields = resolveAliases(e).gatherFields
+            def translateField(fi: FieldIdent, aggContext: Boolean) = {
+              getSupportedExprConstraintAware(
+                fi, Onions.DET | Onions.OPE, analysis.subrels,
+                analysis.groupKeys, curRewriteCtx.aggContext)
+              .getOrElse {
+                println("could not find DET/OPE enc for expr: " + fi)
+                println("orig: " + e.sql)
+                println("subrels: " + analysis.subrels)
+                throw new RuntimeException("should not happen")
+              }
+            }
+
+            fields.map {
+              case (f, false) =>
+                val (ft, o) = translateField(f, false)
+                (f, ExprProj(ft, None), o, false)
+              case (f, true) =>
+                val (ft, o) = translateField(f, true)
+                (f, ExprProj(GroupConcat(ft, ","), None), o, true)
+            }
+          }
+
+          val opts = mkOptimizations(e, curRewriteCtx)
+
+          val e0ForProj = topDownTransformContext(e, e.ctx) {
+            // replace w/ something dumb, so we can gather fields w/o worrying about it
+            case e: SqlExpr if opts.contains(e) => replaceWith(IntLiteral(1))
+            case _ => keepGoing
+          }.asInstanceOf[SqlExpr]
+
+          val e0 = topDownTransformContext(e, e.ctx) {
+            case e: SqlExpr if opts.contains(e) => replaceWith(opts(e)._1)
+            case _ => keepGoing
+          }.asInstanceOf[SqlExpr]
+
+          ClientComputation(
+            e0,
+            e,
+            opts.values.flatMap(_._2).toSeq ++ mkProjections(e0ForProj),
+            subselects.map(_._3).flatMap(x => x.map(_._2).flatMap(mkProjections)).toSeq,
+            subselects.toSeq)
+        }
+
+        if (forceClient) {
+          Right(doTransformClient(e, curRewriteCtx))
+        } else {
+          doTransformServer(e, curRewriteCtx).map(Left(_))
+            .getOrElse(Right(doTransformClient(e, curRewriteCtx)))
+        }
       }
 
       val exprs = splitTopLevelConjunctions(expr).map(x => doTransform(x, rewriteCtx))
