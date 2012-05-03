@@ -221,7 +221,7 @@ trait Generator extends Traversals with Transformers {
       case _ =>
     }
 
-    val subRelnGen = new NameGenerator("subrelation")
+    val subRelnGen = new NameGenerator("subrelation$")
 
     // empty seq signifies wildcard
     def getSupportedHOMRowDescExpr(e: SqlExpr, subrels: Map[String, PlanNode]):
@@ -1038,7 +1038,7 @@ trait Generator extends Traversals with Transformers {
     val subqueryRelations =
       cur.relations.map(_.flatMap(findSubqueryRelations)).getOrElse(Seq.empty)
 
-    val subqueryRelationPlans =
+    val subqueryRelationPlansWithOrigSS =
       subqueryRelations.map { subq =>
 
         // build an encryption vector for this subquery
@@ -1142,18 +1142,23 @@ trait Generator extends Traversals with Transformers {
         buildForSelectStmt(cur)
 
         (subq.alias,
-         generatePlanFromOnionSet0(
+         (generatePlanFromOnionSet0(
            subq.subquery,
            onionSet,
-           EncProj(encVec.map(x => if (x != 0) x else Onions.DET).toSeq, true)))
+           EncProj(encVec.map(x => if (x != 0) x else Onions.DET).toSeq, true)),
+          subq.subquery))
       }.toMap
+
+    val subqueryRelationPlans = subqueryRelationPlansWithOrigSS.map {
+      case (k, (v, _)) => (k, v)
+    }.toMap
 
     //println("subqplans: " + subqueryRelationPlans)
 
     // TODO: explicit join predicates (ie A JOIN B ON (pred)).
     // TODO: handle {LEFT,RIGHT} OUTER JOINS
 
-    val finalSubqueryRelationPlans = new ArrayBuffer[PlanNode]
+    val finalSubqueryRelationPlans = new ArrayBuffer[(RemoteMaterialize, SelectStmt)]
 
     // relations
     cur = cur.relations.map { r =>
@@ -1165,16 +1170,16 @@ trait Generator extends Traversals with Transformers {
             j.copy(left  = rewriteSqlRelation(l),
                    right = rewriteSqlRelation(r)).copyWithContext(null)
           case r @ SubqueryRelationAST(_, name, _) =>
-            subqueryRelationPlans(name) match {
-              case p : RemoteSql =>
+            subqueryRelationPlansWithOrigSS(name) match {
+              case (p : RemoteSql, _) =>
                 // if remote sql, then keep the subquery as subquery in the server sql,
                 // while adding the plan's subquery children to our children directly
                 finalSubqueryRelationPlans ++= p.subrelations
                 SubqueryRelationAST(p.stmt, name)
-              case p =>
+              case (p, ss) =>
                 // otherwise, add a RemoteMaterialize node
                 val name0 = subRelnGen.uniqueId()
-                finalSubqueryRelationPlans += RemoteMaterialize(name0, p)
+                finalSubqueryRelationPlans += ((RemoteMaterialize(name0, p), ss))
                 TableRelationAST(name0, Some(name))
             }
         }

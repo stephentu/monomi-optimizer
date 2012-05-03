@@ -304,6 +304,8 @@ case class Extract(expr: SqlExpr, what: ExtractType, ctx: Context = null) extend
   val name = "extract"
   val args = Seq(expr)
   def copyWithContext(c: Context) = copy(ctx = c)
+  override def sqlFromDialect(dialect: SqlDialect) =
+    Seq("extract", "(", Seq(what.toString, "from", expr.sqlFromDialect(dialect)).mkString(" "), ")").mkString("")
 }
 
 case class Substring(expr: SqlExpr, from: Int, length: Option[Int], ctx: Context = null) extends SqlFunction {

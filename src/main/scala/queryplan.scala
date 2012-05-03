@@ -93,8 +93,9 @@ trait PlanNode extends Traversals {
       (Double, Long, Option[Long]) = {
 
       val firstChild =
-        for (L(children) <- node.get("Plans");
-             M(child) = children.head) yield extractInfoFromQueryPlan(child)
+        (for (L(children) <- node.get("Plans").toList;
+              M(child) <- children if child("Parent Relationship") == "Outer")
+         yield extractInfoFromQueryPlan(child)).headOption
 
       val Some((totalCost, planRows)) = for (
         D(totalCost) <- node.get("Total Cost");
@@ -124,7 +125,7 @@ trait PlanNode extends Traversals {
     }
 
     val sql = stmt.sqlFromDialect(PostgresDialect)
-
+    //println("SQL: " + sql)
 
     import Conversions._
 
@@ -162,14 +163,14 @@ trait PlanNode extends Traversals {
 
 case class RemoteSql(stmt: SelectStmt,
                      projs: Seq[PosDesc],
-                     subrelations: Seq[PlanNode] = Seq.empty)
+                     subrelations: Seq[(RemoteMaterialize, SelectStmt)] = Seq.empty)
   extends PlanNode with Transformers {
 
   assert(stmt.projections.size == projs.size)
   def tupleDesc = projs
   def pretty0(lvl: Int) = {
     "* RemoteSql(sql = " + stmt.sql + ", projs = " + projs + ")" +
-    subrelations.map(c => childPretty(lvl, c)).mkString("")
+    subrelations.map(c => childPretty(lvl, c._1)).mkString("")
   }
 
   def costEstimate(ctx: EstimateContext) = {
@@ -195,31 +196,28 @@ case class RemoteSql(stmt: SelectStmt,
         val name0 = basename(name)
         ctx.precomputed.get(name0)
           .map(x => (Some(rewriteWithQual(x, qual0)), false))
-          .orElse {
-            // try to rewrite table + column
-            ctx.defns.lookup(qual0, name0).map { _ =>
-              (Some(FieldIdent(Some(qual0), name0)), false) }
+          .getOrElse {
+            // rowids are rewritten to 0
+            if (ctx.needsRowIDs.contains(qual0) && name0 == "rowid") {
+              ((Some(IntLiteral(0)), false))
+            } else if (qual != qual0 || name != name0) {
+              ((Some(FieldIdent(Some(qual0), name0)), false))
+            } else ((None, false))
           }
-          .orElse {
-            if (ctx.defns.tableExists(qual0)) {
-              // rowids are rewritten to 0
-              if (ctx.needsRowIDs.contains(qual0) && name0 == "rowid") {
-                Some((Some(IntLiteral(0)), false))
-              } else {
-                // try to rewrite just table
-                Some((Some(FieldIdent(Some(qual0), name)), false))
-              }
-            } else {
-              None
-            }
-          }.getOrElse((None, true))
 
       case TableRelationAST(name, alias, _) =>
-        val name0 = basename(name)
-        if (ctx.defns.tableExists(name0)) {
-          (Some(TableRelationAST(name0, alias)), false)
-        } else {
-          (None, false)
+        val SRegex = "subrelation\\$(\\d+)".r
+        name match {
+          case SRegex(srpos) =>
+            // need to replace with SubqueryRelationAST
+            (Some(SubqueryRelationAST(subrelations(srpos.toInt)._2, alias.get)), false)
+          case _ =>
+            val name0 = basename(name)
+            if (ctx.defns.tableExists(name0)) {
+              (Some(TableRelationAST(name0, alias)), false)
+            } else {
+              (None, false)
+            }
         }
 
       case FunctionCall("encrypt", Seq(e, _), _) =>
@@ -230,6 +228,9 @@ case class RemoteSql(stmt: SelectStmt,
         // - at least the # should be a reasonable number for what it is
         // - replacing
         (Some(IntLiteral(12345)), false)
+
+      case FunctionCall("hom_row_desc_lit", Seq(e), _) =>
+        (Some(e), false)
 
       case _ => (None, true)
     }.asInstanceOf[SelectStmt]
@@ -247,7 +248,8 @@ case class RemoteSql(stmt: SelectStmt,
     }.sum
 
     Estimate(
-      c + CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec),
+      c + subrelations.map(_._1.costEstimate(ctx).cost).sum +
+        CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec),
       r, rr.getOrElse(1), reverseStmt)
   }
 }
