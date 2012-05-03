@@ -312,6 +312,8 @@ case class Substring(expr: SqlExpr, from: Int, length: Option[Int], ctx: Context
   val name = "substring"
   val args = Seq(expr)
   def copyWithContext(c: Context) = copy(ctx = c)
+  override def sqlFromDialect(dialect: SqlDialect) =
+    Seq("substring", "(", Seq(expr.sqlFromDialect(dialect), "from", from.toString, length.map(x => "for " + x).getOrElse("")).mkString(" "), ")").mkString("")
 }
 
 case class CaseExprCase(cond: SqlExpr, expr: SqlExpr, ctx: Context = null) extends Node {

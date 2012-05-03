@@ -113,7 +113,10 @@ trait PlanNode extends Traversals {
                planRows,
                Some(math.ceil(rows.toDouble / planRows.toDouble).toLong))
 
-            // TODO: agg of aggs??
+            case (_, rows, Some(rowsPerRow)) =>
+              (totalCost,
+               planRows,
+               Some(math.ceil(rows.toDouble / planRows.toDouble * rowsPerRow).toLong))
           }
 
         case _ =>
