@@ -1173,9 +1173,9 @@ trait Generator extends Traversals with Transformers {
                 SubqueryRelationAST(p.stmt, name)
               case p =>
                 // otherwise, add a RemoteMaterialize node
-                val name = subRelnGen.uniqueId()
-                finalSubqueryRelationPlans += RemoteMaterialize(name, p)
-                TableRelationAST(name, None)
+                val name0 = subRelnGen.uniqueId()
+                finalSubqueryRelationPlans += RemoteMaterialize(name0, p)
+                TableRelationAST(name0, Some(name))
             }
         }
       cur.copy(relations = Some(r.map(rewriteSqlRelation)))

@@ -235,7 +235,7 @@ case class RemoteSql(stmt: SelectStmt,
     }.asInstanceOf[SelectStmt]
 
     // server query execution cost
-    println("REMOTE SQL TO PSQL: " + reverseStmt.sqlFromDialect(PostgresDialect))
+    //println("REMOTE SQL TO PSQL: " + reverseStmt.sqlFromDialect(PostgresDialect))
     val (c, r, rr) = extractCostFromDB(reverseStmt, ctx.defns.dbconn.get)
 
     // data xfer to client cost
@@ -319,7 +319,7 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
       ch.equivStmt.copy(
         filter = ch.equivStmt.filter.map(x => And(x, origExpr)).orElse(Some(origExpr)))
 
-    println(stmt.sqlFromDialect(PostgresDialect))
+    //println(stmt.sqlFromDialect(PostgresDialect))
 
     val (_, r, rr) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
 
@@ -377,7 +377,7 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
           ch.equivStmt.groupBy.map(_.copy(having =
             ch.equivStmt.groupBy.get.having.map(x => And(x, origFilter)).orElse(Some(origFilter)))))
 
-    println(stmt.sqlFromDialect(PostgresDialect))
+    //println(stmt.sqlFromDialect(PostgresDialect))
 
     val (_, r, Some(rr)) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
 
