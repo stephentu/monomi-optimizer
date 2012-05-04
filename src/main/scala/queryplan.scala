@@ -269,6 +269,26 @@ case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
   }
 }
 
+case class LocalOuterJoinFilter(
+  expr: SqlExpr, origExpr: SqlExpr, posToNull: Seq[Int],
+  child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
+
+  {
+    val td = child.tupleDesc
+    def checkBounds(i: Int) = assert(i >= 0 && i < td.size)
+    posToNull.foreach(checkBounds)
+  }
+
+  def tupleDesc = child.tupleDesc
+  def pretty0(lvl: Int) = {
+    "* LocalOuterJoinFilter(filter = " + expr.sql + ")" +
+      childPretty(lvl, child) +
+      subqueries.map(c => childPretty(lvl, c)).mkString("")
+  }
+
+  def costEstimate(ctx: EstimateContext) = throw new RuntimeException("TODO: impl")
+}
+
 case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
                        child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
   def tupleDesc = child.tupleDesc
@@ -354,7 +374,16 @@ case class LocalTransform(trfms: Seq[Either[Int, SqlExpr]], child: PlanNode) ext
 }
 
 // class currently un-used
-case class LocalGroupBy(keys: Seq[SqlExpr], filter: Option[SqlExpr], child: PlanNode) extends PlanNode {
+case class LocalGroupBy(
+  keys: Seq[SqlExpr], origKeys: Seq[SqlExpr],
+  filter: Option[SqlExpr], origFilter: Option[SqlExpr],
+  child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
+
+  {
+    assert(keys.size == origKeys.size)
+    assert(filter.isDefined == origFilter.isDefined)
+  }
+
   def tupleDesc = throw new RuntimeException("unimpl")
   def pretty0(lvl: Int) =
     "* LocalGroupBy(keys = " + keys.map(_.sql).mkString(", ") + ", group_filter = " + filter.map(_.sql).getOrElse("none") + ")" + childPretty(lvl, child)

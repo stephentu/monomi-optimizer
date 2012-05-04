@@ -211,9 +211,9 @@ trait Generator extends Traversals with Transformers {
   private def generatePlanFromOnionSet0(
     stmt: SelectStmt, onionSet: OnionSet, encContext: EncContext): PlanNode = {
 
-    //println("generatePlanFromOnionSet0()")
-    //println("stmt: " + stmt.sql)
-    //println("encContext: " + encContext)
+    println("generatePlanFromOnionSet0()")
+    println("stmt: " + stmt.sql)
+    println("encContext: " + encContext)
 
     encContext match {
       case EncProj(o, _) =>
@@ -426,11 +426,57 @@ trait Generator extends Traversals with Transformers {
 
     val _hiddenNames = new NameGenerator("_hidden")
 
+    // local filter + name of concrete {table,subquery} relations
+    // to nullify (named in this context) if the filter fails (none if inner join)
+    val newLocalJoinFilters = new ArrayBuffer[(ClientComputation, Set[String])]
+    val localJoinFilterPosMaps = new ArrayBuffer[CompProjMapping]
+
+    // are all join clauses resolved on the server?
+    def checkJoinClausesOnServer: Boolean = {
+      newLocalJoinFilters.isEmpty
+    }
+
+    // can we process the WHERE clause on the server
+    // does NOT imply that all join clauses have been resolved, just that
+    // no OUTER join clauses are un-resolved
+    def checkCanDoFilterOnServer: Boolean = {
+      newLocalJoinFilters.filterNot(_._2.isEmpty).isEmpty
+    }
+
     val newLocalFilters = new ArrayBuffer[ClientComputation]
     val localFilterPosMaps = new ArrayBuffer[CompProjMapping]
 
+    // is the filter (where) clause resolved on the server.
+    // doesn't imply all join clauses are resolved
+    def checkFilterClauseOnServer: Boolean = {
+      newLocalFilters.isEmpty
+    }
+
+    // can we process the GROUP BY clause on the server
+    //
+    // NOTE: currently, we assume that if we *CAN* execute the filter we
+    // can also execute the group by. This is because if we can execute
+    // the filter, then even if some filter clauses cannot be answered on the
+    // server, we can still apply a LocalGroupFilter
+    def checkCanDoGroupByOnServer: Boolean = {
+      checkCanDoFilterOnServer
+    }
+
+    // corresponds 1-to-1 w/ the group by keys
     val newLocalGroupBy = new ArrayBuffer[ClientComputation]
     val localGroupByPosMaps = new ArrayBuffer[CompProjMapping]
+
+    val newLocalGroupByHaving = new ArrayBuffer[ClientComputation]
+    val localGroupByHavingPosMaps = new ArrayBuffer[CompProjMapping]
+
+    // is the group by cluase resolved on the server
+    def checkGroupByOnServer: Boolean = {
+      newLocalGroupBy.isEmpty && newLocalGroupByHaving.isEmpty
+    }
+
+    def checkCanDoOrderByOnServer: Boolean = {
+      checkGroupByOnServer
+    }
 
     // left is position in (original) projection to order by,
     // right is client comp
@@ -440,17 +486,49 @@ trait Generator extends Traversals with Transformers {
     val newLocalOrderBy = new ArrayBuffer[Either[Int, ClientComputation]]
     val localOrderByPosMaps = new ArrayBuffer[CompProjMapping]
 
+    def checkOrderByOnServer: Boolean = {
+      newLocalOrderBy.isEmpty
+    }
+
+    def checkCanDoLimitOnServer: Boolean = {
+      // can only do limit if everything before is good to go
+      // this is kind of conservative (but correct)
+      checkOrderByOnServer &&
+      checkGroupByOnServer &&
+      checkFilterClauseOnServer &&
+      checkJoinClausesOnServer
+    }
+
     var newLocalLimit: Option[Int] = None
 
+    def checkLimitOnServer: Boolean = {
+      newLocalLimit.isEmpty
+    }
+
     // these correspond 1 to 1 with the original projections
-    val projPosMaps = new ArrayBuffer[Either[(Int, OnionType), (ClientComputation, CompProjMapping)]]
+    val projPosMaps =
+      new ArrayBuffer[Either[(Int, OnionType), (ClientComputation, CompProjMapping)]]
 
     // these correspond 1 to 1 with the new projections in the encrypted
     // re-written query
-    val finalProjs = new ArrayBuffer[(SqlProj, OnionType, Boolean)]
+    // values are: (orig expr, projection, what onion it is projected in, vector ctx)
+    val finalProjs = new ArrayBuffer[(SqlExpr, SqlProj, OnionType, Boolean)]
 
-    case class RewriteContext(onions: Seq[Int], aggContext: Boolean) {
-      def this(onion: Int, aggContext: Boolean) = this(Onions.toSeq(onion), aggContext)
+    case class RewriteContext(
+      onions: Seq[Int],
+      aggContext: Boolean, // aggContext means its OK for agg expressions to appear
+      respectStructure: Boolean // this only has any effect if the expr
+                                // cannot be answered on the server side and we need
+                                // to project fields for client evaluation. if true,
+                                // the projected fields respect the structure of the
+                                // expression (fields within aggs will be group_concat()-ed,
+                                // fields outside will be regularly projected). if false, then
+                                // the fields are never group_concat()-ed, regardless.
+
+      ) {
+
+      def this(onion: Int, aggContext: Boolean, respectStructure: Boolean) =
+        this(Onions.toSeq(onion), aggContext, respectStructure)
 
       assert(!onions.isEmpty)
       assert(onions.filterNot(BitUtils.onlyOne).isEmpty)
@@ -459,17 +537,13 @@ trait Generator extends Traversals with Transformers {
       def testOnion(o: Int): Boolean = !onions.filter { x => (x & o) != 0 }.isEmpty
       def restrict: RewriteContext = copy(onions = Seq(onions.head))
 
-      def restrictTo(o: Int) = new RewriteContext(o, aggContext)
+      def restrictTo(o: Int) = new RewriteContext(o, aggContext, respectStructure)
     }
 
     def rewriteExprForServer(
       expr: SqlExpr, rewriteCtx: RewriteContext,
       analysis: RewriteAnalysisContext, forceClient: Boolean = false):
       Either[(SqlExpr, OnionType), (Option[(SqlExpr, OnionType)], ClientComputation)] = {
-
-      //println("rewriteExprForServer:")
-      //println("  expr: " + expr.sql)
-      //println("  rewriteCtx: " + rewriteCtx)
 
       // this is just a placeholder in the tree
       val cannotAnswerExpr = replaceWith(IntLiteral(1))
@@ -665,30 +739,30 @@ trait Generator extends Traversals with Transformers {
 
             case cs @ CountExpr(e, d, _) if curRewriteCtx.inClear && curRewriteCtx.aggContext =>
               onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
-              doTransformServer(e, RewriteContext(Onions.toSeq(Onions.Countable), false))
+              doTransformServer(e, RewriteContext(Onions.toSeq(Onions.Countable), false, true))
                 .map { case (e0, _) => replaceWith(CountExpr(e0, d)) }.getOrElse(bailOut)
 
             case m @ Min(f, _) if curRewriteCtx.testOnion(Onions.OPE) && curRewriteCtx.aggContext =>
               onionRetVal.set(OnionType.buildIndividual(Onions.OPE))
-              doTransformServer(f, RewriteContext(Seq(Onions.OPE), false))
+              doTransformServer(f, RewriteContext(Seq(Onions.OPE), false, true))
                 .map { case (e0, _) => replaceWith(Min(e0)) }.getOrElse(bailOut)
 
             case m @ Max(f, _) if curRewriteCtx.testOnion(Onions.OPE) && curRewriteCtx.aggContext =>
               onionRetVal.set(OnionType.buildIndividual(Onions.OPE))
-              doTransformServer(f, RewriteContext(Seq(Onions.OPE), false))
+              doTransformServer(f, RewriteContext(Seq(Onions.OPE), false, true))
                 .map { case (e0, _) => replaceWith(Max(e0)) }.getOrElse(bailOut)
 
             // TODO: we should do something about distinct
             case s @ Sum(f, d, _) if curRewriteCtx.aggContext =>
               def tryPlain = {
-                doTransformServer(f, RewriteContext(Seq(Onions.PLAIN), false))
+                doTransformServer(f, RewriteContext(Seq(Onions.PLAIN), false, true))
                   .map { case (e0, _) =>
                     onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
                     replaceWith(Sum(e0, d))
                   }
               }
               def tryHom = {
-                doTransformServer(f, RewriteContext(Seq(Onions.HOM), false))
+                doTransformServer(f, RewriteContext(Seq(Onions.HOM), false, true))
                   .map { case (e0, _) =>
                     onionRetVal.set(OnionType.buildIndividual(Onions.HOM))
                     replaceWith(AggCall("hom_agg", Seq(e0)))
@@ -837,7 +911,7 @@ trait Generator extends Traversals with Transformers {
               def translateForUniqueHomID(e: SqlExpr, aggContext: Boolean): Option[(SqlExpr, Seq[HomDesc])] = {
                 def procCaseExprCase(c: CaseExprCase): Option[(CaseExprCase, Seq[HomDesc])] = {
                   CollectionUtils.optAnd2(
-                    doTransformServer(c.cond, RewriteContext(Seq(Onions.PLAIN), aggContext)),
+                    doTransformServer(c.cond, RewriteContext(Seq(Onions.PLAIN), aggContext, true)),
                     translateForUniqueHomID(c.expr, aggContext)).map {
                       case ((l, _), (r, hd)) => (CaseExprCase(l, r), hd)
                     }
@@ -937,7 +1011,7 @@ trait Generator extends Traversals with Transformers {
             def translateField(fi: FieldIdent, aggContext: Boolean) = {
               getSupportedExprConstraintAware(
                 fi, Onions.DET | Onions.OPE, analysis.subrels,
-                analysis.groupKeys, curRewriteCtx.aggContext)
+                analysis.groupKeys, aggContext)
               .getOrElse {
                 println("could not find DET/OPE enc for expr: " + fi)
                 println("orig: " + e.sql)
@@ -947,19 +1021,28 @@ trait Generator extends Traversals with Transformers {
             }
 
             fields.map {
-              case (f, false) =>
-                val (ft, o) = translateField(f, false)
-                (f, ExprProj(ft, None), o, false)
-              case (f, true) =>
-                val (ft, o) = translateField(f, true)
-                (f, ExprProj(GroupConcat(ft, ","), None), o, true)
+              case (f, inAggCtx) =>
+                if (inAggCtx && curRewriteCtx.respectStructure) {
+                  val (ft, o) = translateField(f, true)
+                  (f, ExprProj(GroupConcat(ft, ","), None), o, true)
+                } else {
+                  val (ft, o) = translateField(f, false)
+                  (f, ExprProj(ft, None), o, false)
+                }
             }
           }
 
-          val opts = mkOptimizations(e, curRewriteCtx)
+          // if we are forcing computation on the client, omit optimizations for now
+          // b/c it gets messy (and is probably not going to be correct)
+          val opts:
+            // need to be explicit about type here, otherwise scalac does not
+            // handle properly
+            Map[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, OnionType, Boolean)])]
+            = if (!forceClient) mkOptimizations(e, curRewriteCtx) else Map.empty
 
           val e0ForProj = topDownTransformContext(e, e.ctx) {
-            // replace w/ something dumb, so we can gather fields w/o worrying about it
+            // replace w/ something dumb, so we can gather fields w/o worrying about
+            // overlapping with what we already optimized away
             case e: SqlExpr if opts.contains(e) => replaceWith(IntLiteral(1))
             case _ => keepGoing
           }.asInstanceOf[SqlExpr]
@@ -1033,6 +1116,8 @@ trait Generator extends Traversals with Transformers {
         case JoinRelation(l, r, _, _, _) =>
           findSubqueryRelations(l) ++ findSubqueryRelations(r)
       }
+
+    // --- subqueries --- //
 
     val subqueryRelations =
       cur.relations.map(_.flatMap(findSubqueryRelations)).getOrElse(Seq.empty)
@@ -1152,38 +1237,8 @@ trait Generator extends Traversals with Transformers {
       case (k, (v, _)) => (k, v)
     }.toMap
 
-    //println("subqplans: " + subqueryRelationPlans)
-
-    // TODO: explicit join predicates (ie A JOIN B ON (pred)).
-    // TODO: handle {LEFT,RIGHT} OUTER JOINS
-
-    val finalSubqueryRelationPlans = new ArrayBuffer[(RemoteMaterialize, SelectStmt)]
-
-    // relations
-    cur = cur.relations.map { r =>
-      def rewriteSqlRelation(s: SqlRelation): SqlRelation =
-        s match {
-          case t @ TableRelationAST(name, a, _) => TableRelationAST(encTblName(name), a)
-          case j @ JoinRelation(l, r, _, _, _)  =>
-            // TODO: join clauses
-            j.copy(left  = rewriteSqlRelation(l),
-                   right = rewriteSqlRelation(r)).copyWithContext(null)
-          case r @ SubqueryRelationAST(_, name, _) =>
-            subqueryRelationPlansWithOrigSS(name) match {
-              case (p : RemoteSql, _) =>
-                // if remote sql, then keep the subquery as subquery in the server sql,
-                // while adding the plan's subquery children to our children directly
-                finalSubqueryRelationPlans ++= p.subrelations
-                SubqueryRelationAST(p.stmt, name)
-              case (p, ss) =>
-                // otherwise, add a RemoteMaterialize node
-                val name0 = subRelnGen.uniqueId()
-                finalSubqueryRelationPlans += ((RemoteMaterialize(name0, p), ss))
-                TableRelationAST(name0, Some(name))
-            }
-        }
-      cur.copy(relations = Some(r.map(rewriteSqlRelation)))
-    }.getOrElse(cur)
+    // --- gather hom choices, and greedily pick the smallest --- //
+    // --- covering set --- //
 
     val homGroupChoices = new ArrayBuffer[Seq[HomDesc]]
 
@@ -1208,101 +1263,212 @@ trait Generator extends Traversals with Transformers {
       case _ => true
     }
 
-    // figure out a total preference ordering for all the hom groups
     val analysis =
       RewriteAnalysisContext(subqueryRelationPlans,
                              buildHomGroupPreference(homGroupChoices.toSeq),
                              Map.empty)
 
-    // filters
+    // --- relations --- //
+
+    val finalSubqueryRelationPlans = new ArrayBuffer[(RemoteMaterialize, SelectStmt)]
+
+    cur = cur.relations.map { r =>
+      var forceClient = false
+      def rewriteSqlRelation(s: SqlRelation): SqlRelation =
+        s match {
+          case t @ TableRelationAST(name, a, _) =>
+            TableRelationAST(encTblName(name), a)
+          case j @ JoinRelation(l, r, tpe, e, _)  =>
+            rewriteExprForServer(e, RewriteContext(Seq(Onions.PLAIN), false, true),
+                                 analysis, forceClient) match {
+              case Left((e0, onion)) =>
+                assert(onion == Onions.PLAIN)
+                assert(!forceClient)
+                j.copy(left = rewriteSqlRelation(l),
+                       right = rewriteSqlRelation(r),
+                       clause = e0).copyWithContext(null)
+              case Right((optExpr, comp)) =>
+                def traverseForConcreteRelations(s: SqlRelation): Seq[SqlRelation] =
+                  s match {
+                    case _: TableRelationAST         => Seq(s)
+                    case _: SubqueryRelationAST      => Seq(s)
+                    case JoinRelation(l, r, _, _, _) =>
+                      traverseForConcreteRelations(l) ++
+                      traverseForConcreteRelations(r)
+                  }
+                def extractNameFromConcreteRelation(s: SqlRelation): String =
+                  s match {
+                    case TableRelationAST(name, alias, _) => alias.getOrElse(name)
+                    case SubqueryRelationAST(_, alias, _) => alias
+                    case _ => throw new RuntimeException("non concrete relation")
+                  }
+                assert(optExpr.isEmpty || !forceClient)
+                // need to recurse first, to process children first
+                forceClient = true
+                val l0 = rewriteSqlRelation(l)
+                val r0 = rewriteSqlRelation(r)
+                newLocalJoinFilters += ((comp, (tpe match {
+                    case LeftJoin  => traverseForConcreteRelations(r)
+                    case RightJoin => traverseForConcreteRelations(l)
+                    case InnerJoin => Seq.empty
+                  }).map(extractNameFromConcreteRelation).toSet))
+                j.copy(left = l0, right = r0,
+                       clause = optExpr.map(_._1).getOrElse( Eq(IntLiteral(1), IntLiteral(1)) ))
+                 .copyWithContext(null)
+            }
+          case r @ SubqueryRelationAST(_, name, _) =>
+            subqueryRelationPlansWithOrigSS(name) match {
+              case (p : RemoteSql, _) =>
+                // if remote sql, then keep the subquery as subquery in the server sql,
+                // while adding the plan's subquery children to our children directly
+                finalSubqueryRelationPlans ++= p.subrelations
+                SubqueryRelationAST(p.stmt, name)
+              case (p, ss) =>
+                // otherwise, add a RemoteMaterialize node
+                val name0 = subRelnGen.uniqueId()
+                finalSubqueryRelationPlans += ((RemoteMaterialize(name0, p), ss))
+                TableRelationAST(name0, Some(name))
+            }
+        }
+      cur.copy(relations = Some(r.map(rewriteSqlRelation)))
+    }.getOrElse(cur)
+
+    // --- filters --- //
     cur = cur
       .filter
-      .map(x => rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), false), analysis))
+      .map(x => rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), false, true),
+                                     analysis, !checkCanDoFilterOnServer))
       .map {
         case Left((expr, onion)) =>
+          assert(checkCanDoFilterOnServer)
           assert(onion == PlainOnion)
           cur.copy(filter = Some(expr))
 
         case Right((optExpr, comp)) =>
-          // TODO: this agg context stuff is sloppy and we don't really get it
-          // right all the time. we should rework how rewriteExprForServer() passes
-          // expressions back up to the caller for projection. really a combination of
-          // both the caller's scope + the expression determines how to project
-          val comp0 =
-            if (cur.projectionsInAggContext) {
-              // need to group_concat the projections then, because we have a groupBy context
-              // TODO: we need to check if a group by's expr is being projected- if so,
-              // we *don't* need to wrap in a GroupConcat (although it's technically still
-              // correct, just wasteful)
-              val ClientComputation(_, _, p, s, _) = comp
-              comp.copy(
-                projections = p.map {
-                  case (expr, ExprProj(e, a, _), o, _) =>
-                    (expr, ExprProj(GroupConcat(e, ","), a), o, true)
-                },
-                subqueryProjections = s.map {
-                  case (expr, ExprProj(e, a, _), o, _) =>
-                    (expr, ExprProj(GroupConcat(e, ","), a), o, true)
-                })
-            } else {
-              comp
-            }
-          newLocalFilters += comp0
+          // we defer the conversion of projections into group_concat until later,
+          // after we know if the group by clause has gone through
+          newLocalFilters += comp
+
           optExpr.map { case (expr, onion) =>
             assert(onion == PlainOnion)
             cur.copy(filter = Some(expr)) }.getOrElse(cur.copy(filter = None))
       }.getOrElse(cur)
 
-    // group by
+    // --- group by --- //
+
+    // this map is so when we do projections, we can know which can be projected
+    // w/o having to wrap in a group_concat()
     val groupKeys = new HashMap[Symbol, (FieldIdent, OnionType)]
     cur = {
-      // need to check if we can answer the having clause
-      val newGroupBy =
-        cur
-          .groupBy
-          .map { gb =>
-            gb.having.map { x =>
-              (rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), true), analysis) match {
+      cur.copy(groupBy = cur.groupBy.flatMap { gb =>
+
+        // check if we can answer the keys
+        val serverKeys = gb.keys.map(k =>
+          getSupportedExpr(k, Onions.OPE, subqueryRelationPlans)
+            .orElse(getSupportedExpr(k, Onions.DET, subqueryRelationPlans))
+              .orElse(getSupportedExpr(k, Onions.PLAIN, subqueryRelationPlans)))
+
+        if (checkCanDoGroupByOnServer &&
+            serverKeys.flatten.size == serverKeys.size) {
+          // ok to go ahead with server side group by
+
+          val newHaving =
+            gb.having.flatMap { x =>
+              rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), true, true), analysis) match {
                 case Left((expr, onion)) =>
                   assert(onion == PlainOnion)
-                  gb.copy(having = Some(expr))
+                  Some(expr)
                 case Right((optExpr, comp)) =>
-                  newLocalGroupBy += comp
-                  optExpr.map { case (expr, onion) =>
-                    assert(onion  == PlainOnion)
-                    gb.copy(having = Some(expr))
-                  }.getOrElse(gb.copy(having = None))
-              })
-            }.getOrElse(gb)
+                  newLocalGroupByHaving += comp
+                  optExpr.map(_._1)
+              }
+            }
+
+          gb.keys.zip(serverKeys.flatten).foreach {
+            case (FieldIdent(_, _, sym, _), (fi: FieldIdent, o)) =>
+              assert(sym ne null)
+              groupKeys += ((sym -> (fi, o)))
+            case _ =>
           }
 
-      // now check the keys
-      val newGroupBy0 = newGroupBy.map(gb => gb.copy(keys = {
-        gb.keys.map(k =>
-          getSupportedExpr(k, Onions.OPE, subqueryRelationPlans)
-          .orElse(getSupportedExpr(k, Onions.DET, subqueryRelationPlans))
-          .map { case (fi: FieldIdent, o) =>
-            k match {
-              case FieldIdent(_, _, sym, _) =>
-                assert(sym ne null)
-                groupKeys += ((sym -> (fi, o)))
-              case _ =>
+          Some(gb.copy(keys = serverKeys.flatten.map(_._1), having = newHaving))
+
+        } else {
+
+          // force client side execution
+          gb.having.foreach { x =>
+            rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), true, false), analysis, true) match {
+              case Left(_) => assert(false)
+              case Right((optExpr, comp)) =>
+                assert(optExpr.isEmpty)
+                newLocalGroupByHaving += comp
             }
-            fi
-          }.getOrElse {
-            println("Non supported expr: " + k)
-            println("subq: " + subqueryRelationPlans)
-            throw new RuntimeException("TODO: currently cannot support non-field keys")
-          })
-      }))
-      cur.copy(groupBy = newGroupBy0)
+          }
+
+          gb.keys.foreach { k =>
+            rewriteExprForServer(k, RewriteContext(Seq(Onions.PLAIN), true, false), analysis, true) match {
+              case Left(_) => assert(false)
+              case Right((optExpr, comp)) =>
+                assert(optExpr.isEmpty)
+                newLocalGroupBy += comp
+            }
+          }
+
+          None
+
+        }
+      })
+    }
+
+    // fix up filter projections to be group_concat()-ed if necessary
+    if (stmt.projectionsInAggContext &&
+        (!stmt.groupBy.isDefined || cur.groupBy.isDefined)) {
+
+      // if we were originally in agg context, and we still haven't
+      // removed a group by even after processing the group by, then
+      // we need to do all filter projections in agg context (
+      // unless we happen to project one of the group by keys)
+
+      def fixupProjs(ccs: ArrayBuffer[ClientComputation]) = {
+        ccs.map {
+          case cc @ ClientComputation(_, _, p, sp, _) =>
+            def procProjs(p: Seq[(SqlExpr, SqlProj, OnionType, Boolean)]) = {
+              p.map {
+                case t @ (_, ep @ ExprProj(e, _, _), _, v) if !v =>
+                  def wrapWithGroupConcat(e: SqlExpr) = GroupConcat(e, ",")
+                  e match {
+                    case FieldIdent(_, _, sym, _) =>
+                      groupKeys.get(sym).map { _ => t }.getOrElse {
+                        t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e)), _4 = true)
+                      }
+                    case _ =>
+                      t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e)), _4 = true)
+                  }
+                case e => e
+              }
+            }
+            cc.copy(projections = procProjs(p), subqueryProjections = procProjs(sp))
+        }
+      }
+
+      val ccs0 =
+        fixupProjs(newLocalJoinFilters.map(_._1)).zip(newLocalJoinFilters.map(_._2))
+      newLocalJoinFilters.clear; newLocalJoinFilters ++= ccs0
+
+
+      val ccs1 = fixupProjs(newLocalFilters)
+      newLocalFilters.clear; newLocalFilters ++= ccs1
+
     }
 
     val analysis1 = analysis.copy(groupKeys = groupKeys.toMap)
 
+    def checkGroupByExplicitlyRemoved: Boolean =
+      cur.groupBy.isDefined && !newLocalGroupBy.isEmpty
+
     // order by
     cur = {
-      def handleUnsupported(o: SqlOrderBy) = {
+      def handleUnsupported(o: SqlOrderBy, groupByRemoved: Boolean) = {
         def getKeyInfoForExpr(f: SqlExpr) = {
           getSupportedExprConstraintAware(
             f, Onions.OPE,
@@ -1338,18 +1504,17 @@ trait Generator extends Traversals with Transformers {
               }
           }
         }
-        val aggCtx = !(cur.groupBy.isDefined && !newLocalFilters.isEmpty)
         newLocalOrderBy ++= (
           o.keys.map { case (k, _) =>
             searchProjIndex(k).map(idx => Left(idx)).getOrElse {
               getKeyInfoForExpr(k)
                 .map { case (f, fi, o) => Right(mkClientCompFromKeyInfo(f, fi, o)) }
                 .getOrElse {
-                  // TODO: why do we need to resolveAliases() here only??
+                  // TODO: why do we need to resolveAliases() here??
                   rewriteExprForServer(
                     resolveAliases(k),
-                    RewriteContext(Seq(Onions.OPE), aggCtx),
-                    analysis1) match {
+                    RewriteContext(Seq(Onions.OPE), true, !groupByRemoved),
+                    analysis1, groupByRemoved) match {
 
                     case Left((expr, onion)) => Right(mkClientCompFromKeyInfo(k, expr, onion))
                     case Right((None, comp)) => Right(comp)
@@ -1365,7 +1530,7 @@ trait Generator extends Traversals with Transformers {
         None
       }
       val newOrderBy = cur.orderBy.flatMap(o => {
-        if (newLocalFilters.isEmpty && newLocalGroupBy.isEmpty) {
+        if (checkCanDoOrderByOnServer) {
           val mapped =
             o.keys.map(f =>
               (getSupportedExprConstraintAware(
@@ -1375,10 +1540,11 @@ trait Generator extends Traversals with Transformers {
             // can support server side order by
             Some(SqlOrderBy(mapped.map(f => (f._1.get, f._2))))
           } else {
-            handleUnsupported(o)
+            handleUnsupported(o, false)
           }
         } else {
-          handleUnsupported(o)
+          // check for case that a group by was *explicitly* removed
+          handleUnsupported(o, checkGroupByExplicitlyRemoved)
         }
       })
       cur.copy(orderBy = newOrderBy)
@@ -1386,9 +1552,7 @@ trait Generator extends Traversals with Transformers {
 
     // limit
     cur = cur.copy(limit = cur.limit.flatMap(l => {
-      if (newLocalFilters.isEmpty &&
-          newLocalGroupBy.isEmpty &&
-          newLocalOrderBy.isEmpty) {
+      if (checkCanDoLimitOnServer) {
         Some(l)
       } else {
         newLocalLimit = Some(l)
@@ -1396,12 +1560,11 @@ trait Generator extends Traversals with Transformers {
       }
     }))
 
-
     // projections
     cur = {
 
       val projectionCache = new HashMap[(SqlExpr, OnionType), (Int, Boolean)]
-      def projectionInsert(p: SqlProj, o: OnionType, v: Boolean): Int = {
+      def projectionInsert(origExpr: SqlExpr, p: SqlProj, o: OnionType, v: Boolean): Int = {
         assert(p.isInstanceOf[ExprProj])
         val ExprProj(e, _, _) = p
         val (i0, v0) =
@@ -1409,7 +1572,7 @@ trait Generator extends Traversals with Transformers {
           .getOrElse {
             // doesn't exist, need to insert
             val i = finalProjs.size
-            finalProjs += ((p, o, v))
+            finalProjs += ((origExpr, p, o, v))
 
             // insert into cache
             projectionCache += ((e, o) -> (i, v))
@@ -1422,19 +1585,21 @@ trait Generator extends Traversals with Transformers {
 
       def processClientComputation(comp: ClientComputation): CompProjMapping = {
         def proc(ps: Seq[(SqlExpr, SqlProj, OnionType, Boolean)]) =
-          ps.map { case (_, p, o, v) =>
-            (p, projectionInsert(p, o, v))
+          ps.map { case (e, p, o, v) =>
+            (p, projectionInsert(e, p, o, v))
           }.toMap
-       CompProjMapping(proc(comp.projections), proc(comp.subqueryProjections))
+        CompProjMapping(proc(comp.projections), proc(comp.subqueryProjections))
       }
 
-      newLocalFilters.foreach { c =>
-        localFilterPosMaps += processClientComputation(c)
+      def procRegPair(comps: Seq[ClientComputation],
+                      mappings: ArrayBuffer[CompProjMapping]) = {
+        comps.foreach { c => mappings += processClientComputation(c) }
       }
 
-      newLocalGroupBy.foreach { c =>
-        localGroupByPosMaps += processClientComputation(c)
-      }
+      procRegPair(newLocalJoinFilters.map(_._1).toSeq, localJoinFilterPosMaps)
+      procRegPair(newLocalFilters.toSeq, localFilterPosMaps)
+      procRegPair(newLocalGroupBy.toSeq, localGroupByPosMaps)
+      procRegPair(newLocalGroupByHaving.toSeq, localGroupByHavingPosMaps)
 
       newLocalOrderBy.foreach {
         case Left(_)  => localOrderByPosMaps += CompProjMapping.empty
@@ -1450,13 +1615,30 @@ trait Generator extends Traversals with Transformers {
               case _             =>
                 Onions.toSeq(Onions.ALL)
             }
-            val aggCtx = !(cur.groupBy.isDefined && !newLocalFilters.isEmpty)
-            rewriteExprForServer(e, RewriteContext(onions, aggCtx), analysis1) match {
+            // TODO: is too conservative?
+            val canDoServer =
+              checkJoinClausesOnServer &&
+              checkFilterClauseOnServer &&
+              checkGroupByOnServer
+
+            println("--------")
+            println("checkGroupByExplicitlyRemoved: " + checkGroupByExplicitlyRemoved)
+            println("canDoServer: " + canDoServer)
+            println("e: " + e.sql)
+
+            rewriteExprForServer(
+              e,
+              RewriteContext(onions, true, !checkGroupByExplicitlyRemoved),
+              analysis1,
+              !canDoServer) match {
+
               case Left((expr, onion)) =>
-                val stmtIdx = projectionInsert(ExprProj(expr, a), onion, false)
+                println("got left: " + expr.sql)
+                val stmtIdx = projectionInsert(e, ExprProj(expr, a), onion, false)
                 projPosMaps += Left((stmtIdx, onion))
               case Right((optExpr, comp)) =>
                 assert(!optExpr.isDefined)
+                println("got right: " + comp)
                 val m = processClientComputation(comp)
                 projPosMaps += Right((comp, m))
             }
@@ -1465,7 +1647,8 @@ trait Generator extends Traversals with Transformers {
       }
 
       cur.copy(projections =
-        finalProjs.map(_._1).toSeq ++ (if (!finalProjs.isEmpty) Seq.empty else Seq(ExprProj(IntLiteral(1), None))))
+        finalProjs.map(_._2).toSeq ++
+        (if (!finalProjs.isEmpty) Seq.empty else Seq(ExprProj(IntLiteral(1), None))))
     }
 
     def wrapDecryptionNodeSeq(p: PlanNode, m: Seq[Int]): PlanNode = {
@@ -1484,10 +1667,43 @@ trait Generator extends Traversals with Transformers {
 
     val tdesc =
       if (finalProjs.isEmpty) Seq(PosDesc(PlainOnion, false))
-      else finalProjs.map { case (_, o, v) => PosDesc(o, v) }.toSeq
+      else finalProjs.map { case (_, _, o, v) => PosDesc(o, v) }.toSeq
 
-    // finalProjs is now useless, so clear it
-    finalProjs.clear
+    // --join filters
+    val stage0 =
+      verifyPlanNode(
+        newLocalJoinFilters
+          .zip(localJoinFilterPosMaps)
+          .foldLeft( RemoteSql(cur, tdesc, finalSubqueryRelationPlans.toSeq) : PlanNode ) {
+            case (acc, ((comp, rlnsToNull), mapping)) =>
+              if (rlnsToNull.isEmpty) {
+                // regular inner join, use LocalFilter
+                LocalFilter(comp.mkSqlExpr(mapping),
+                            comp.origExpr,
+                            wrapDecryptionNodeMap(acc, mapping),
+                            comp.subqueries.map(_._2))
+              } else {
+                // outer join
+
+                // map each projection (which should all be FieldIdents in this case)
+                // to the relation it references
+
+                val refs = finalProjs.map {
+                  case (FieldIdent(_, _, ColumnSymbol(reln, _, _), _), _, _, _) => reln
+                  case e =>
+                    throw new RuntimeException("should see FieldIdent instead of " + e)
+                }
+
+                val toNullVec =
+                  refs.zipWithIndex.flatMap { case (r, i) => if (rlnsToNull.contains(r)) Some(i) else None }
+
+                LocalOuterJoinFilter(comp.mkSqlExpr(mapping),
+                                     comp.origExpr,
+                                     toNullVec,
+                                     wrapDecryptionNodeMap(acc, mapping),
+                                     comp.subqueries.map(_._2))
+              }
+          })
 
     // --filters
 
@@ -1495,7 +1711,7 @@ trait Generator extends Traversals with Transformers {
       verifyPlanNode(
         newLocalFilters
           .zip(localFilterPosMaps)
-          .foldLeft( RemoteSql(cur, tdesc, finalSubqueryRelationPlans.toSeq) : PlanNode ) {
+          .foldLeft( stage0 : PlanNode ) {
             case (acc, (comp, mapping)) =>
               LocalFilter(comp.mkSqlExpr(mapping),
                           comp.origExpr,
@@ -1507,12 +1723,29 @@ trait Generator extends Traversals with Transformers {
 
     val stage2 =
       verifyPlanNode(
-        newLocalGroupBy.zip(localGroupByPosMaps).foldLeft( stage1 : PlanNode ) {
-          case (acc, (comp, mapping)) =>
-            LocalGroupFilter(comp.mkSqlExpr(mapping),
-                             comp.origExpr,
-                             wrapDecryptionNodeMap(acc, mapping),
-                             comp.subqueries.map(_._2))
+        if (newLocalGroupBy.isEmpty) {
+          newLocalGroupByHaving.zip(localGroupByHavingPosMaps).foldLeft( stage1 : PlanNode ) {
+            case (acc, (comp, mapping)) =>
+              LocalGroupFilter(comp.mkSqlExpr(mapping),
+                               comp.origExpr,
+                               wrapDecryptionNodeMap(acc, mapping),
+                               comp.subqueries.map(_._2))
+          }
+        } else {
+          assert(newLocalGroupBy.size == stmt.groupBy.get.keys.size)
+          assert(newLocalGroupByHaving.size == 0 ||
+                 newLocalGroupByHaving.size == 1)
+
+          LocalGroupBy(
+            newLocalGroupBy.zip(localGroupByPosMaps).map { case (c, m) => c.mkSqlExpr(m) },
+            newLocalGroupBy.zip(localGroupByPosMaps).map { case (c, _) => c.origExpr },
+            newLocalGroupByHaving.zip(localGroupByHavingPosMaps).headOption.map { case (c, m) => c.mkSqlExpr(m) },
+            newLocalGroupByHaving.zip(localGroupByHavingPosMaps).headOption.map { case (c, _) => c.origExpr },
+            wrapDecryptionNodeSeq(
+              stage1,
+              localGroupByPosMaps.flatMap(_.values) ++
+                localGroupByHavingPosMaps.flatMap(_.values)),
+            newLocalGroupByHaving.flatMap(_.subqueries.map(_._2)))
         })
 
     // --projections
