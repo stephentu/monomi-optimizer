@@ -2127,7 +2127,7 @@ trait Generator extends Traversals with Transformers {
     val o = generateOnionSets(stmt)
     val perms = CollectionUtils.powerSetMinusEmpty(o)
     // merge all perms, then unique
-    val candidates = perms.map(p => OnionSet.merge(p)).toSet.toSeq
+    val candidates = CollectionUtils.uniqueInOrder(perms.map(p => OnionSet.merge(p)))
     def fillOnionSet(o: OnionSet): OnionSet = {
       o.complete(stmt.ctx.defns)
     }
@@ -2135,9 +2135,10 @@ trait Generator extends Traversals with Transformers {
       EstimateContext(
         stmt.ctx.defns, o.getPrecomputedExprs, o.getRelationsWithHOMGroups.toSet)
     }
-    candidates.map(fillOnionSet).map {
-      o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(o))
-    }.toMap.toSeq
+    CollectionUtils.uniqueInOrderWithKey(
+      candidates.map(fillOnionSet).map {
+        o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(o))
+      })(_._1)
   }
 
   def generateOnionSets(stmt: SelectStmt): Seq[OnionSet] = {

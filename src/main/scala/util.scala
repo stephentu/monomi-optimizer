@@ -1,7 +1,7 @@
 package edu.mit.cryptdb
 
 import java.sql._
-import scala.collection.mutable.ArrayBuffer
+import scala.collection.mutable.{ ArrayBuffer, HashSet }
 
 object Conversions {
   implicit def rsWrap(rs: ResultSet) = new ResultSetWrapper(rs)
@@ -59,6 +59,21 @@ object CollectionUtils {
   def optSeq[T](s: Seq[Option[T]]): Option[Seq[T]] = {
     val s0 = s.flatten
     if (s0.size == s.size) Some(s0) else None
+  }
+
+  def uniqueInOrder[A](xs: Seq[A]): Seq[A] = {
+    uniqueInOrderWithKey(xs)((x: A) => x)
+  }
+
+  def uniqueInOrderWithKey[A, B](xs: Seq[A])(k: A => B): Seq[A] = {
+    val s = new HashSet[B]
+    xs.flatMap { case x =>
+      val key = k(x)
+      if (s.contains(key)) None else {
+        s += key
+        Some(x)
+      }
+    }
   }
 }
 
