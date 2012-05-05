@@ -68,7 +68,7 @@ object CostConstants {
 
 case class PosDesc(onion: OnionType, vectorCtx: Boolean)
 
-trait PlanNode extends Traversals {
+trait PlanNode extends Traversals with Transformers {
   // actual useful stuff
 
   def tupleDesc: Seq[PosDesc]
@@ -142,7 +142,9 @@ trait PlanNode extends Traversals {
           throw e
       }
     val res = r.map { rs =>
-      val planJson = JSON.parseFull(rs.getString(1))
+      val planJson =
+        // JSON parser is not thread safe
+        JSON.synchronized { JSON.parseFull(rs.getString(1)) }
       (for (L(l) <- planJson;
             M(m) = l.head;
             M(p) <- m.get("Plan")) yield extractInfoFromQueryPlan(p)).getOrElse(
@@ -270,7 +272,7 @@ case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
 }
 
 case class LocalOuterJoinFilter(
-  expr: SqlExpr, origExpr: SqlExpr, posToNull: Seq[Int],
+  expr: SqlExpr, origRelation: SqlRelation, posToNull: Seq[Int],
   child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
 
   {
@@ -287,7 +289,42 @@ case class LocalOuterJoinFilter(
       subqueries.map(c => childPretty(lvl, c)).mkString("")
   }
 
-  def costEstimate(ctx: EstimateContext) = throw new RuntimeException("TODO: impl")
+  def costEstimate(ctx: EstimateContext) = {
+    val ch = child.costEstimate(ctx)
+
+    // we need to find a way to map the original relation given to the modified
+    // relations given in the equivStmt.  we're currently using a heuristic
+    // now, looking at join patterns for equivalences. this probably doesn't
+    // capture all the cases, but since this operator is rarely needed for
+    // TPC-H, we don't bother optimizing this for now
+
+    sealed abstract trait JoinMode
+    case class PrimitiveJT(name: String, alias: Option[String]) extends JoinMode
+    case class MultiJT(left: JoinMode, right: JoinMode, tpe: JoinType) extends JoinMode
+
+    def relationToJoinMode(r: SqlRelation): JoinMode =
+      r match {
+        case TableRelationAST(n, a, _) => PrimitiveJT(n, a)
+        case JoinRelation(l, r, t, _, _) =>
+          MultiJT(relationToJoinMode(l),
+                  relationToJoinMode(r),
+                  t)
+        case _ => throw new RuntimeException("TODO: cannot handle now: " + r)
+      }
+
+    val origJoinMode = relationToJoinMode(origRelation)
+
+    val stmt = topDownTransformation(ch.equivStmt) {
+      case r: SqlRelation if (relationToJoinMode(r) == origJoinMode) =>
+        (Some(origRelation), false)
+      case _ => (None, true)
+    }.asInstanceOf[SelectStmt]
+
+    val (_, r, rr) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
+
+    // TODO: estimate the cost
+    Estimate(ch.cost, r, rr.getOrElse(1), stmt)
+  }
 }
 
 case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
@@ -374,7 +411,6 @@ case class LocalTransform(trfms: Seq[Either[Int, SqlExpr]], child: PlanNode) ext
   }
 }
 
-// class currently un-used
 case class LocalGroupBy(
   keys: Seq[SqlExpr], origKeys: Seq[SqlExpr],
   filter: Option[SqlExpr], origFilter: Option[SqlExpr],
@@ -389,7 +425,35 @@ case class LocalGroupBy(
   def pretty0(lvl: Int) =
     "* LocalGroupBy(keys = " + keys.map(_.sql).mkString(", ") + ", group_filter = " + filter.map(_.sql).getOrElse("none") + ")" + childPretty(lvl, child)
 
-  def costEstimate(ctx: EstimateContext) = throw new RuntimeException("unimpl")
+  def costEstimate(ctx: EstimateContext) = {
+    val ch = child.costEstimate(ctx)
+    assert(ch.equivStmt.groupBy.isEmpty)
+
+    val nameSet = origKeys.flatMap {
+      case FieldIdent(_, _, ColumnSymbol(tbl, col, _), _) =>
+        Some((tbl, col))
+      case _ => None
+    }.toSet
+
+    val stmt =
+      ch.equivStmt.copy(
+        // need to rewrite projections
+        projections = ch.equivStmt.projections.map {
+          case e @ ExprProj(fi @ FieldIdent(qual, name, _, _), _, _) =>
+            def wrapWithGroupConcat(e: SqlExpr) = GroupConcat(e, ",")
+            qual.flatMap { q =>
+              if (nameSet.contains((q, name))) Some(e) else None
+            }.getOrElse(e.copy(expr = wrapWithGroupConcat(fi)))
+
+          // TODO: not sure what to do in this case...
+          case e => e
+        },
+        groupBy = Some(SqlGroupBy(origKeys, origFilter)))
+
+    val (_, r, Some(rr)) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
+    // TODO: estimate the cost
+    Estimate(ch.cost, r, rr, stmt)
+  }
 }
 
 case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,

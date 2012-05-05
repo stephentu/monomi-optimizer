@@ -211,9 +211,9 @@ trait Generator extends Traversals with Transformers {
   private def generatePlanFromOnionSet0(
     stmt: SelectStmt, onionSet: OnionSet, encContext: EncContext): PlanNode = {
 
-    println("generatePlanFromOnionSet0()")
-    println("stmt: " + stmt.sql)
-    println("encContext: " + encContext)
+    //println("generatePlanFromOnionSet0()")
+    //println("stmt: " + stmt.sql)
+    //println("encContext: " + encContext)
 
     encContext match {
       case EncProj(o, _) =>
@@ -428,7 +428,8 @@ trait Generator extends Traversals with Transformers {
 
     // local filter + name of concrete {table,subquery} relations
     // to nullify (named in this context) if the filter fails (none if inner join)
-    val newLocalJoinFilters = new ArrayBuffer[(ClientComputation, Set[String])]
+    val newLocalJoinFilters
+      = new ArrayBuffer[(ClientComputation, Set[String], SqlRelation)]
     val localJoinFilterPosMaps = new ArrayBuffer[CompProjMapping]
 
     // are all join clauses resolved on the server?
@@ -1357,7 +1358,7 @@ trait Generator extends Traversals with Transformers {
                     case LeftJoin  => traverseForConcreteRelations(r)
                     case RightJoin => traverseForConcreteRelations(l)
                     case InnerJoin => Seq.empty
-                  }).map(extractNameFromConcreteRelation).toSet))
+                  }).map(extractNameFromConcreteRelation).toSet, j))
                 j.copy(left = l0, right = r0,
                        clause = optExpr.map(_._1).getOrElse( Eq(IntLiteral(1), IntLiteral(1)) ))
                  .copyWithContext(null)
@@ -1508,12 +1509,13 @@ trait Generator extends Traversals with Transformers {
       }
 
       val ccs0 =
-        fixupProjs(newLocalJoinFilters.map(_._1)).zip(newLocalJoinFilters.map(_._2))
-      newLocalJoinFilters.clear; newLocalJoinFilters ++= ccs0
-
+        fixupProjs(newLocalJoinFilters.map(_._1)).zip(newLocalJoinFilters.map(x => (x._2, x._3)))
+      newLocalJoinFilters.clear
+      newLocalJoinFilters ++= ccs0.map { case (a, (b, c)) => (a, b, c) }
 
       val ccs1 = fixupProjs(newLocalFilters)
-      newLocalFilters.clear; newLocalFilters ++= ccs1
+      newLocalFilters.clear
+      newLocalFilters ++= ccs1
 
     }
 
@@ -1678,14 +1680,14 @@ trait Generator extends Traversals with Transformers {
               checkFilterClauseOnServer &&
               checkGroupByOnServer
 
-            println("--------")
-            println("onions: " + onions)
-            println("checkGroupByExplicitlyRemoved: " + checkGroupByExplicitlyRemoved)
-            println("canDoServer: " + canDoServer)
-            println(" -- checkJoinClausesOnServer: " + checkJoinClausesOnServer)
-            println(" -- checkFilterClauseOnServer: " + checkFilterClauseOnServer)
-            println(" -- checkGroupByOnServer: " + checkGroupByOnServer)
-            println("e: " + e.sql)
+            //println("--------")
+            //println("onions: " + onions)
+            //println("checkGroupByExplicitlyRemoved: " + checkGroupByExplicitlyRemoved)
+            //println("canDoServer: " + canDoServer)
+            //println(" -- checkJoinClausesOnServer: " + checkJoinClausesOnServer)
+            //println(" -- checkFilterClauseOnServer: " + checkFilterClauseOnServer)
+            //println(" -- checkGroupByOnServer: " + checkGroupByOnServer)
+            //println("e: " + e.sql)
 
             rewriteExprForServer(
               e,
@@ -1696,12 +1698,12 @@ trait Generator extends Traversals with Transformers {
               if (!canDoServer) ServerProj else ServerAll) match {
 
               case Left((expr, onion)) =>
-                println("got left: " + expr.sql)
+                //println("got left: " + expr.sql)
                 val stmtIdx = projectionInsert(e, ExprProj(expr, a), onion, false)
                 projPosMaps += Left((stmtIdx, onion))
               case Right((optExpr, comp)) =>
                 assert(!optExpr.isDefined)
-                println("got right: " + comp)
+                //println("got right: " + comp)
                 val m = processClientComputation(comp)
                 projPosMaps += Right((comp, m))
             }
@@ -1738,7 +1740,7 @@ trait Generator extends Traversals with Transformers {
         newLocalJoinFilters
           .zip(localJoinFilterPosMaps)
           .foldLeft( RemoteSql(cur, tdesc, finalSubqueryRelationPlans.toSeq) : PlanNode ) {
-            case (acc, ((comp, rlnsToNull), mapping)) =>
+            case (acc, ((comp, rlnsToNull, reln), mapping)) =>
               if (rlnsToNull.isEmpty) {
                 // regular inner join, use LocalFilter
                 LocalFilter(comp.mkSqlExpr(mapping),
@@ -1761,7 +1763,7 @@ trait Generator extends Traversals with Transformers {
                   refs.zipWithIndex.flatMap { case (r, i) => if (rlnsToNull.contains(r)) Some(i) else None }
 
                 LocalOuterJoinFilter(comp.mkSqlExpr(mapping),
-                                     comp.origExpr,
+                                     reln,
                                      toNullVec,
                                      wrapDecryptionNodeMap(acc, mapping),
                                      comp.subqueries.map(_._2))
@@ -1974,9 +1976,9 @@ trait Generator extends Traversals with Transformers {
             stage5
           } else {
 
-            println("o: " + o)
-            println("stage5td: " + stage5td)
-            println("stage5: " + stage5.pretty)
+            //println("o: " + o)
+            //println("stage5td: " + stage5td)
+            //println("stage5: " + stage5.pretty)
 
             val dec =
               stage5td.map(_.onion).zip(o).zipWithIndex.flatMap {
