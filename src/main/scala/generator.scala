@@ -540,9 +540,14 @@ trait Generator extends Traversals with Transformers {
       def restrictTo(o: Int) = new RewriteContext(o, aggContext, respectStructure)
     }
 
+    sealed abstract trait ServerRewriteMode
+    case object ServerAll extends ServerRewriteMode
+    case object ServerProj extends ServerRewriteMode
+    case object ServerNone extends ServerRewriteMode
+
     def rewriteExprForServer(
       expr: SqlExpr, rewriteCtx: RewriteContext,
-      analysis: RewriteAnalysisContext, forceClient: Boolean = false):
+      analysis: RewriteAnalysisContext, serverRewriteMode: ServerRewriteMode):
       Either[(SqlExpr, OnionType), (Option[(SqlExpr, OnionType)], ClientComputation)] = {
 
       // this is just a placeholder in the tree
@@ -550,6 +555,27 @@ trait Generator extends Traversals with Transformers {
 
       def doTransform(e: SqlExpr, curRewriteCtx: RewriteContext):
         Either[(SqlExpr, OnionType), ClientComputation] = {
+
+        def rewriteExprNonRecursive(e: SqlExpr, curRewriteCtx: RewriteContext):
+          Option[(SqlExpr, OnionType)] = {
+          curRewriteCtx
+            .onions
+            .foldLeft( None : Option[(SqlExpr, OnionType)] ) { case (acc, o) =>
+              acc.orElse {
+                assert(BitUtils.onlyOne(o))
+                if (o == Onions.HOM_ROW_DESC) {
+                  getSupportedHOMRowDescExpr(e, analysis.subrels)
+                    .map { case (expr, hds) =>
+                      (expr, HomRowDescOnion(hds.map(_.table).toSet.head))
+                    }
+                } else {
+                  getSupportedExprConstraintAware(
+                    e, o, analysis.subrels,
+                    analysis.groupKeys, curRewriteCtx.aggContext)
+                }
+              }
+            }
+        }
 
         def doTransformServer(e: SqlExpr, curRewriteCtx: RewriteContext):
           Option[(SqlExpr, OnionType)] = {
@@ -814,24 +840,11 @@ trait Generator extends Traversals with Transformers {
               }
 
             case e: SqlExpr =>
-              curRewriteCtx
-                .onions
-                .flatMap { case o =>
-                  assert(BitUtils.onlyOne(o))
-                  if (o == Onions.HOM_ROW_DESC) {
-                    getSupportedHOMRowDescExpr(e, analysis.subrels)
-                      .map { case (expr, hds) =>
-                        (expr, HomRowDescOnion(hds.map(_.table).toSet.head))
-                      }
-                  } else {
-                    getSupportedExprConstraintAware(
-                      e, o, analysis.subrels,
-                      analysis.groupKeys, curRewriteCtx.aggContext)
-                  }
-                }.headOption.map { case (expr, ret) =>
+              rewriteExprNonRecursive(e, curRewriteCtx).map {
+                case (expr, ret) =>
                   onionRetVal.set(ret)
                   replaceWith(expr)
-                }.getOrElse(bailOut)
+              }.getOrElse(bailOut)
 
             case e => throw new Exception("should only have exprs under expr clause")
           }.asInstanceOf[SqlExpr]
@@ -1038,7 +1051,8 @@ trait Generator extends Traversals with Transformers {
             // need to be explicit about type here, otherwise scalac does not
             // handle properly
             Map[SqlExpr, (SqlExpr, Seq[(SqlExpr, SqlProj, OnionType, Boolean)])]
-            = if (!forceClient) mkOptimizations(e, curRewriteCtx) else Map.empty
+            = if (serverRewriteMode == ServerAll) mkOptimizations(e, curRewriteCtx)
+              else Map.empty
 
           val e0ForProj = topDownTransformContext(e, e.ctx) {
             // replace w/ something dumb, so we can gather fields w/o worrying about
@@ -1060,11 +1074,15 @@ trait Generator extends Traversals with Transformers {
             subselects.toSeq)
         }
 
-        if (forceClient) {
-          Right(doTransformClient(e, curRewriteCtx))
-        } else {
-          doTransformServer(e, curRewriteCtx).map(Left(_))
-            .getOrElse(Right(doTransformClient(e, curRewriteCtx)))
+        serverRewriteMode match {
+          case ServerAll =>
+            doTransformServer(e, curRewriteCtx).map(Left(_))
+              .getOrElse(Right(doTransformClient(e, curRewriteCtx)))
+          case ServerProj =>
+            rewriteExprNonRecursive(e, curRewriteCtx).map(Left(_))
+              .getOrElse(Right(doTransformClient(e, curRewriteCtx)))
+          case ServerNone =>
+            Right(doTransformClient(e, curRewriteCtx))
         }
       }
 
@@ -1214,9 +1232,18 @@ trait Generator extends Traversals with Transformers {
         }
 
         def buildForSelectStmt(stmt: SelectStmt): Unit = {
-          // TODO: handle relations
-          val SelectStmt(p, _, f, g, o, _, ctx) = stmt
+          val SelectStmt(p, r, f, g, o, _, ctx) = stmt
+
+          def processRelation(r: SqlRelation) =
+            r match {
+              //case SubqueryRelationAST(subq, _, _) => buildForSelectStmt(subq)
+              case JoinRelation(l, r, _, c, _)     =>
+                traverseContext(c, ctx, Onions.PLAIN, buildForSelectStmt)
+              case _                               => Seq.empty
+            }
+
           p.foreach(e => traverseContext(e, ctx, Onions.ALL,              buildForSelectStmt))
+          r.foreach(_.foreach(processRelation))
           f.foreach(e => traverseContext(e, ctx, Onions.PLAIN,            buildForSelectStmt))
           g.foreach(e => traverseContext(e, ctx, Onions.Comparable,       buildForSelectStmt))
           o.foreach(e => traverseContext(e, ctx, Onions.IEqualComparable, buildForSelectStmt))
@@ -1229,7 +1256,10 @@ trait Generator extends Traversals with Transformers {
          (generatePlanFromOnionSet0(
            subq.subquery,
            onionSet,
-           EncProj(encVec.map(x => if (x != 0) x else Onions.DET).toSeq, true)),
+           EncProj(
+             encVec.map(x =>
+               if (x != 0) x else (Onions.PLAIN | Onions.DET | Onions.OPE)).toSeq,
+             true)),
           subq.subquery))
       }.toMap
 
@@ -1273,17 +1303,17 @@ trait Generator extends Traversals with Transformers {
     val finalSubqueryRelationPlans = new ArrayBuffer[(RemoteMaterialize, SelectStmt)]
 
     cur = cur.relations.map { r =>
-      var forceClient = false
+      var mode: ServerRewriteMode = ServerAll
       def rewriteSqlRelation(s: SqlRelation): SqlRelation =
         s match {
           case t @ TableRelationAST(name, a, _) =>
             TableRelationAST(encTblName(name), a)
           case j @ JoinRelation(l, r, tpe, e, _)  =>
             rewriteExprForServer(e, RewriteContext(Seq(Onions.PLAIN), false, true),
-                                 analysis, forceClient) match {
+                                 analysis, mode) match {
               case Left((e0, onion)) =>
-                assert(onion == Onions.PLAIN)
-                assert(!forceClient)
+                assert(onion == PlainOnion)
+                assert(mode != ServerNone)
                 j.copy(left = rewriteSqlRelation(l),
                        right = rewriteSqlRelation(r),
                        clause = e0).copyWithContext(null)
@@ -1302,9 +1332,9 @@ trait Generator extends Traversals with Transformers {
                     case SubqueryRelationAST(_, alias, _) => alias
                     case _ => throw new RuntimeException("non concrete relation")
                   }
-                assert(optExpr.isEmpty || !forceClient)
+                assert(optExpr.isEmpty || mode != ServerNone)
                 // need to recurse first, to process children first
-                forceClient = true
+                mode = ServerNone
                 val l0 = rewriteSqlRelation(l)
                 val r0 = rewriteSqlRelation(r)
                 newLocalJoinFilters += ((comp, (tpe match {
@@ -1336,9 +1366,11 @@ trait Generator extends Traversals with Transformers {
     // --- filters --- //
     cur = cur
       .filter
-      .map(x => rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), false, true),
-                                     analysis, !checkCanDoFilterOnServer))
-      .map {
+      .map { x =>
+        val mode = if (checkCanDoFilterOnServer) ServerAll else ServerProj
+        rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), false, true),
+                             analysis, mode)
+      }.map {
         case Left((expr, onion)) =>
           assert(checkCanDoFilterOnServer)
           assert(onion == PlainOnion)
@@ -1374,7 +1406,12 @@ trait Generator extends Traversals with Transformers {
 
           val newHaving =
             gb.having.flatMap { x =>
-              rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), true, true), analysis) match {
+              rewriteExprForServer(
+                x,
+                RewriteContext(Seq(Onions.PLAIN), true, true),
+                analysis,
+                ServerAll) match {
+
                 case Left((expr, onion)) =>
                   assert(onion == PlainOnion)
                   Some(expr)
@@ -1397,7 +1434,9 @@ trait Generator extends Traversals with Transformers {
 
           // force client side execution
           gb.having.foreach { x =>
-            rewriteExprForServer(x, RewriteContext(Seq(Onions.PLAIN), true, false), analysis, true) match {
+            rewriteExprForServer(
+              x, RewriteContext(Seq(Onions.PLAIN), true, false), analysis, ServerNone)
+            match {
               case Left(_) => assert(false)
               case Right((optExpr, comp)) =>
                 assert(optExpr.isEmpty)
@@ -1406,7 +1445,9 @@ trait Generator extends Traversals with Transformers {
           }
 
           gb.keys.foreach { k =>
-            rewriteExprForServer(k, RewriteContext(Seq(Onions.PLAIN), true, false), analysis, true) match {
+            rewriteExprForServer(
+              k, RewriteContext(Seq(Onions.PLAIN), true, false), analysis, ServerNone)
+            match {
               case Left(_) => assert(false)
               case Right((optExpr, comp)) =>
                 assert(optExpr.isEmpty)
@@ -1415,7 +1456,6 @@ trait Generator extends Traversals with Transformers {
           }
 
           None
-
         }
       })
     }
@@ -1510,11 +1550,12 @@ trait Generator extends Traversals with Transformers {
               getKeyInfoForExpr(k)
                 .map { case (f, fi, o) => Right(mkClientCompFromKeyInfo(f, fi, o)) }
                 .getOrElse {
+                  val mode = if (groupByRemoved) ServerNone else ServerAll
                   // TODO: why do we need to resolveAliases() here??
                   rewriteExprForServer(
                     resolveAliases(k),
                     RewriteContext(Seq(Onions.OPE), true, !groupByRemoved),
-                    analysis1, groupByRemoved) match {
+                    analysis1, mode) match {
 
                     case Left((expr, onion)) => Right(mkClientCompFromKeyInfo(k, expr, onion))
                     case Right((None, comp)) => Right(comp)
@@ -1622,15 +1663,21 @@ trait Generator extends Traversals with Transformers {
               checkGroupByOnServer
 
             println("--------")
+            println("onions: " + onions)
             println("checkGroupByExplicitlyRemoved: " + checkGroupByExplicitlyRemoved)
             println("canDoServer: " + canDoServer)
+            println(" -- checkJoinClausesOnServer: " + checkJoinClausesOnServer)
+            println(" -- checkFilterClauseOnServer: " + checkFilterClauseOnServer)
+            println(" -- checkGroupByOnServer: " + checkGroupByOnServer)
             println("e: " + e.sql)
 
             rewriteExprForServer(
               e,
-              RewriteContext(onions, true, !checkGroupByExplicitlyRemoved),
+              RewriteContext(
+                onions, true,
+                checkCanDoFilterOnServer && !checkGroupByExplicitlyRemoved),
               analysis1,
-              !canDoServer) match {
+              if (!canDoServer) ServerProj else ServerAll) match {
 
               case Left((expr, onion)) =>
                 println("got left: " + expr.sql)
@@ -1911,9 +1958,9 @@ trait Generator extends Traversals with Transformers {
             stage5
           } else {
 
-            //println("o: " + o)
-            //println("stage5td: " + stage5td)
-            //println("stage5: " + stage5.pretty)
+            println("o: " + o)
+            println("stage5td: " + stage5td)
+            println("stage5: " + stage5.pretty)
 
             val dec =
               stage5td.map(_.onion).zip(o).zipWithIndex.flatMap {
@@ -2167,7 +2214,10 @@ trait Generator extends Traversals with Transformers {
       def processRelation(r: SqlRelation): Seq[OnionSet] =
         r match {
           case SubqueryRelationAST(subq, _, _) => buildForSelectStmt(subq, bootstrap.map(_.copy))
-          case JoinRelation(l, r, _, _, _)     => processRelation(l) ++ processRelation(r)
+          case JoinRelation(l, r, _, c, _)     =>
+            val c0 =
+              traverseContext(c, ctx, Onions.PLAIN, bootstrap.map(_.copy), buildForSelectStmt)
+            c0 ++ processRelation(l) ++ processRelation(r)
           case _                               => Seq.empty
         }
       val s1 = r.map(_.flatMap(processRelation))

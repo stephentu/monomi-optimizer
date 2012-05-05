@@ -281,7 +281,8 @@ case class LocalOuterJoinFilter(
 
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) = {
-    "* LocalOuterJoinFilter(filter = " + expr.sql + ")" +
+    "* LocalOuterJoinFilter(filter = " + expr.sql +
+      ", posToNull = " + posToNull + ")" +
       childPretty(lvl, child) +
       subqueries.map(c => childPretty(lvl, c)).mkString("")
   }
@@ -384,7 +385,7 @@ case class LocalGroupBy(
     assert(filter.isDefined == origFilter.isDefined)
   }
 
-  def tupleDesc = throw new RuntimeException("unimpl")
+  def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
     "* LocalGroupBy(keys = " + keys.map(_.sql).mkString(", ") + ", group_filter = " + filter.map(_.sql).getOrElse("none") + ")" + childPretty(lvl, child)
 
