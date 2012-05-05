@@ -1252,13 +1252,29 @@ trait Generator extends Traversals with Transformers {
         // TODO: not the most efficient implementation
         buildForSelectStmt(cur)
 
+        def checkCanExposePlain(e: SqlExpr) =
+          e match {
+            case _: CountStar => true
+            case _: CountExpr => true
+            case _ => false
+          }
+
         (subq.alias,
          (generatePlanFromOnionSet0(
            subq.subquery,
            onionSet,
            EncProj(
-             encVec.map(x =>
-               if (x != 0) x else (Onions.PLAIN | Onions.DET | Onions.OPE)).toSeq,
+             encVec.zip(subq.subquery.ctx.projections).map {
+                // TODO: wildcard projections
+               case (x, NamedProjection(_, e, _)) =>
+                 if (x != 0) x else {
+                   if (checkCanExposePlain(e)) {
+                     (Onions.PLAIN | Onions.DET | Onions.OPE)
+                   } else {
+                     (Onions.DET | Onions.OPE)
+                   }
+                 }
+             }.toSeq,
              true)),
           subq.subquery))
       }.toMap
