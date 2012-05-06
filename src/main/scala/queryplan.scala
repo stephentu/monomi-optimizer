@@ -128,7 +128,7 @@ trait PlanNode extends Traversals with Transformers {
     }
 
     val sql = stmt.sqlFromDialect(PostgresDialect)
-    //println("SQL: " + sql)
+    println("SQL: " + sql)
 
     import Conversions._
 
