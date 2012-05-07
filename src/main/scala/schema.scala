@@ -44,9 +44,11 @@ case class TableStats(
   row_count: Long,
   column_stats: Map[String, ColumnStats])
 
-class Statistics(val stats: Map[String, TableStats], val dbconn: Option[DbConn]) {
-
+object Statistics {
+  final val empty = new Statistics(Map.empty, None)
 }
+
+class Statistics(val stats: Map[String, TableStats], val dbconn: Option[DbConn])
 
 trait DbConn {
   def getConn: Connection

@@ -112,6 +112,7 @@ trait PgQueryPlanExtractor {
         yield (child("Parent Relationship").asInstanceOf[String], extractInfoFromQueryPlan(child))
 
       val outerChildren = childrenNodes.filter(_._1 == "Outer").map(_._2)
+      val innerOuterChildren = childrenNodes.filter(x => x._1 == "Outer" || x._1 == "Inner").map(_._2)
 
       val Some((totalCost, planRows)) = for (
         D(totalCost) <- node.get("Total Cost");
@@ -128,12 +129,33 @@ trait PgQueryPlanExtractor {
       }
 
       val userAggMapFold = noOverwriteFoldLeft(childrenNodes.map(_._2).map(_._4).toSeq)
-      val selMapFold = noOverwriteFoldLeft(outerChildren.map(_._5).toSeq)
+      val selMapFold = noOverwriteFoldLeft(innerOuterChildren.map(_._5).toSeq)
 
-      node("Node Type") match {
+      val tpe = node("Node Type")
+
+      tpe match {
         case "Aggregate" =>
           // must have outer child
           assert(!outerChildren.isEmpty)
+
+          // compute the values that the aggs will have to experience, based
+          // on the first outer child
+          val (rOuter, rrOuter) = outerChildren.head match { case (_, r, rr, _, _) => (r, rr) }
+
+          // see if it has a hom_agg aggregate
+          // TODO: this is quite rigid.. we should REALLY be using our
+          // SQL parser to parse this expr, except it doesn't support the
+          // postgres extension ::cast syntax...
+          val HomAggRegex = "hom_agg\\(.*, '[a-zA-Z_]+'::character varying, \\d+, '([a-zA-Z0-9_]+)'::character varying\\)".r
+          val aggs =
+            (for (L(fields) <- node.get("Output").toList;
+                  S(expr)   <- fields) yield {
+              expr match {
+                case HomAggRegex(id) =>
+                  Some((id, UserAggDesc(rOuter, rrOuter, selMapFold)))
+                case _ => None
+              }
+            }).flatten.toMap
 
           // compute the values of THIS node based on the first outer child
           val (r, rr) = outerChildren.head match {
@@ -144,34 +166,38 @@ trait PgQueryPlanExtractor {
                (planRows, Some(math.ceil(rows.toDouble / planRows.toDouble * rowsPerRow).toLong))
           }
 
-          // see if it has a hom_agg aggregate
-          // TODO: this is quite rigid.. we should REALLY be using our
-          // SQL parser to parse this expr, except it doesn't support the
-          // postgres extension ::cast syntax...
-          val HomAggRegex =
-            "hom_agg\\(0::numeric, '[a-zA-Z_]+'::character varying, \\d+, '([a-zA-Z0-9_]+)'::character varying\\)".r
-          val aggs =
-            (for (L(fields) <- node.get("Output").toList;
-                  S(expr)   <- fields) yield {
-              expr match {
-                case HomAggRegex(id) =>
-                  Some((id, UserAggDesc(r, rr, selMapFold)))
-                case _ => None
-              }
-            }).flatten.toMap
-
           (totalCost, r, rr, noOverwriteFoldLeft(Seq(userAggMapFold, aggs)), selMapFold)
 
-        case t =>
-          val m: Map[String, Long] =
-            if (t == "Seq Scan") {
-              val S(reln) = node("Relation Name")
-              Map(reln -> planRows)
-            } else Map.empty
+        case "Seq Scan" | "Index Scan" =>
+          assert(innerOuterChildren.isEmpty) // seq scans don't have children?
 
+          val S(reln) = node("Relation Name")
+
+          // see if we have searchswp udf
+          // once again, this is fragile, use SQL parser in future
+          val SearchSWPRegex =
+            "searchswp\\([a-zA-Z0-9_.]+, '[^']*'::character varying, NULL::character varying, '([a-zA-Z0-9_]+)'::character varying\\)".r
+
+          val filterName = if (tpe == "Seq Scan") "Filter" else "Index Cond"
+
+          val m = node.get("Filter").map { case S(f) =>
+            SearchSWPRegex.findAllIn(f).matchData.map { m =>
+              // need to estimate r from the relation
+              val (_, r, _, _) = extractCostFromDB("SELECT * FROM %s".format(reln), dbconn)
+              val id = m.group(1)
+              ((id, UserAggDesc(r, None, Map.empty)))
+            }.toMap
+          }.getOrElse(Map.empty)
+
+          val (r, rr) = (planRows, None)
+
+          (totalCost, r, rr,
+           noOverwriteFoldLeft(Seq(userAggMapFold, m)), Map(reln -> planRows))
+
+        case t =>
           // simple case, just read from this node only
           (totalCost, planRows, outerChildren.headOption.flatMap(_._3),
-           userAggMapFold, selMapFold ++ m)
+           userAggMapFold, selMapFold)
       }
     }
 
@@ -322,7 +348,12 @@ case class RemoteSql(stmt: SelectStmt,
     def topDownTraverseCtx(stmt: SelectStmt): Unit = {
       topDownTraversal(stmt) {
 
-        case AggCall(
+        case f @ FunctionCall("searchSWP", Seq(_, _, _, StringLiteral(id, _)), _) =>
+          aggCost += m(id).rows * CostConstants.secToPGUnit(CostConstants.SwpSearchSecPerOp)
+          //println("call " + f.sql + " stats: " + m(id))
+          false
+
+        case a @ AggCall(
           "hom_agg",
           Seq(_, StringLiteral(tbl, _), IntLiteral(grp, _), StringLiteral(id, _)),
           sqlCtx) =>
@@ -358,7 +389,7 @@ case class RemoteSql(stmt: SelectStmt,
                   val corr = followProjs(expr) match {
                     case FieldIdent(_, _, ColumnSymbol(reln, col, _), _) =>
                       stats.stats.get(reln)
-                        .flatMap(_.column_stats.get(col).map(_.correlation))
+                        .flatMap(_.column_stats.get(col).map(x => math.abs(x.correlation)))
                         .getOrElse(DefaultGuess)
                     case _ => DefaultGuess // see above note
                   }
@@ -423,6 +454,8 @@ case class RemoteSql(stmt: SelectStmt,
           // use totalScore to scale us between min/max cost
           val scaledCost = math.min(minCost / totalScore, maxCost)
 
+          //println("call " + a.sql + " stats: " + m(id))
+
           // add to total cost
           aggCost += (readCost + scaledCost)
 
@@ -438,6 +471,8 @@ case class RemoteSql(stmt: SelectStmt,
           true
       }
     }
+
+    topDownTraverseCtx(reverseStmt0)
 
     // data xfer to client cost
     val td = tupleDesc
