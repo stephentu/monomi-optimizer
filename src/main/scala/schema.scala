@@ -40,8 +40,11 @@ case class ColumnStats(
   most_common_freqs: Option[Seq[Double]],
   histogram_bounds: Option[Seq[_]])
 
-class Statistics(val stats: Map[String, Map[String, ColumnStats]],
-                 val dbconn: Option[DbConn]) {
+case class TableStats(
+  row_count: Long,
+  column_stats: Map[String, ColumnStats])
+
+class Statistics(val stats: Map[String, TableStats], val dbconn: Option[DbConn]) {
 
 }
 
@@ -60,7 +63,9 @@ trait Schema {
   def loadStats(): Statistics
 }
 
-class PgSchema(hostname: String, port: Int, db: String, props: Properties) extends Schema {
+class PgSchema(hostname: String, port: Int, db: String, props: Properties)
+extends Schema with PgQueryPlanExtractor {
+
   import Conversions._
 
   private val _dbconn = new PgDbConn(hostname, port, db, props)
@@ -251,7 +256,10 @@ from pg_stats
 where schemaname = 'public' and tablename = ?
 """)
 
-    val ret = new Statistics(schema.defns.map { case (name, cols) =>
+    val ret = new Statistics(
+      schema.defns.map { case (name, cols) =>
+        // get an estimate of the row count
+        val (_, rows, _, _) = extractCostFromDB("SELECT * FROM %s".format(name), _dbconn)
         val typeMap = cols.map(tc => (tc.name, tc.tpe)).toMap
         s.setString(1, name)
         val r = s.executeQuery
@@ -274,8 +282,6 @@ where schemaname = 'public' and tablename = ?
 
           val most_common_vals = Option(rs.getObject(5).asInstanceOf[PGobject]).map(pg => mkSeq(pg, typeMap(attname)))
           val most_common_freqs = Option(rs.getArray(6)).map(_.getArray.asInstanceOf[Array[java.lang.Float]].map(_.toDouble).toSeq)
-
-          println("name: " + name + ", col: " + attname)
           val histogram_bounds = Option(rs.getObject(7).asInstanceOf[PGobject]).map(pg => mkSeq(pg, typeMap(attname)))
 
           (attname, ColumnStats(null_frac, n_distinct, correlation,
@@ -283,7 +289,7 @@ where schemaname = 'public' and tablename = ?
                                 histogram_bounds))
         }.toMap
 
-        (name, cmap)
+        (name, TableStats(rows, cmap))
       }.toMap, Some(_dbconn))
     s.close()
     ret

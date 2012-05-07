@@ -135,7 +135,8 @@ class OnionSet {
     }))
   }
 
-  def getRelationsWithHOMGroups: Seq[String] = packedHOMs.keys.toSeq
+  def getHomGroups: Map[String, Seq[Seq[SqlExpr]]] =
+    packedHOMs.map { case (k, v) => (k, v.map(_.toSeq).toSeq) }.toMap
 
   // this does not include hom groups
   def getPrecomputedExprs: Map[String, SqlExpr] = {

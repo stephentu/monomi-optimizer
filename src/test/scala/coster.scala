@@ -16,10 +16,11 @@ class CosterSpec extends Specification {
     val r = parser.parse(q)
     val pg = new PgSchema("localhost", 5432, "tpch_0_05", _props)
     val schema = pg.loadSchema()
+    val stats = pg.loadStats()
     val s0 = resolver.resolve(r.get, schema)
     val plans = generator.generateCandidatePlans(s0)
     plans must not be empty
-    plans.map { case (p, c) => p.costEstimate(c) }
+    plans.map { case (p, c) => p.costEstimate(c, stats) }
   }
 
   "Coster" should {

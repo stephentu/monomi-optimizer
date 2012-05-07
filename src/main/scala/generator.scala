@@ -935,7 +935,7 @@ trait Generator extends Traversals with Transformers {
                     translateForUniqueHomID(f, false).map {
                       case (f0, hd) if !hd.isEmpty =>
                         val hd0 = pickOne(hd)
-                        (FunctionCall("hom_agg", Seq(f0, StringLiteral(hd0.table), IntLiteral(hd0.group))), Seq(hd0))
+                        (AggCall("hom_agg", Seq(f0, StringLiteral(hd0.table), IntLiteral(hd0.group))), Seq(hd0))
                     }
 
                   case CaseWhenExpr(cases, Some(d), _) =>
@@ -2135,7 +2135,7 @@ trait Generator extends Traversals with Transformers {
     }
     def estimateContextFromOnionSet(o: OnionSet): EstimateContext = {
       EstimateContext(
-        stmt.ctx.defns, o.getPrecomputedExprs, o.getRelationsWithHOMGroups.toSet)
+        stmt.ctx.defns, o.getPrecomputedExprs, o.getHomGroups)
     }
     CollectionUtils.uniqueInOrderWithKey(
       candidates.map(fillOnionSet).map {
