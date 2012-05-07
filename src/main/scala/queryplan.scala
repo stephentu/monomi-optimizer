@@ -17,7 +17,7 @@ case class EstimateContext(
   defns: Definitions,
   precomputed: Map[String, SqlExpr],
   homGroups: Map[String, Seq[Seq[SqlExpr]]]) {
-  private val _idGen = new NameGenerator("fresh$")
+  private val _idGen = new NameGenerator("fresh_")
   @inline def uniqueId(): String = _idGen.uniqueId()
 }
 
@@ -149,7 +149,7 @@ trait PgQueryPlanExtractor {
           // SQL parser to parse this expr, except it doesn't support the
           // postgres extension ::cast syntax...
           val HomAggRegex =
-            "hom_agg\\(0::numeric, '[a-zA-Z_]+'::character varying, \\d+, '([a-zA-Z0-9$]+)'::character varying\\)".r
+            "hom_agg\\(0::numeric, '[a-zA-Z_]+'::character varying, \\d+, '([a-zA-Z0-9_]+)'::character varying\\)".r
           val aggs =
             (for (L(fields) <- node.get("Output").toList;
                   S(expr)   <- fields) yield {
@@ -313,6 +313,9 @@ case class RemoteSql(stmt: SelectStmt,
 
     // server query execution cost
     val (c, r, rr, m) = extractCostFromDB(reverseStmt0, ctx.defns.dbconn.get)
+
+    //println("sql: " + reverseStmt.sqlFromDialect(PostgresDialect))
+    //println("m: " + m)
 
     var aggCost: Double = 0.0
 

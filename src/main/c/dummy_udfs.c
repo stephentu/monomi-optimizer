@@ -2,9 +2,7 @@
 
 // these are the dummy UDFs needed to give postgres valid queries
 
-// create function searchswp(a0 varchar, a1 varchar, a2 varchar, a3 int)
-//    returns boolean language C as '/Users/stephentu/scala-sql/src/main/c/dummy_udfs.so';
-// create function searchswp(a0 varchar, a1 varchar, a2 varchar, a3 int, a4 varchar)
+// create function searchswp(a0 varchar, a1 varchar, a2 varchar, a3 varchar)
 //    returns boolean language C as '/Users/stephentu/scala-sql/src/main/c/dummy_udfs.so';
 //
 // create function dumb_add(a0 int, a1 decimal, a2 varchar, a3 int)
