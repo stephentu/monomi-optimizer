@@ -41,8 +41,41 @@ object CollectionUtils {
       Seq(Seq(s.head) ++ x, x)
     })
   }
+
   def powerSetMinusEmpty[T](s: Seq[T]): Seq[Seq[T]] =
     powerSet(s).filterNot(_.isEmpty)
+
+  def allPossibleGroupings[T](s: Set[T]): Set[ Set[Set[T]] ] = {
+
+    def recur(elems: Set[T], buckets: Int): Set[ Set[Set[T]] ] = {
+      assert(!elems.isEmpty)
+      assert(buckets >= 1)
+      assert(buckets <= elems.size)
+
+      if (buckets == 1) {
+        Set( Set( elems ) )
+      } else {
+        val maxElemsInBucket = elems.size - (buckets - 1)
+
+        // generate powerset of the elems, and only consider
+        // those (unique) sets with <= maxElemsInBucket
+        val ps =
+          powerSetMinusEmpty(elems.toSeq).map(_.toSet).toSet.filter(_.size <= maxElemsInBucket)
+
+        ps.flatMap { s =>
+          val remaining = elems -- s
+          val x = recur(remaining, buckets - 1)
+          x.map { _ ++ Set(s) }
+        }
+      }
+    }
+
+    (1 to s.size).flatMap(b => recur(s, b)).toSet
+  }
+
+  def crossProduct[A, B](as: Seq[A], bs: Seq[B]): Seq[(A, B)] = {
+    for (a <- as; b <- bs) yield (a, b)
+  }
 
   def optAnd2[T0, T1](t0: Option[T0], t1: => Option[T1]): Option[(T0, T1)] = {
     if (t0.isDefined) {

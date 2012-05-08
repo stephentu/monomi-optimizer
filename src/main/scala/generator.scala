@@ -2125,21 +2125,152 @@ trait Generator extends Traversals with Transformers {
     }
   }
 
-  def generateCandidatePlans(stmt: SelectStmt): Seq[(PlanNode, EstimateContext)] = {
+  type CandidatePlans = Seq[(PlanNode, EstimateContext)]
+
+  // return value 1-to-1 with input stmts
+  def generateCandidatePlans(stmts: Seq[SelectStmt]): Seq[CandidatePlans] = {
+    val onionSets = stmts.map(generateOnionSets)
+
+    val perms = onionSets.map(g => CollectionUtils.powerSetMinusEmpty(g.map(_.withoutGroups)))
+    val candidates = perms.map(p => CollectionUtils.uniqueInOrder(p.map(OnionSet.merge(_))))
+
+    // for each relation
+    //   for each query
+    //     build an global index with all the unique group expressions needed
+    //     mapped back to the query
+    //
+    //     generate all possible group splits
+    //
+    //     greedily merge group splits which only cover one relation together
+    //
+    // for each query
+    //   generate cross product of all groups for each relation needed
+    //   in group context
+    //
+    //   cross the groups cross product with the onion power set
+    //
+    //   take the previous list + onion power set (w/o groups), and invoke
+    //   generatePlanFromOnionSet() w/ each elem in the list
+
+    val perQueryExprIndex = onionSets.map { os =>
+      val maps = os.map(_.getHomGroups.map { case (k, v) =>
+        (k, v.flatMap(_.toSet).toSet)
+      })
+
+      // merge maps accordingly
+      maps.foldLeft( Map.empty : Map[String, Set[SqlExpr]] ) {
+        case (acc, m) =>
+          acc ++ m.map { case (k, v) =>
+            (k, acc.get(k).getOrElse(Set.empty) ++ v)
+          }
+      }
+    }
+
+    // build global index, assigning a unique number (per relation)
+    // to each unique expression amongst all queries
+    val globalExprIndex = new HashMap[String, HashMap[SqlExpr, Int]]
+
+    // Seq[Map[String, Set[Int]]]
+    val perQueryInterestMap = perQueryExprIndex.map { m =>
+      m.map { case (k, v) =>
+        val relIdx = globalExprIndex.getOrElseUpdate(k, new HashMap[SqlExpr, Int])
+        (k, v.map { expr => relIdx.getOrElseUpdate(expr, relIdx.size) }.toSet)
+      }.toMap
+    }
+
+    // build a query index (mapping per relation ID to set of queries which use it)
+    val queryReverseIndex /* Map[String, Map[Int, Set[Int]]] */ =
+      perQueryInterestMap.zipWithIndex.foldLeft( Map.empty : Map[String, Map[Int, Set[Int]]] ) {
+        case (acc, (m, idx)) =>
+          acc ++ m.map { case (k, v) =>
+            val accMap = acc.get(k).getOrElse(Map.empty)
+            (k, accMap ++ v.map {
+              exprId => (exprId, accMap.get(exprId).getOrElse(Set.empty) ++ Set(idx)) })
+          }
+      }
+
+    val globalExprSplits /* Map[String, Set[ Set[Set[Int]] ]] */ =
+      globalExprIndex.map { case (k, v) =>
+        assert(v.values.size == v.values.toSet.size)
+        val exprs = v.values.toSet
+        val allNonDupGroupings = CollectionUtils.allPossibleGroupings(exprs)
+
+        val relnReverseIdx = queryReverseIndex(k)
+
+        // ret contains the query id (if Some(_))
+        def groupForOnlyOneQuery(s: Set[Int]): Option[Int] = {
+          val interest = s.flatMap(relnReverseIdx)
+          assert(!interest.isEmpty)
+          if (interest.size == 1) Some(interest.head) else None
+        }
+
+        // greedy merging for each group
+        (k, allNonDupGroupings.map { grouping /* Set[Set[Int]] */ =>
+          val gseq = grouping.toIndexedSeq
+          val gmap = gseq.zipWithIndex.flatMap { case (g, i) =>
+            groupForOnlyOneQuery(g).map(q => (q, i))
+          }.groupBy(x => x).map { case (k, v) => (k, v.map(_._2))}.toMap
+
+          val ungrouped = (0 until gseq.size).toSet -- gmap.values.flatten.toSet
+
+          ungrouped.map(gseq(_)).toSet ++ gmap.values.map(ii => ii.flatMap(gseq(_)).toSet).toSet
+        })
+      }
+
+    val revGlobalExprIndex = globalExprIndex.map { case (k, v) =>
+      (k, v.map { case (k, v) => (v, k) }.toMap)
+    }.toMap
+
+    stmts.zip(candidates).zip(perQueryInterestMap).zipWithIndex.map {
+      case (((stmt, cands), im), idx) if im.isEmpty =>
+        CollectionUtils.uniqueInOrderWithKey(
+          cands.map(c => fillOnionSet(stmt, c)).map {
+            o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(stmt, o))
+          })(_._1)
+
+      case (((stmt, cands), im), idx) =>
+
+        if (im.keys.size > 1)
+          throw new RuntimeException("TODO: implement handling > 1 group relation")
+
+        val reln = im.keys.head
+        val exprSplits /* Seq[ Seq[Seq[SqlExpr]] ] */ =
+          globalExprSplits(reln).toSeq.map { split =>
+            split.toSeq.map { group =>
+              group.toSeq.map(i => revGlobalExprIndex(reln)(i))
+            }
+          }
+
+        val oSets =
+          (for (split <- exprSplits; cand <- cands) yield {
+            cand.withGroups(Map(reln -> split))
+          }) ++ cands
+
+        CollectionUtils.uniqueInOrderWithKey(
+          oSets.map(c => fillOnionSet(stmt, c)).map {
+            o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(stmt, o))
+          })(_._1)
+    }
+  }
+
+  @inline
+  private def fillOnionSet(stmt: SelectStmt, o: OnionSet): OnionSet = {
+    o.complete(stmt.ctx.defns)
+  }
+
+  @inline
+  private def estimateContextFromOnionSet(stmt: SelectStmt, o: OnionSet): EstimateContext = {
+    EstimateContext(stmt.ctx.defns, o.getPrecomputedExprs, o.getHomGroups)
+  }
+
+  def generateCandidatePlans(stmt: SelectStmt): CandidatePlans = {
     val o = generateOnionSets(stmt)
     val perms = CollectionUtils.powerSetMinusEmpty(o)
     // merge all perms, then unique
     val candidates = CollectionUtils.uniqueInOrder(perms.map(p => OnionSet.merge(p)))
-    def fillOnionSet(o: OnionSet): OnionSet = {
-      o.complete(stmt.ctx.defns)
-    }
-    def estimateContextFromOnionSet(o: OnionSet): EstimateContext = {
-      EstimateContext(
-        stmt.ctx.defns, o.getPrecomputedExprs, o.getHomGroups)
-    }
     CollectionUtils.uniqueInOrderWithKey(
-      candidates.map(fillOnionSet).map {
-        o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(o))
+      candidates.map(c => fillOnionSet(stmt, c)).map {
+        o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(stmt, o))
       })(_._1)
   }
 

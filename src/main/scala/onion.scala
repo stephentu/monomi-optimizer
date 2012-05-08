@@ -135,6 +135,20 @@ class OnionSet {
     }))
   }
 
+  def withoutGroups: OnionSet = {
+    val ret = new OnionSet
+    ret.opts ++= opts
+    ret
+  }
+
+  def withGroups(groups: Map[String, Seq[Seq[SqlExpr]]]): OnionSet = {
+    val ret = withoutGroups
+    ret.packedHOMs ++= groups.map { case (k, v) =>
+      (k, ArrayBuffer( v.map( ss => ArrayBuffer(ss:_*) ) : _* ))
+    }
+    ret
+  }
+
   def getHomGroups: Map[String, Seq[Seq[SqlExpr]]] =
     packedHOMs.map { case (k, v) => (k, v.map(_.toSeq).toSeq) }.toMap
 
