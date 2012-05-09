@@ -1,5 +1,6 @@
 package edu.mit.cryptdb
 
+import tpch._
 import org.specs2.mutable._
 
 class GeneratorSpec extends Specification {

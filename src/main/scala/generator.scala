@@ -901,6 +901,7 @@ trait Generator extends Traversals with Transformers {
 
               def pickOne(hd: Seq[HomDesc]): HomDesc = {
                 assert(!hd.isEmpty)
+                //println("hd: " + hd)
                 // need to pick which homdesc to use, based on given analysis preference
                 val m = hd.map(_.group).toSet
                 assert( hd.map(_.table).toSet.size == 1 )
@@ -911,7 +912,7 @@ trait Generator extends Traversals with Transformers {
                         acc.orElse(if (m.contains(elem)) Some(elem) else None)
                     }
                   }.getOrElse(0)
-                hd(useIdx)
+                hd.filter(_.group == useIdx).head
               }
 
               def findCommonHomDesc(hds: Seq[Seq[HomDesc]]): Seq[HomDesc] = {
@@ -1309,6 +1310,16 @@ trait Generator extends Traversals with Transformers {
         false
       case _ => true
     }
+
+    //println("onionSet: " + onionSet)
+    //println("hom groups:")
+    //onionSet.getHomGroups.foreach {
+    //  case (k, v) =>
+    //    println("  " + k + ":")
+    //    v.foreach(x => println("    " + x.map(_.sql).mkString(", ")))
+    //}
+    //println("homGroupChoices: " + homGroupChoices)
+    //println("prefs: " + buildHomGroupPreference(homGroupChoices.toSeq))
 
     val analysis =
       RewriteAnalysisContext(subqueryRelationPlans,
@@ -2129,10 +2140,25 @@ trait Generator extends Traversals with Transformers {
 
   // return value 1-to-1 with input stmts
   def generateCandidatePlans(stmts: Seq[SelectStmt]): Seq[CandidatePlans] = {
-    val onionSets = stmts.map(generateOnionSets)
+    val onionSets /* Seq[Seq[OnionSet]] */ = stmts.map(generateOnionSets)
 
-    val perms = onionSets.map(g => CollectionUtils.powerSetMinusEmpty(g.map(_.withoutGroups)))
-    val candidates = perms.map(p => CollectionUtils.uniqueInOrder(p.map(OnionSet.merge(_))))
+    val perms /* Seq[ Seq[Seq[(Set[String], OnionSet)]] ] */ =
+      onionSets.map { os /* Seq[OnionSet] */ =>
+        CollectionUtils.powerSetMinusEmpty(
+          os.map(x => (x.groupsForRelations.toSet, x.withoutGroups)))
+      }
+
+    // the candidates don't have groups in them, but have
+    // the set of relations for which it had created a HOM
+    // group for
+
+    val candidates /* Seq[ Seq[(Set[String], OnionSet)] ] */ =
+      perms.map { p /* Seq[Seq[(Set[String], OnionSet)]] */ =>
+        val merged = p.map { g /* Seq[(Set[String], OnionSet)] */ =>
+          (g.flatMap(_._1), OnionSet.mergeSeq(g.map(_._2)))
+        }
+        CollectionUtils.uniqueInOrderWithKey(merged)(_._2)
+      }
 
     // for each relation
     //   for each query
@@ -2166,6 +2192,15 @@ trait Generator extends Traversals with Transformers {
       }
     }
 
+    //println("perQueryExprIndex:")
+    //perQueryExprIndex.zipWithIndex.foreach { case (i, idx) =>
+    //  println("q%d:".format(idx))
+    //  i.foreach { case (k, v) =>
+    //    println("  %s:".format(k))
+    //    v.foreach(e => println("    %s".format(e.sql)))
+    //  }
+    //}
+
     // build global index, assigning a unique number (per relation)
     // to each unique expression amongst all queries
     val globalExprIndex = new HashMap[String, HashMap[SqlExpr, Int]]
@@ -2178,6 +2213,17 @@ trait Generator extends Traversals with Transformers {
       }.toMap
     }
 
+    println("globalExprIndex:")
+    globalExprIndex.foreach { case (k, m) =>
+      println("%s:".format(k))
+      m.foreach { case (e, id) =>
+        println("  %s : %d".format(e.sql, id))
+      }
+    }
+
+    //println("perQueryInterestMap:")
+    //println(perQueryInterestMap)
+
     // build a query index (mapping per relation ID to set of queries which use it)
     val queryReverseIndex /* Map[String, Map[Int, Set[Int]]] */ =
       perQueryInterestMap.zipWithIndex.foldLeft( Map.empty : Map[String, Map[Int, Set[Int]]] ) {
@@ -2188,6 +2234,9 @@ trait Generator extends Traversals with Transformers {
               exprId => (exprId, accMap.get(exprId).getOrElse(Set.empty) ++ Set(idx)) })
           }
       }
+
+    //println("queryReverseIndex:")
+    //println(queryReverseIndex)
 
     val globalExprSplits /* Map[String, Set[ Set[Set[Int]] ]] */ =
       globalExprIndex.map { case (k, v) =>
@@ -2204,18 +2253,33 @@ trait Generator extends Traversals with Transformers {
           if (interest.size == 1) Some(interest.head) else None
         }
 
+        def allInterestedQueries(s: Set[Int]): Set[Int] = {
+          s.flatMap(relnReverseIdx)
+        }
+
+        // give each query its own copy of the split
+        // (unique amongst shared sets)
+        val optimalSplits = perQueryInterestMap.flatMap { m => m.get(k) }.toSet
+
         // greedy merging for each group
         (k, allNonDupGroupings.map { grouping /* Set[Set[Int]] */ =>
           val gseq = grouping.toIndexedSeq
           val gmap = gseq.zipWithIndex.flatMap { case (g, i) =>
             groupForOnlyOneQuery(g).map(q => (q, i))
-          }.groupBy(x => x).map { case (k, v) => (k, v.map(_._2))}.toMap
+          }.groupBy(x => x._1).map { case (k, v) => (k, v.map(_._2))}.toMap
+
+          //println("gseq: " + gseq)
+          //println("gseq interest: " + gseq.map(allInterestedQueries))
+          //println("gmap: " + gmap)
 
           val ungrouped = (0 until gseq.size).toSet -- gmap.values.flatten.toSet
 
           ungrouped.map(gseq(_)).toSet ++ gmap.values.map(ii => ii.flatMap(gseq(_)).toSet).toSet
-        })
+        } ++ Set(optimalSplits))
       }
+
+    //println("globalExprSplits:")
+    //println(globalExprSplits)
 
     val revGlobalExprIndex = globalExprIndex.map { case (k, v) =>
       (k, v.map { case (k, v) => (v, k) }.toMap)
@@ -2223,8 +2287,11 @@ trait Generator extends Traversals with Transformers {
 
     stmts.zip(candidates).zip(perQueryInterestMap).zipWithIndex.map {
       case (((stmt, cands), im), idx) if im.isEmpty =>
+
+        println("trying query %d with %d onions".format(idx, cands.size))
+
         CollectionUtils.uniqueInOrderWithKey(
-          cands.map(c => fillOnionSet(stmt, c)).map {
+          cands.map(_._2).map(c => fillOnionSet(stmt, c)).map {
             o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(stmt, o))
           })(_._1)
 
@@ -2242,9 +2309,16 @@ trait Generator extends Traversals with Transformers {
           }
 
         val oSets =
-          (for (split <- exprSplits; cand <- cands) yield {
-            cand.withGroups(Map(reln -> split))
-          }) ++ cands
+          for (split <- exprSplits; cand <- cands) yield {
+            assert(cand._1.size <= 1)
+            if (cand._1.contains(reln)) {
+              cand._2.withGroups(Map(reln -> split))
+            } else {
+              cand._2
+            }
+          }
+
+        println("trying query %d with %d onions".format(idx, oSets.size))
 
         CollectionUtils.uniqueInOrderWithKey(
           oSets.map(c => fillOnionSet(stmt, c)).map {
@@ -2267,7 +2341,8 @@ trait Generator extends Traversals with Transformers {
     val o = generateOnionSets(stmt)
     val perms = CollectionUtils.powerSetMinusEmpty(o)
     // merge all perms, then unique
-    val candidates = CollectionUtils.uniqueInOrder(perms.map(p => OnionSet.merge(p)))
+    val candidates = CollectionUtils.uniqueInOrder(perms.map(p => OnionSet.mergeSeq(p)))
+    println("trying query with %d onions".format(candidates.size))
     CollectionUtils.uniqueInOrderWithKey(
       candidates.map(c => fillOnionSet(stmt, c)).map {
         o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(stmt, o))

@@ -111,7 +111,7 @@ case class HomRowDescOnion(relation: String) extends OnionType {
 }
 
 object OnionSet {
-  def merge(sets: Seq[OnionSet]): OnionSet = {
+  def mergeSeq(sets: Seq[OnionSet]): OnionSet = {
     sets.foldLeft(new OnionSet) {
       case (acc, elem) => acc.merge(elem)
     }
@@ -127,6 +127,17 @@ class OnionSet {
   // relation -> sequence of groups
   private type HomGroup = ArrayBuffer[SqlExpr]
   private val packedHOMs = new HashMap[String, ArrayBuffer[HomGroup]]
+
+  override def hashCode: Int = {
+    opts.hashCode ^ packedHOMs.hashCode
+  }
+
+  override def equals(o: Any): Boolean = o match {
+    case that: OnionSet =>
+      if (this eq that) return true
+      opts == that.opts && packedHOMs == that.packedHOMs
+    case _ => false
+  }
 
   private def mkKey(relation: String, expr: SqlExpr) = {
     ((relation, expr match {
@@ -149,6 +160,10 @@ class OnionSet {
     ret
   }
 
+  @inline
+  def groupsForRelations: Seq[String] = packedHOMs.keys.toSeq
+
+  @inline
   def getHomGroups: Map[String, Seq[Seq[SqlExpr]]] =
     packedHOMs.map { case (k, v) => (k, v.map(_.toSeq).toSeq) }.toMap
 
