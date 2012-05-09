@@ -1,6 +1,6 @@
 package edu.mit.cryptdb
 
-trait Resolver extends Transformers with Traversals {
+trait Resolver extends Transformers with Traversals with FunctionUtils {
   case class ResolutionException(msg: String) extends RuntimeException(msg)
 
   def resolve(stmt: SelectStmt, schema: Definitions): SelectStmt = {

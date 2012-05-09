@@ -33,6 +33,10 @@ class NameGenerator(prefix: String) {
   }
 }
 
+trait FunctionUtils {
+  def wrapReturnTrue[B, A](f: B => A): B => Boolean = (n: B) => { f(n); true }
+}
+
 object CollectionUtils {
   def powerSet[T](s: Seq[T]): Seq[Seq[T]] = {
     if (s.isEmpty) return Seq.empty

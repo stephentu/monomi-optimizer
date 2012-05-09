@@ -1,5 +1,43 @@
 package edu.mit.cryptdb
 
+trait PlanTransformers {
+
+  def topDownTransformation(n: PlanNode)(f: PlanNode => (Option[PlanNode], Boolean)): PlanNode =
+    topDownTransformationWithParent(n)( (p: Option[PlanNode], c: PlanNode) => f(c) )
+
+  // order:
+  // 1. visit node (call f() on node)
+  // 2. recurse on children (if node changes, recurse on *new* children)
+  // 3. if children change, replace node (but don't call f() again on the replaced node)
+  //
+  // assumptions: nodes don't change too much in structure ast-wise
+  def topDownTransformationWithParent(n: PlanNode)(f: (Option[PlanNode], PlanNode) => (Option[PlanNode], Boolean)): PlanNode =
+    topDownTransformation0(None, n)(f)
+
+  def topDownTransformation0(p: Option[PlanNode], n: PlanNode)(f: (Option[PlanNode], PlanNode) => (Option[PlanNode], Boolean)): PlanNode = {
+    val (nCopy, keepGoing) = f(p, n)
+    val newNode = nCopy getOrElse n
+    if (!keepGoing) return newNode
+    def recur[N0 <: PlanNode](n0: N0) =
+      topDownTransformation0(Some(newNode), n0)(f).asInstanceOf[N0]
+    newNode match {
+      case node @ RemoteSql(_, _, s) => node.copy(subrelations = s.map(x => (recur(x._1), x._2)))
+      case node @ RemoteMaterialize(_, c) => node.copy(child = recur(c))
+      case node @ LocalOuterJoinFilter(_, _, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))
+      case node @ LocalFilter(_, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))
+      case node @ LocalTransform(_, c) => node.copy(child = recur(c))
+      case node @ LocalGroupBy(_, _, _, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))
+      case node @ LocalGroupFilter(_, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))
+      case node @ LocalOrderBy(_, c) => node.copy(child = recur(c))
+      case node @ LocalLimit(_, c) => node.copy(child = recur(c))
+      case node @ LocalDecrypt(_, c) => node.copy(child = recur(c))
+      case node @ LocalEncrypt(_, c) => node.copy(child = recur(c))
+      case e => e
+    }
+  }
+
+}
+
 trait Transformers {
 
   def topDownTransformation(n: Node)(f: Node => (Option[Node], Boolean)): Node =

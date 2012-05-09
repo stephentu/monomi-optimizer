@@ -1,22 +1,41 @@
 package edu.mit.cryptdb
 
-//case class EstimateContext(
-//  // translate encrypted identifiers back into plain text identifiers
-//  // (but keep the structure of the query the same)
-//  reverseTranslateMap: IdentityHashMap[Node, Node]) {
-//
-//  def reverseTranslate[N <: Node](n: N): Option[N] =
-//    reverseTranslateMap.get(n).asInstanceOf[Option[N]]
-//
-//}
-
 import scala.util.parsing.json._
 import scala.collection.mutable.{ ArrayBuffer, HashMap }
 
+object GlobalOpts {
+  final val empty = GlobalOpts(Map.empty, Map.empty)
+}
+
+case class GlobalOpts(
+  precomputed: Map[String, Map[String, SqlExpr]],
+  homGroups: Map[String, Seq[Set[SqlExpr]]]) {
+
+  def merge(that: GlobalOpts): GlobalOpts = {
+    GlobalOpts(
+      precomputed.map { case (r, m) => (r, m ++ that.precomputed.getOrElse(r, Map.empty)) }.toMap,
+      homGroups.map { case (r, s) =>
+        (r, (s.toSet ++ that.homGroups.getOrElse(r, Seq.empty).toSet).toSeq)
+      })
+  }
+
+}
+
 case class EstimateContext(
   defns: Definitions,
-  precomputed: Map[String, SqlExpr],
-  homGroups: Map[String, Seq[Seq[SqlExpr]]]) {
+
+  globalOpts: GlobalOpts,
+
+  // the onions required for the plan to work
+  requiredOnions: Map[String, Map[String, Int]],
+
+  // the pre-computed exprs (w/ the req onion) required for the plan to work
+  precomputed: Map[String, Map[String, Int]],
+
+  // the hom groups required for the plan to work
+  // set(int) references the global opt's homGroup
+  homGroups: Map[String, Set[Int]]) {
+
   private val _idGen = new NameGenerator("fresh_")
   @inline def uniqueId(): String = _idGen.uniqueId()
 }
@@ -253,6 +272,23 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
   protected def endl: String = "\n"
 }
 
+// a temporary hack that should not need to exist in
+// a properly designed system
+object FieldNameHelpers {
+  def basename(s: String): String = {
+    if (s.contains("$")) s.split("\\$").dropRight(1).mkString("$")
+    else s
+  }
+
+  // given a field name formatted name$ONION, returns the onion type
+  // (as an int)
+  def encType(s: String): Option[Int] = {
+    if (!s.contains("$")) None
+    else Onions.onionFromStr(s.split("\\$").last)
+  }
+
+}
+
 case class RemoteSql(stmt: SelectStmt,
                      projs: Seq[PosDesc],
                      subrelations: Seq[(RemoteMaterialize, SelectStmt)] = Seq.empty)
@@ -271,9 +307,7 @@ case class RemoteSql(stmt: SelectStmt,
     // node replacement information, so we just use some text
     // substitution for now, and wait to implement a real solution
 
-    def basename(s: String): String =
-      if (s.contains("$")) s.split("\\$").dropRight(1).mkString("$")
-      else s
+    import FieldNameHelpers._
 
     def rewriteWithQual[N <: Node](n: N, q: String): N =
       topDownTransformation(n) {
@@ -294,7 +328,7 @@ case class RemoteSql(stmt: SelectStmt,
         // check precomputed first
         val qual0 = basename(qual)
         val name0 = basename(name)
-        ctx.precomputed.get(name0)
+        ctx.globalOpts.precomputed.get(qual0).flatMap(_.get(name0))
           .map(x => (Some(rewriteWithQual(x, qual0)), false))
           .getOrElse {
             // rowids are rewritten to 0
@@ -418,7 +452,7 @@ case class RemoteSql(stmt: SelectStmt,
           // TODO: need to take into account ciphertext size
           val costPerAgg = CostConstants.secToPGUnit(CostConstants.AggAddSecPerOp)
 
-          val homGroup = ctx.homGroups(tbl)(grp.toInt)
+          val homGroup = ctx.globalOpts.homGroups(tbl)(grp.toInt)
           // assume each group right now take 83 bits of ciphertext space
 
           val sizePerGroupElem = 83 // assumes that we do perfect packing (size in PT)

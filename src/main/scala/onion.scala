@@ -44,6 +44,14 @@ object Onions {
     } else toSeq(o).map(str).mkString("(", "|", ")")
   }
 
+  def onionFromStr(s: String): Option[Int] =
+    s match {
+      case "DET" => Some(DET)
+      case "OPE" => Some(OPE)
+      case "SWP" => Some(SWP)
+      case _     => None
+    }
+
   def pickOne(o: Int): Int = {
     def t(m: Int) = (o & m) != 0
     if      (t(PLAIN))        PLAIN
@@ -119,7 +127,7 @@ object OnionSet {
 }
 
 class OnionSet {
-  private val _gen = new NameGenerator("virtual")
+  private val _gen = new NameGenerator("virtual_local")
 
   // string is enc name, int is Onions bitmask
   private val opts = new HashMap[(String, Either[String, SqlExpr]), (String, Int)]
@@ -160,6 +168,20 @@ class OnionSet {
     ret
   }
 
+  def withGlobalPrecompExprs(exprs: Map[String, Seq[SqlExpr]]): OnionSet = {
+    // TODO: impl is not efficient
+    val ret = new OnionSet
+    ret.opts ++= opts.map {
+      case ((r, Right(e)), (_, o)) =>
+        val gidx = exprs(r).indexWhere(_ == e)
+        assert(gidx != -1)
+        ((r, Right(e)), ("virtual_global" + gidx, o))
+      case e => e
+    }
+    ret.packedHOMs ++= packedHOMs
+    ret
+  }
+
   @inline
   def groupsForRelations: Seq[String] = packedHOMs.keys.toSeq
 
@@ -167,11 +189,17 @@ class OnionSet {
   def getHomGroups: Map[String, Seq[Seq[SqlExpr]]] =
     packedHOMs.map { case (k, v) => (k, v.map(_.toSeq).toSeq) }.toMap
 
-  // this does not include hom groups
-  def getPrecomputedExprs: Map[String, SqlExpr] = {
+
+  // does not include homs
+  def getPrecomputedExpressions: Map[String, Map[SqlExpr, Int]] = {
     opts.flatMap {
-      case ((_, Right(expr)), (basename, _)) => Some((basename, expr))
-      case _                                 => None
+      case ((r, Right(e)), (_, o)) => Some((r, (e, o)))
+      case _ => None
+    }.groupBy(_._1).map {
+      case (r, vs) =>
+        (r, vs.map(_._2).groupBy(_._1).map {
+          case (e, os) => (e, os.map(_._2).foldLeft(0)(_|_))
+        })
     }.toMap
   }
 
@@ -213,9 +241,21 @@ class OnionSet {
     }}.getOrElse(Seq.empty)
   }
 
+  def lookupPackedHOMById(relation: String, groupId: Int): Option[Seq[SqlExpr]] = {
+    packedHOMs.get(relation).map(_.apply(groupId).toSeq)
+  }
+
   // relation is global table name
   def lookup(relation: String, expr: SqlExpr): Option[(String, Int)] = {
     opts.get(mkKey(relation, expr))
+  }
+
+  def lookupPrecomputedByName(relation: String, name: String): Option[(SqlExpr, Int)] = {
+    // impl is not efficient- we should build a by-name index
+    opts.find {
+      case ((r, Right(_)), (n, _)) if r == relation && n == name => true
+      case _ => false
+    }.map { case ((_, Right(e)), (_, o)) => (e, o) }
   }
 
   def merge(that: OnionSet): OnionSet = {

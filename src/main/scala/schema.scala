@@ -30,6 +30,10 @@ class Definitions(val defns: Map[String, Seq[TableColumn]], val dbconn: Option[D
       (quoteDbl(k), "Seq(" + v.map(_.scalaStr).mkString(", ") + ")")
     }.map { case (k, v) => k + " -> " + v }.mkString(", ")) + "), None)"
   }
+
+  def lookupByColumnName(col: String): Seq[(String, TableColumn)] = {
+    defns.toSeq.flatMap { case (r, v) => v.filter(_.name == col).map(t => (r, t)) }
+  }
 }
 
 case class ColumnStats(

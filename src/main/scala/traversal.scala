@@ -1,8 +1,46 @@
 package edu.mit.cryptdb
 
-trait Traversals {
+trait PlanTraversals {
 
-  def wrapReturnTrue[A](f: Node => A): Node => Boolean = (n: Node) => { f(n); true }
+  def topDownTraversal(n: PlanNode)(f: PlanNode => Boolean): Unit =
+    topDownTraversalWithParent(n)( (p: Option[PlanNode], c: PlanNode) => f(c) )
+
+  def topDownTraversalWithParent(n: PlanNode)(f: (Option[PlanNode], PlanNode) => Boolean): Unit =
+    topDownTraversal0(None, n)((n: PlanNode) => (), f, (n: PlanNode) => ())
+
+  def topDownTraversalPrePost[A0, A1](n: PlanNode)(preVisit: PlanNode => A0, visit: PlanNode => Boolean, postVisit: PlanNode => A1): Unit =
+   topDownTraversalPrePostWithParent(n)(preVisit, (p: Option[PlanNode], c: PlanNode) => visit(c), postVisit)
+
+  def topDownTraversalPrePostWithParent[A0, A1](n: PlanNode)(preVisit: PlanNode => A0, visit: (Option[PlanNode], PlanNode) => Boolean, postVisit: PlanNode => A1): Unit =
+   topDownTraversal0(None, n)(preVisit, visit, postVisit)
+
+  private def topDownTraversal0[A0, A1](p: Option[PlanNode], n: PlanNode)(preVisit: PlanNode => A0, visit: (Option[PlanNode], PlanNode) => Boolean, postVisit: PlanNode => A1): Unit = {
+
+    preVisit(n)
+    if (!visit(p, n)) {
+      postVisit(n)
+      return
+    }
+
+    def recur(n0: PlanNode) = topDownTraversal0(Some(n), n0)(preVisit, visit, postVisit)
+    n match {
+      case RemoteSql(_, _, s) => s.foreach(x => recur(x._1))
+      case RemoteMaterialize(_, c) => recur(c)
+      case LocalOuterJoinFilter(_, _, _, c, s) => recur(c); s.foreach(recur)
+      case LocalFilter(_, _, c, s) => recur(c); s.foreach(recur)
+      case LocalTransform(_, c) => recur(c)
+      case LocalGroupBy(_, _, _, _, c, s) => recur(c); s.foreach(recur)
+      case LocalGroupFilter(_, _, c, s) => recur(c); s.foreach(recur)
+      case LocalOrderBy(_, c) => recur(c)
+      case LocalLimit(_, c) => recur(c)
+      case LocalDecrypt(_, c) => recur(c)
+      case LocalEncrypt(_, c) => recur(c)
+    }
+    postVisit(n)
+  }
+}
+
+trait Traversals {
 
   def topDownTraversal(n: Node)(f: Node => Boolean): Unit =
     topDownTraversalWithParent(n)( (p: Option[Node], c: Node) => f(c) )

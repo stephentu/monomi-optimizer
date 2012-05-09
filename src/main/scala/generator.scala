@@ -1,8 +1,9 @@
 package edu.mit.cryptdb
 
-import scala.collection.mutable.{ ArrayBuffer, HashMap, Seq => MSeq, Map => MMap }
+import scala.collection.mutable.{
+  ArrayBuffer, HashMap, HashSet, Seq => MSeq, Map => MMap }
 
-trait Generator extends Traversals with Transformers {
+trait Generator extends Traversals with PlanTraversals with Transformers with PlanTransformers {
 
   private def topDownTraverseContext(start: Node, ctx: Context)(f: Node => Boolean) = {
     topDownTraversal(start) {
@@ -2138,9 +2139,37 @@ trait Generator extends Traversals with Transformers {
 
   type CandidatePlans = Seq[(PlanNode, EstimateContext)]
 
-  // return value 1-to-1 with input stmts
+  private def mkGlobalPreCompExprMap(
+    onionSets: Seq[OnionSet]): Map[String, Seq[SqlExpr]] = {
+    type PreCompMap = Map[String, Map[SqlExpr, Int]]
+    onionSets.map(_.getPrecomputedExpressions).foldLeft(
+      Map.empty : PreCompMap ) {
+      case (acc, elem) =>
+        def merge(lhs: PreCompMap, rhs: PreCompMap): PreCompMap = {
+          lhs.map { case (reln, expm) =>
+            def merge(lhs: Map[SqlExpr, Int], rhs: Map[SqlExpr, Int]): Map[SqlExpr, Int] = {
+              lhs.map { case (e, o) => (e, o | rhs.getOrElse(e, 0)) }.toMap
+            }
+            (reln, merge(expm, rhs.getOrElse(reln, Map.empty)))
+          }.toMap
+        }
+        merge(acc, elem)
+    }.map { case (k, v) => (k, v.keys.toSeq) }
+  }
+
+  // return value 1-to-1 with input stmts (stmts.size == ret.size)
   def generateCandidatePlans(stmts: Seq[SelectStmt]): Seq[CandidatePlans] = {
-    val onionSets /* Seq[Seq[OnionSet]] */ = stmts.map(generateOnionSets)
+    val onionSets0 /* Seq[Seq[OnionSet]] */ = stmts.map(generateOnionSets)
+
+    // ------- create a global set of precomputed expressions -------- //
+
+    val precompExprMap = mkGlobalPreCompExprMap(onionSets0.flatten)
+
+    // make onionSets all reference global precomputed expressions
+    // (HOM groups are still local though, b/c they are handled separately)
+    val onionSets = onionSets0.map(_.map(_.withGlobalPrecompExprs(precompExprMap)))
+
+    // ------- generate various permutations -------- //
 
     val perms /* Seq[ Seq[Seq[(Set[String], OnionSet)]] ] */ =
       onionSets.map { os /* Seq[OnionSet] */ =>
@@ -2159,6 +2188,11 @@ trait Generator extends Traversals with Transformers {
         }
         CollectionUtils.uniqueInOrderWithKey(merged)(_._2)
       }
+
+    // ------- create a global set of groups -------- //
+    // the following block of code deals with taking individual groups
+    // per query, and generating permutations of groups from all queries
+    // (on a per-relation basis)
 
     // for each relation
     //   for each query
@@ -2285,46 +2319,50 @@ trait Generator extends Traversals with Transformers {
       (k, v.map { case (k, v) => (v, k) }.toMap)
     }.toMap
 
-    stmts.zip(candidates).zip(perQueryInterestMap).zipWithIndex.map {
-      case (((stmt, cands), im), idx) if im.isEmpty =>
+    val uniquePlans =
+      stmts.zip(candidates).zip(perQueryInterestMap).zipWithIndex.map {
+        case (((stmt, cands), im), idx) if im.isEmpty =>
 
-        println("trying query %d with %d onions".format(idx, cands.size))
+          println("trying query %d with %d onions".format(idx, cands.size))
 
-        CollectionUtils.uniqueInOrderWithKey(
-          cands.map(_._2).map(c => fillOnionSet(stmt, c)).map {
-            o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(stmt, o))
-          })(_._1)
+          CollectionUtils.uniqueInOrderWithKey(
+            cands.map(_._2).map(c => fillOnionSet(stmt, c)).map {
+              o => (stmt, generatePlanFromOnionSet(stmt, o), o)
+            })(_._2)
 
-      case (((stmt, cands), im), idx) =>
+        case (((stmt, cands), im), idx) =>
 
-        if (im.keys.size > 1)
-          throw new RuntimeException("TODO: implement handling > 1 group relation")
+          if (im.keys.size > 1)
+            throw new RuntimeException("TODO: implement handling > 1 group relation")
 
-        val reln = im.keys.head
-        val exprSplits /* Seq[ Seq[Seq[SqlExpr]] ] */ =
-          globalExprSplits(reln).toSeq.map { split =>
-            split.toSeq.map { group =>
-              group.toSeq.map(i => revGlobalExprIndex(reln)(i))
+          val reln = im.keys.head
+          val exprSplits /* Seq[ Seq[Seq[SqlExpr]] ] */ =
+            globalExprSplits(reln).toSeq.map { split =>
+              split.toSeq.map { group =>
+                group.toSeq.map(i => revGlobalExprIndex(reln)(i))
+              }
             }
-          }
 
-        val oSets =
-          for (split <- exprSplits; cand <- cands) yield {
-            assert(cand._1.size <= 1)
-            if (cand._1.contains(reln)) {
-              cand._2.withGroups(Map(reln -> split))
-            } else {
-              cand._2
+          val oSets =
+            for (split <- exprSplits; cand <- cands) yield {
+              assert(cand._1.size <= 1)
+              if (cand._1.contains(reln)) {
+                cand._2.withGroups(Map(reln -> split))
+              } else {
+                cand._2
+              }
             }
-          }
 
-        println("trying query %d with %d onions".format(idx, oSets.size))
+          println("trying query %d with %d onions".format(idx, oSets.size))
 
-        CollectionUtils.uniqueInOrderWithKey(
-          oSets.map(c => fillOnionSet(stmt, c)).map {
-            o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(stmt, o))
-          })(_._1)
-    }
+          CollectionUtils.uniqueInOrderWithKey(
+            oSets.map(c => fillOnionSet(stmt, c)).map {
+              o => (stmt, generatePlanFromOnionSet(stmt, o), o)
+            })(_._2)
+      }
+
+    val globalOpts = buildGlobalOptsFromPlans(uniquePlans.flatMap(_.map(x => (x._2, x._3))))
+    uniquePlans.map(_.map(x => mkGloballyAwarePlanWithEstimate(x._1, x._3, x._2, globalOpts)))
   }
 
   @inline
@@ -2332,21 +2370,157 @@ trait Generator extends Traversals with Transformers {
     o.complete(stmt.ctx.defns)
   }
 
-  @inline
-  private def estimateContextFromOnionSet(stmt: SelectStmt, o: OnionSet): EstimateContext = {
-    EstimateContext(stmt.ctx.defns, o.getPrecomputedExprs, o.getHomGroups)
+  private def mkGloballyAwarePlanWithEstimate(
+    origPlan: SelectStmt,
+    origOS: OnionSet,
+    rewrittenPlan: PlanNode,
+    globalOpts: GlobalOpts): (PlanNode, EstimateContext) = {
+
+    // TODO: this is implemented very hackily right now- it works by simply
+    // doing string matching on fields in the query plan. there's no
+    // reason we have to implement it this way- it just takes a lot mindless
+    // work in order to propagate the onion information from plan generation
+    // correctly, and this approach currently works fine for TPC-H, so we
+    // go w/ this for now and leave a more complete solution as future work
+
+    import FieldNameHelpers._
+
+    val requiredOnions = new HashMap[String, HashMap[String, Int]]
+    val precomputed = new HashMap[String, HashMap[String, Int]]
+    val homGroups = new HashMap[String, HashSet[Int]]
+
+    val pnew = topDownTransformation(rewrittenPlan) {
+      case r @ RemoteSql(stmt, _, _) =>
+        val s = topDownTransformation(stmt) {
+          case FieldIdent(qual, name, _, _) =>
+            assert(qual.isDefined)
+            val qual0 = basename(qual.get)
+            val name0 = basename(name)
+            assert(!name0.startsWith("virtual_local"))
+
+            if (name0.startsWith("virtual_global")) {
+              val m = precomputed.getOrElseUpdate(qual0, new HashMap[String, Int])
+              m.put(name0, m.getOrElse(name0, 0) | encType(name).get)
+            } else {
+              val cols = origPlan.ctx.defns.lookupByColumnName(name0)
+              assert(cols.size <= 1) // no reason this has to hold, but assume for now b/c
+                                     // it holds for TPC-H. really, we should be propagating
+                                     // more information during plan generation phase - see comment
+                                     // above
+              cols.headOption.foreach { c =>
+                val m = requiredOnions.getOrElseUpdate(c._1, new HashMap[String, Int])
+                m.put(name0, m.getOrElse(name0, 0) | encType(name).get)
+              }
+            }
+
+            keepGoing // no need for replacement
+
+          case ag @ AggCall("hom_agg", Seq(a0, a1 @ StringLiteral(tbl, _), IntLiteral(grp, _), a3), _) =>
+            // need to replace this local group id with a global group id
+            // (the group id is local to the onion set used to generate the plan)
+
+            val Some(gexprs) = origOS.lookupPackedHOMById(tbl, grp.toInt).map(_.toSet)
+
+            // map local group expr set to global group id
+            val ggidx = globalOpts.homGroups(tbl).indexWhere(_ == gexprs)
+            assert(ggidx != -1) // must be valid
+
+            homGroups.getOrElseUpdate(tbl, new HashSet[Int]) += ggidx
+
+            replaceWith(ag.copy(args = Seq(a0, a1, IntLiteral(ggidx), a3)))
+
+          case _ => (None, true)
+        }.asInstanceOf[SelectStmt]
+
+        (Some(r.copy(stmt = s)), true)
+      case _ => keepGoing
+    }
+
+    (pnew, EstimateContext(
+      origPlan.ctx.defns,
+      globalOpts,
+      requiredOnions.map { case (k, v) => (k, v.toMap) }.toMap,
+      precomputed.map { case (k, v) => (k, v.toMap) }.toMap,
+      homGroups.map { case (k, v) => (k, v.toSet) }.toMap))
+  }
+
+  // input is seq( (plan, onionset used to build plan) )
+  private def buildGlobalOptsFromPlans(
+    plans: Seq[(PlanNode, OnionSet)]): GlobalOpts = {
+
+    // here, we assume that all precomputed expressions have been
+    // normalized, so each virtual name refers to a unique expression
+
+    // each plan generates its version of global opts, then we
+    // will merge the opts at the end
+    def analyzePlan(plan: PlanNode, os: OnionSet): GlobalOpts = {
+      import FieldNameHelpers._
+
+      val precomputed = new HashMap[String, HashMap[String, SqlExpr]]
+      val homGroups = new HashMap[String, HashSet[Set[SqlExpr]]]
+
+      topDownTraversal(plan) {
+        case RemoteSql(stmt, _, _) =>
+          topDownTraversal(stmt) {
+            case FieldIdent(qual, name, _, _) =>
+              assert(qual.isDefined)
+              val qual0 = basename(qual.get)
+              val name0 = basename(name)
+
+              // all the local exprs should be replaced with a global name
+              assert(!name0.startsWith("virtual_local"))
+
+              if (name0.startsWith("virtual_global")) {
+                os.lookupPrecomputedByName(qual0, name0).foreach {
+                  case (expr, o) =>
+                    val Some(o0) = encType(name)
+                    assert(o == o0)
+                    val m = precomputed.getOrElseUpdate(qual0, new HashMap[String, SqlExpr])
+                    m.get(name0).foreach(e => assert(e == expr)) // b/c we canonicalized...
+                    m.put(name0, expr)
+                }
+              }
+
+              false
+
+            case AggCall("hom_agg", Seq(_, StringLiteral(tbl, _), IntLiteral(grp, _), _), _) =>
+              val group = os.lookupPackedHOMById(tbl, grp.toInt)
+              assert(group.isDefined)
+              val s = homGroups.getOrElseUpdate(tbl, new HashSet[Set[SqlExpr]])
+              if (!s.contains(group.get.toSet)) s += group.get.toSet
+
+              false
+
+            case _ => true
+          }
+          true
+        case _ => true
+      }
+
+      GlobalOpts(precomputed.map { case (k, v) => (k, v.toMap) }.toMap,
+                 homGroups.map { case (k, v) => (k, v.toSeq) }.toMap)
+    }
+
+    plans.foldLeft(GlobalOpts.empty) { case (acc, (plan, os)) => acc.merge(analyzePlan(plan, os)) }
   }
 
   def generateCandidatePlans(stmt: SelectStmt): CandidatePlans = {
-    val o = generateOnionSets(stmt)
+    val o0 = generateOnionSets(stmt)
+    val precompExprMap = mkGlobalPreCompExprMap(o0)
+    val o = o0.map(_.withGlobalPrecompExprs(precompExprMap))
     val perms = CollectionUtils.powerSetMinusEmpty(o)
     // merge all perms, then unique
     val candidates = CollectionUtils.uniqueInOrder(perms.map(p => OnionSet.mergeSeq(p)))
     println("trying query with %d onions".format(candidates.size))
-    CollectionUtils.uniqueInOrderWithKey(
-      candidates.map(c => fillOnionSet(stmt, c)).map {
-        o => (generatePlanFromOnionSet(stmt, o), estimateContextFromOnionSet(stmt, o))
-      })(_._1)
+    val uniquePlans =
+      CollectionUtils.uniqueInOrderWithKey(
+        candidates.map(c => fillOnionSet(stmt, c)).map {
+          o => (stmt, generatePlanFromOnionSet(stmt, o), o)
+        })(_._2)
+
+    // compute global opts from the unique plans
+    val globalOpts = buildGlobalOptsFromPlans(uniquePlans.map(x => (x._2, x._3)))
+    uniquePlans.map(x => mkGloballyAwarePlanWithEstimate(x._1, x._3, x._2, globalOpts))
   }
 
   def generateOnionSets(stmt: SelectStmt): Seq[OnionSet] = {
