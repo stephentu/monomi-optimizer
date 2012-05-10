@@ -59,11 +59,12 @@ case class Estimate(
   cost: Double,
   rows: Long,
   rowsPerRow: Long /* estimate cardinality within each aggregate group */,
-  equivStmt: SelectStmt /* statement which estimates the equivalent CARDINALITY */) {
+  equivStmt: SelectStmt /* statement which estimates the equivalent CARDINALITY */,
+  seqScanInfo: Map[String, Int] /* the number of times a seq scan is invoked, per relation */) {
 
   override def toString = {
-    case class Estimate(c: Double, r: Long, rr: Long)
-    Estimate(cost, rows, rowsPerRow).toString
+    case class Estimate(c: Double, r: Long, rr: Long, ssi: Map[String, Int])
+    Estimate(cost, rows, rowsPerRow, seqScanInfo).toString
   }
 }
 
@@ -121,13 +122,15 @@ trait PgQueryPlanExtractor {
   //
   def extractCostFromDBStmt(stmt: SelectStmt, dbconn: DbConn,
                             stats: Option[Statistics] = None):
-    (Double, Long, Option[Long], Map[String, UserAggDesc]) = {
+    (Double, Long, Option[Long],
+     Map[String, UserAggDesc], Map[String, Int]) = {
     extractCostFromDBSql(stmt.sqlFromDialect(PostgresDialect), dbconn, stats)
   }
 
   def extractCostFromDBSql(sql: String, dbconn: DbConn,
                            stats: Option[Statistics] = None):
-    (Double, Long, Option[Long], Map[String, UserAggDesc]) = {
+    (Double, Long, Option[Long],
+     Map[String, UserAggDesc], Map[String, Int]) = {
     // taken from:
     // http://stackoverflow.com/questions/4170949/how-to-parse-json-in-scala-using-standard-scala-classes
     class CC[T] {
@@ -140,7 +143,10 @@ trait PgQueryPlanExtractor {
     object D extends CC[Double]
     object B extends CC[Boolean]
 
-    type ExtractInfo = (Double, Long, Option[Long], Map[String, UserAggDesc], Map[String, Long])
+    type ExtractInfo =
+      (Double, Long, Option[Long],
+       Map[String, UserAggDesc], Map[String, Long],
+       Map[String, Int])
 
     def extractInfoFromQueryPlan(node: Map[String, Any]): ExtractInfo = {
       val childrenNodes =
@@ -164,8 +170,18 @@ trait PgQueryPlanExtractor {
         }
       }
 
+      def mergePlus(lhs: Map[String, Int], rhs: Map[String, Int]): Map[String, Int] = {
+        (lhs.keys ++ rhs.keys).map { k =>
+          (k, lhs.getOrElse(k, 0) + rhs.getOrElse(k, 0))
+        }.toMap
+      }
+
       val userAggMapFold = noOverwriteFoldLeft(childrenNodes.map(_._2).map(_._4).toSeq)
       val selMapFold = noOverwriteFoldLeft(innerOuterChildren.map(_._5).toSeq)
+      val seqScanInfoFold = childrenNodes.foldLeft(Map.empty : Map[String, Int]) {
+        case (acc, est) =>
+          mergePlus(acc, est._2._6)
+      }
 
       val tpe = node("Node Type")
 
@@ -176,7 +192,8 @@ trait PgQueryPlanExtractor {
 
           // compute the values that the aggs will have to experience, based
           // on the first outer child
-          val (rOuter, rrOuter) = outerChildren.head match { case (_, r, rr, _, _) => (r, rr) }
+          val (rOuter, rrOuter) =
+            outerChildren.head match { case (_, r, rr, _, _, _) => (r, rr) }
 
           // see if it has a hom_agg aggregate
           // TODO: this is quite rigid.. we should REALLY be using our
@@ -195,14 +212,16 @@ trait PgQueryPlanExtractor {
 
           // compute the values of THIS node based on the first outer child
           val (r, rr) = outerChildren.head match {
-            case (_, rows, None, _, _) =>
+            case (_, rows, None, _, _, _) =>
                (planRows, Some(math.ceil(rows.toDouble / planRows.toDouble).toLong))
 
-            case (_, rows, Some(rowsPerRow), _, _) =>
+            case (_, rows, Some(rowsPerRow), _, _, _) =>
                (planRows, Some(math.ceil(rows.toDouble / planRows.toDouble * rowsPerRow).toLong))
           }
 
-          (totalCost, r, rr, noOverwriteFoldLeft(Seq(userAggMapFold, aggs)), selMapFold)
+          (totalCost, r, rr,
+           noOverwriteFoldLeft(Seq(userAggMapFold, aggs)),
+           selMapFold, seqScanInfoFold)
 
         case "Seq Scan" | "Index Scan" =>
           assert(innerOuterChildren.isEmpty) // seq scans don't have children?
@@ -229,12 +248,13 @@ trait PgQueryPlanExtractor {
           val (r, rr) = (planRows, None)
 
           (totalCost, r, rr,
-           noOverwriteFoldLeft(Seq(userAggMapFold, m)), Map(reln -> planRows))
+           noOverwriteFoldLeft(Seq(userAggMapFold, m)),
+           Map(reln -> planRows), mergePlus(seqScanInfoFold, Map(reln -> 1)))
 
         case t =>
           // simple case, just read from this node only
           (totalCost, planRows, outerChildren.headOption.flatMap(_._3),
-           userAggMapFold, selMapFold)
+           userAggMapFold, selMapFold, seqScanInfoFold)
       }
     }
 
@@ -260,7 +280,7 @@ trait PgQueryPlanExtractor {
       )
     }
 
-    (res.head._1, res.head._2, res.head._3, res.head._4)
+    (res.head._1, res.head._2, res.head._3, res.head._4, res.head._6)
   }
 }
 
@@ -390,7 +410,8 @@ case class RemoteSql(stmt: SelectStmt,
     val reverseStmt0 = resolveCheck(reverseStmt, ctx.defns, true)
 
     // server query execution cost
-    val (c, r, rr, m) = extractCostFromDBStmt(reverseStmt0, ctx.defns.dbconn.get, Some(stats))
+    val (c, r, rr, m, ssi) =
+      extractCostFromDBStmt(reverseStmt0, ctx.defns.dbconn.get, Some(stats))
 
     //println("sql: " + reverseStmt.sqlFromDialect(PostgresDialect))
     //println("m: " + m)
@@ -532,12 +553,12 @@ case class RemoteSql(stmt: SelectStmt,
       case PosDesc(onion, vecCtx) =>
         // assume everything is 4 bytes now
         if (vecCtx) 4.0 * rr.get else 4.0
-    }.sum
+    }.sum * r.toDouble
 
     Estimate(
       c + aggCost + subrelations.map(_._1.costEstimate(ctx, stats).cost).sum +
         CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec),
-      r, rr.getOrElse(1), reverseStmt0)
+      r, rr.getOrElse(1), reverseStmt0, ssi)
   }
 }
 
@@ -547,9 +568,18 @@ case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
     "* RemoteMaterialize(name = " + name + ")" + childPretty(lvl, child)
 
   def costEstimate(ctx: EstimateContext, stats: Statistics) = {
-    // do stuff
+    val ch = child.costEstimate(ctx, stats)
 
-    child.costEstimate(ctx, stats)
+    // compute cost of xfering each row back to server
+    val td = tupleDesc
+    val bytesToXfer = td.map {
+      case PosDesc(onion, vecCtx) =>
+        // assume everything is 4 bytes now
+        if (vecCtx) 4.0 * ch.rowsPerRow else 4.0
+    }.sum * ch.rows.toDouble
+    val xferCost = CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec)
+
+    ch.copy(cost = ch.cost + xferCost)
   }
 }
 
@@ -605,10 +635,10 @@ case class LocalOuterJoinFilter(
         }.asInstanceOf[SelectStmt],
         ctx.defns)
 
-    val (_, r, rr, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
+    val (_, r, rr, _, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
     // TODO: estimate the cost
-    Estimate(ch.cost, r, rr.getOrElse(1), stmt)
+    Estimate(ch.cost, r, rr.getOrElse(1), stmt, ch.seqScanInfo)
   }
 }
 
@@ -669,10 +699,10 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
           filter = ch.equivStmt.filter.map(x => And(x, origExpr)).orElse(Some(origExpr))),
         ctx.defns)
 
-    val (_, r, rr, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
+    val (_, r, rr, _, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
     // TODO: how do we cost filters?
-    Estimate(ch.cost + subCosts, r, rr.getOrElse(1L), stmt)
+    Estimate(ch.cost + subCosts, r, rr.getOrElse(1L), stmt, ch.seqScanInfo)
   }
 }
 
@@ -737,9 +767,9 @@ case class LocalGroupBy(
           groupBy = Some(SqlGroupBy(origKeys, origFilter))),
         ctx.defns)
 
-    val (_, r, Some(rr), _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
+    val (_, r, Some(rr), _, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
     // TODO: estimate the cost
-    Estimate(ch.cost, r, rr, stmt)
+    Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
   }
 }
 
@@ -767,10 +797,10 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
 
     //println(stmt.sqlFromDialect(PostgresDialect))
 
-    val (_, r, Some(rr), _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
+    val (_, r, Some(rr), _, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
     // TODO: how do we cost filters?
-    Estimate(ch.cost, r, rr, stmt)
+    Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
   }
 }
 
@@ -802,7 +832,8 @@ case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
     // TODO: currently assuming everything must be completely materialized
     // before the limit. this isn't strictly true, but is true in the case
     // of TPC-H
-    Estimate(ch.cost, math.min(limit, ch.rows), ch.rowsPerRow, ch.equivStmt)
+    Estimate(ch.cost, math.min(limit, ch.rows), ch.rowsPerRow,
+             ch.equivStmt, ch.seqScanInfo)
   }
 }
 
