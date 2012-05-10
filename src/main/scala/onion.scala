@@ -174,6 +174,9 @@ class OnionSet {
     ret.opts ++= opts.map {
       case ((r, Right(e)), (_, o)) =>
         val gidx = exprs(r).indexWhere(_ == e)
+        if (gidx == -1) {
+          println("failing expr: " + e)
+        }
         assert(gidx != -1)
         ((r, Right(e)), ("virtual_global" + gidx, o))
       case e => e
@@ -192,15 +195,14 @@ class OnionSet {
 
   // does not include homs
   def getPrecomputedExpressions: Map[String, Map[SqlExpr, Int]] = {
-    opts.flatMap {
-      case ((r, Right(e)), (_, o)) => Some((r, (e, o)))
-      case _ => None
-    }.groupBy(_._1).map {
-      case (r, vs) =>
-        (r, vs.map(_._2).groupBy(_._1).map {
-          case (e, os) => (e, os.map(_._2).foldLeft(0)(_|_))
-        })
-    }.toMap
+    val m = new HashMap[String, HashMap[SqlExpr, Int]]
+    opts.foreach {
+      case ((r, Right(e)), (_, o)) =>
+        val m0 = m.getOrElseUpdate(r, new HashMap[SqlExpr, Int])
+        m0.put(e, m0.getOrElse(e, 0) | o)
+      case _ =>
+    }
+    m.map { case (k, v) => (k, v.toMap) }.toMap
   }
 
   // relation is global table name
