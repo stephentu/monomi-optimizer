@@ -2146,11 +2146,13 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       Map.empty : PreCompMap ) {
       case (acc, elem) =>
         def merge(lhs: PreCompMap, rhs: PreCompMap): PreCompMap = {
-          lhs.map { case (reln, expm) =>
+          (lhs.keys ++ rhs.keys).map { k =>
             def merge(lhs: Map[SqlExpr, Int], rhs: Map[SqlExpr, Int]): Map[SqlExpr, Int] = {
-              lhs.map { case (e, o) => (e, o | rhs.getOrElse(e, 0)) }.toMap
+              (lhs.keys ++ rhs.keys).map { e =>
+                (e, lhs.getOrElse(e, 0) | rhs.getOrElse(e, 0))
+              }.toMap
             }
-            (reln, merge(expm, rhs.getOrElse(reln, Map.empty)))
+            (k, merge(lhs.getOrElse(k, Map.empty), rhs.getOrElse(k, Map.empty)))
           }.toMap
         }
         merge(acc, elem)
@@ -2164,6 +2166,8 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     // ------- create a global set of precomputed expressions -------- //
 
     val precompExprMap = mkGlobalPreCompExprMap(onionSets0.flatten)
+
+    //println("precompExprMap: " + precompExprMap)
 
     // make onionSets all reference global precomputed expressions
     // (HOM groups are still local though, b/c they are handled separately)
@@ -2403,6 +2407,9 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
               m.put(name0, m.getOrElse(name0, 0) | encType(name).get)
             } else {
               val cols = origPlan.ctx.defns.lookupByColumnName(name0)
+              if (cols.size > 1) {
+                println("failure: cols: " + cols)
+              }
               assert(cols.size <= 1) // no reason this has to hold, but assume for now b/c
                                      // it holds for TPC-H. really, we should be propagating
                                      // more information during plan generation phase - see comment
@@ -2415,11 +2422,11 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
             keepGoing // no need for replacement
 
-          case ag @ AggCall("hom_agg", Seq(a0, a1 @ StringLiteral(tbl, _), IntLiteral(grp, _), a3), _) =>
+          case ag @ AggCall("hom_agg", Seq(a0, a1 @ StringLiteral(tbl, _), IntLiteral(grp, _)), _) =>
             // need to replace this local group id with a global group id
             // (the group id is local to the onion set used to generate the plan)
 
-            val Some(gexprs) = origOS.lookupPackedHOMById(tbl, grp.toInt).map(_.toSet)
+            val Some(gexprs) = origOS.lookupPackedHOMById(tbl, grp.toInt)
 
             // map local group expr set to global group id
             val ggidx = globalOpts.homGroups(tbl).indexWhere(_ == gexprs)
@@ -2427,7 +2434,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
             homGroups.getOrElseUpdate(tbl, new HashSet[Int]) += ggidx
 
-            replaceWith(ag.copy(args = Seq(a0, a1, IntLiteral(ggidx), a3)))
+            replaceWith(ag.copy(args = Seq(a0, a1, IntLiteral(ggidx))))
 
           case _ => (None, true)
         }.asInstanceOf[SelectStmt]
@@ -2457,7 +2464,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       import FieldNameHelpers._
 
       val precomputed = new HashMap[String, HashMap[String, SqlExpr]]
-      val homGroups = new HashMap[String, HashSet[Set[SqlExpr]]]
+      val homGroups = new HashMap[String, HashSet[Seq[SqlExpr]]]
 
       topDownTraversal(plan) {
         case RemoteSql(stmt, _, _) =>
@@ -2474,7 +2481,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
                 os.lookupPrecomputedByName(qual0, name0).foreach {
                   case (expr, o) =>
                     val Some(o0) = encType(name)
-                    assert(o == o0)
+                    assert((o & o0) != 0)
                     val m = precomputed.getOrElseUpdate(qual0, new HashMap[String, SqlExpr])
                     m.get(name0).foreach(e => assert(e == expr)) // b/c we canonicalized...
                     m.put(name0, expr)
@@ -2483,11 +2490,11 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
               false
 
-            case AggCall("hom_agg", Seq(_, StringLiteral(tbl, _), IntLiteral(grp, _), _), _) =>
+            case ag @ AggCall("hom_agg", Seq(_, StringLiteral(tbl, _), IntLiteral(grp, _)), _) =>
               val group = os.lookupPackedHOMById(tbl, grp.toInt)
               assert(group.isDefined)
-              val s = homGroups.getOrElseUpdate(tbl, new HashSet[Set[SqlExpr]])
-              if (!s.contains(group.get.toSet)) s += group.get.toSet
+              val s = homGroups.getOrElseUpdate(tbl, new HashSet[Seq[SqlExpr]])
+              if (!s.contains(group.get)) s += group.get
 
               false
 
@@ -2501,7 +2508,12 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
                  homGroups.map { case (k, v) => (k, v.toSeq) }.toMap)
     }
 
-    plans.foldLeft(GlobalOpts.empty) { case (acc, (plan, os)) => acc.merge(analyzePlan(plan, os)) }
+    plans.foldLeft(GlobalOpts.empty) {
+      case (acc, (plan, os)) =>
+        val ap = analyzePlan(plan, os)
+        //println("ap: " + ap)
+        acc.merge(ap)
+    }
   }
 
   def generateCandidatePlans(stmt: SelectStmt): CandidatePlans = {

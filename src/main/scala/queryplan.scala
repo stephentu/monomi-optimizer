@@ -9,14 +9,29 @@ object GlobalOpts {
 
 case class GlobalOpts(
   precomputed: Map[String, Map[String, SqlExpr]],
-  homGroups: Map[String, Seq[Set[SqlExpr]]]) {
+  homGroups: Map[String, Seq[Seq[SqlExpr]]]) {
 
   def merge(that: GlobalOpts): GlobalOpts = {
+
+    def mergeA(lhs: Map[String, Map[String, SqlExpr]],
+               rhs: Map[String, Map[String, SqlExpr]]):
+      Map[String, Map[String, SqlExpr]] = {
+      (lhs.keys ++ rhs.keys).map { k =>
+        (k, lhs.getOrElse(k, Map.empty) ++ rhs.getOrElse(k, Map.empty))
+      }.toMap
+    }
+
+    def mergeB(lhs: Map[String, Seq[Seq[SqlExpr]]],
+               rhs: Map[String, Seq[Seq[SqlExpr]]]):
+      Map[String, Seq[Seq[SqlExpr]]] = {
+      (lhs.keys ++ rhs.keys).map { k =>
+        (k, (lhs.getOrElse(k, Seq.empty).toSet ++ rhs.getOrElse(k, Seq.empty).toSet).toSeq)
+      }.toMap
+    }
+
     GlobalOpts(
-      precomputed.map { case (r, m) => (r, m ++ that.precomputed.getOrElse(r, Map.empty)) }.toMap,
-      homGroups.map { case (r, s) =>
-        (r, (s.toSet ++ that.homGroups.getOrElse(r, Seq.empty).toSet).toSeq)
-      })
+      mergeA(precomputed, that.precomputed),
+      mergeB(homGroups, that.homGroups))
   }
 
 }
