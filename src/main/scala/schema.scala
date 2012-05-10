@@ -265,7 +265,7 @@ where schemaname = 'public' and tablename = ?
     val ret = new Statistics(
       schema.defns.map { case (name, cols) =>
         // get an estimate of the row count
-        val (_, rows, _, _) = extractCostFromDB("SELECT * FROM %s".format(name), _dbconn)
+        val (_, rows, _, _) = extractCostFromDBSql("SELECT * FROM %s".format(name), _dbconn)
         val typeMap = cols.map(tc => (tc.name, tc.tpe)).toMap
         s.setString(1, name)
         val r = s.executeQuery

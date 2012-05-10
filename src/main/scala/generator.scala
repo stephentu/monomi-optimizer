@@ -2415,8 +2415,10 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
                                      // more information during plan generation phase - see comment
                                      // above
               cols.headOption.foreach { c =>
-                val m = requiredOnions.getOrElseUpdate(c._1, new HashMap[String, Int])
-                m.put(name0, m.getOrElse(name0, 0) | encType(name).get)
+                encType(name).foreach { o =>
+                  val m = requiredOnions.getOrElseUpdate(c._1, new HashMap[String, Int])
+                  m.put(name0, m.getOrElse(name0, 0) | o)
+                }
               }
             }
 

@@ -119,12 +119,14 @@ trait PgQueryPlanExtractor {
 
   // the 4th return value is a map of
   //
-  def extractCostFromDB(stmt: SelectStmt, dbconn: DbConn):
+  def extractCostFromDBStmt(stmt: SelectStmt, dbconn: DbConn,
+                            stats: Option[Statistics] = None):
     (Double, Long, Option[Long], Map[String, UserAggDesc]) = {
-    extractCostFromDB(stmt.sqlFromDialect(PostgresDialect), dbconn)
+    extractCostFromDBSql(stmt.sqlFromDialect(PostgresDialect), dbconn, stats)
   }
 
-  def extractCostFromDB(sql: String, dbconn: DbConn):
+  def extractCostFromDBSql(sql: String, dbconn: DbConn,
+                           stats: Option[Statistics] = None):
     (Double, Long, Option[Long], Map[String, UserAggDesc]) = {
     // taken from:
     // http://stackoverflow.com/questions/4170949/how-to-parse-json-in-scala-using-standard-scala-classes
@@ -217,7 +219,8 @@ trait PgQueryPlanExtractor {
           val m = node.get("Filter").map { case S(f) =>
             SearchSWPRegex.findAllIn(f).matchData.map { m =>
               // need to estimate r from the relation
-              val (_, r, _, _) = extractCostFromDB("SELECT * FROM %s".format(reln), dbconn)
+              val r = stats.map(_.stats(reln).row_count).getOrElse(
+                extractCostFromDBSql("SELECT * FROM %s".format(reln), dbconn, None)._2)
               val id = m.group(1)
               ((id, UserAggDesc(r, None, Map.empty)))
             }.toMap
@@ -387,7 +390,7 @@ case class RemoteSql(stmt: SelectStmt,
     val reverseStmt0 = resolveCheck(reverseStmt, ctx.defns, true)
 
     // server query execution cost
-    val (c, r, rr, m) = extractCostFromDB(reverseStmt0, ctx.defns.dbconn.get)
+    val (c, r, rr, m) = extractCostFromDBStmt(reverseStmt0, ctx.defns.dbconn.get, Some(stats))
 
     //println("sql: " + reverseStmt.sqlFromDialect(PostgresDialect))
     //println("m: " + m)
@@ -602,7 +605,7 @@ case class LocalOuterJoinFilter(
         }.asInstanceOf[SelectStmt],
         ctx.defns)
 
-    val (_, r, rr, _) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
+    val (_, r, rr, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
     // TODO: estimate the cost
     Estimate(ch.cost, r, rr.getOrElse(1), stmt)
@@ -666,7 +669,7 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
           filter = ch.equivStmt.filter.map(x => And(x, origExpr)).orElse(Some(origExpr))),
         ctx.defns)
 
-    val (_, r, rr, _) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
+    val (_, r, rr, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
     // TODO: how do we cost filters?
     Estimate(ch.cost + subCosts, r, rr.getOrElse(1L), stmt)
@@ -734,7 +737,7 @@ case class LocalGroupBy(
           groupBy = Some(SqlGroupBy(origKeys, origFilter))),
         ctx.defns)
 
-    val (_, r, Some(rr), _) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
+    val (_, r, Some(rr), _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
     // TODO: estimate the cost
     Estimate(ch.cost, r, rr, stmt)
   }
@@ -764,7 +767,7 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
 
     //println(stmt.sqlFromDialect(PostgresDialect))
 
-    val (_, r, Some(rr), _) = extractCostFromDB(stmt, ctx.defns.dbconn.get)
+    val (_, r, Some(rr), _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
     // TODO: how do we cost filters?
     Estimate(ch.cost, r, rr, stmt)
