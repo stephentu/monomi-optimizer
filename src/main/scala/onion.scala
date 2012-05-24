@@ -77,6 +77,14 @@ object Onions {
     buf.toSeq
   }
 
+  def isSingleRowEncOnion(o: Int): Boolean = {
+    assert(BitUtils.onlyOne(o))
+    o match {
+      case DET | OPE | SWP => true
+      case _               => false
+    }
+  }
+
   def completeSeqWithPreference(o: Int): Seq[Int] = {
     val s = toSeq(o)
     val s0 = s.toSet
