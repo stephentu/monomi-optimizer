@@ -46,11 +46,11 @@ package object math_defns {
   }
 
   def matrixAsMCode[A](m: ImmMatrix[A]): String = {
-    m.map(vectorAsMCode(_)).mkString(";", "[", "]")
+    m.map(vectorAsMCode(_)).mkString("[", ";", "]")
   }
 
   def vectorAsMCode[A](v: ImmVector[A]): String = {
-    v.map(_.toString).mkString(",", "[", "]")
+    v.map(_.toString).mkString("[", ",", "]")
   }
 }
 
@@ -321,7 +321,7 @@ trait Formulator {
           // s := total_onions(tbl) - used_onions(tbl)
           // add each element in s to Q (scaled by nscans)
 
-          val gTable = globalXAssignReg(tbl)
+          val gTable: HashMap[(String, Int), Int] = globalXAssignReg.getOrElse(tbl, HashMap.empty)
           val sTable = stats.stats(tbl)
 
           // total_onions comes from reg+pre
@@ -331,22 +331,23 @@ trait Formulator {
               b.get(tbl).foreach { b =>
                 def procOnions(k: String, os: Seq[Int]) = {
                   os.foreach { o =>
-                    val globalId = gTable(k, o)
-                    // TODO: scale accordingly
-                    Q_arg(pidx)(globalId) = 2.0 * nscans * (sTable.row_count.toDouble)
+                    gTable.get((k, o)).foreach { globalId =>
+                      // TODO: scale accordingly
+                      Q_arg(pidx)(globalId) = 2.0 * nscans * (sTable.row_count.toDouble)
 
-                    // constraints!
-                    // each query plan has all the necessary onions + precomp onions it needs
-                    // (we add hom group constraints separately, below)
-                    //
-                    // we formulate as follows: suppose plan i requires onions q = [x1, x2, ...]
-                    // each plan i contributes the following inequality constraint:
-                    //   \sum_{q} x_{q} - |q|x_{i} \geq 0
-                    // this constraint says that if we pick x_{i}, then we must have all [x1, x2, ...] \in q
-                    // to be enabled
+                      // constraints!
+                      // each query plan has all the necessary onions + precomp onions it needs
+                      // (we add hom group constraints separately, below)
+                      //
+                      // we formulate as follows: suppose plan i requires onions q = [x1, x2, ...]
+                      // each plan i contributes the following inequality constraint:
+                      //   \sum_{q} x_{q} - |q|x_{i} \geq 0
+                      // this constraint says that if we pick x_{i}, then we must have all [x1, x2, ...] \in q
+                      // to be enabled
 
-                    A_arg(0)(globalId) += 1.0 // onion
-                    A_arg(0)(pidx) -= 1.0 // query
+                      A_arg(0)(globalId) += 1.0 // onion
+                      A_arg(0)(pidx) -= 1.0 // query
+                    }
                   }
                 }
                 m.foreach {
@@ -360,7 +361,7 @@ trait Formulator {
           proc(reg, ectx.requiredOnions)
           proc(pre, ectx.precomputed)
 
-          val gHomTable = globalXAssignHom(tbl)
+          val gHomTable: HashMap[Int, Int] = globalXAssignHom.getOrElse(tbl, HashMap.empty)
           ectx.homGroups.get(tbl).foreach(_.foreach { g =>
             val globalId = gHomTable(g)
             A_arg(0)(globalId) += 1.0
