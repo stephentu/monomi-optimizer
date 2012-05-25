@@ -46,11 +46,11 @@ package object math_defns {
   }
 
   def matrixAsMCode[A](m: ImmMatrix[A]): String = {
-    m.map(vectorAsMCode(_)).mkString("[", ";", "]")
+    m.map(v => vectorAsMCode(v, false)).mkString("[", ";", "]")
   }
 
-  def vectorAsMCode[A](v: ImmVector[A]): String = {
-    v.map(_.toString).mkString("[", ",", "]")
+  def vectorAsMCode[A](v: ImmVector[A], c: Boolean): String = {
+    v.map(_.toString).mkString("[", (if (c) ";" else ","), "]")
   }
 }
 
@@ -95,20 +95,20 @@ case class BIQPInstance(
       buf.append(";\n")
     }
 
-    def writeVector[A](name: String, v: ImmVector[A]) = {
+    def writeVector[A](name: String, v: ImmVector[A], c: Boolean) = {
       buf.append(name)
       buf.append(" = ")
-      buf.append(vectorAsMCode(v))
+      buf.append(vectorAsMCode(v, c))
       buf.append(";\n")
     }
 
     writeMatrix("Q", Q)
-    writeVector("c", c)
+    writeVector("c", c, true)
 
     ieq_constraint match {
       case Some((a, b)) =>
         writeMatrix("A", a)
-        writeVector("b", b)
+        writeVector("b", b, true)
 
       case None =>
         buf.append("A = [];\n")
@@ -118,14 +118,16 @@ case class BIQPInstance(
     eq_constraint match {
       case Some((aeq, beq)) =>
         writeMatrix("Aeq", aeq)
-        writeVector("beq", beq)
+        writeVector("beq", beq, true)
 
       case None =>
         buf.append("Aeq = [];\n")
         buf.append("beq = [];\n")
     }
 
-    buf.append("[xmin, fmin, flag, Extendedflag] = miqp(Q, c, A, b, Aeq, beq, [1:%d]);\n".format(n))
+    buf.append("Options = struct('method', 'breadth', 'maxQPiter', 100000);\n")
+    buf.append("[xmin, fmin, flag, Extendedflag] = ")
+    buf.append("miqp(Q, c, A, b, Aeq, beq, [1:%d], [], [], [], Options);\n".format(n))
 
     buf.toString
   }
@@ -333,7 +335,13 @@ trait Formulator {
                   os.foreach { o =>
                     gTable.get((k, o)).foreach { globalId =>
                       // TODO: scale accordingly
-                      Q_arg(pidx)(globalId) = 2.0 * nscans * (sTable.row_count.toDouble)
+                      val recordSize = 4.0
+                      val cost =
+                        CostConstants.secToPGUnit(
+                          nscans *
+                          (recordSize *
+                           sTable.row_count.toDouble / CostConstants.DiskReadBytesPerSec))
+                      Q_arg(pidx)(globalId) = 2.0 * cost
 
                       // constraints!
                       // each query plan has all the necessary onions + precomp onions it needs
