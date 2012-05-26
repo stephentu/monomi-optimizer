@@ -1,5 +1,8 @@
 package edu.mit.cryptdb.tpch
 
+// TODO: take data from the same run of ./qgen (instead of mixing runs together)
+// this way, we can say we used random seed X if asked
+
 object Queries {
   val q1 = """
 select
@@ -16,7 +19,7 @@ select
 from
   lineitem
 where
-  l_shipdate <= date '1998-12-01' - interval '5' day
+  l_shipdate <= date '1998-01-01' - interval '5' day
 group by
   l_returnflag,
   l_linestatus
@@ -43,11 +46,11 @@ from
 where
   p_partkey = ps_partkey
   and s_suppkey = ps_suppkey
-  and p_size = 10
-  and p_type like '%foo'
+  and p_size = 36
+  and p_type like '%STEEL'
   and s_nationkey = n_nationkey
   and n_regionkey = r_regionkey
-  and r_name = 'somename'
+  and r_name = 'ASIA'
   and ps_supplycost = (
     select
       min(ps_supplycost)
@@ -61,7 +64,7 @@ where
       and s_suppkey = ps_suppkey
       and s_nationkey = n_nationkey
       and n_regionkey = r_regionkey
-      and r_name = 'somename'
+      and r_name = 'ASIA'
   )
 order by
   s_acctbal desc,
@@ -82,11 +85,11 @@ from
   orders,
   lineitem
 where
-  c_mktsegment = 'somesegment'
+  c_mktsegment = 'FURNITURE'
   and c_custkey = o_custkey
   and l_orderkey = o_orderkey
-  and o_orderdate < date '1999-01-01'
-  and l_shipdate > date '1999-01-01'
+  and o_orderdate < date '1995-03-12'
+  and l_shipdate > date '1995-03-12'
 group by
   l_orderkey,
   o_orderdate,
@@ -104,8 +107,8 @@ select
 from
   orders
 where
-  o_orderdate >= date '1999-01-01'
-  and o_orderdate < date '1999-01-01' + interval '3' month
+  o_orderdate >= date '1994-11-01'
+  and o_orderdate < date '1994-11-01' + interval '3' month
   and exists (
     select
       *
@@ -139,9 +142,9 @@ where
   and c_nationkey = s_nationkey
   and s_nationkey = n_nationkey
   and n_regionkey = r_regionkey
-  and r_name = 'foo'
-  and o_orderdate >= date '1999-01-01'
-  and o_orderdate < date '1999-01-01' + interval '1' year
+  and r_name = 'MIDDLE EAST'
+  and o_orderdate >= date '1993-01-01'
+  and o_orderdate < date '1993-01-01' + interval '1' year
 group by
   n_name
 order by
@@ -154,10 +157,10 @@ select
 from
   lineitem
 where
-  l_shipdate >= date '1999-01-01'
-  and l_shipdate < date '1999-01-01' + interval '1' year
-  and l_discount between 2 - 0.01 and 2 + 0.01
-  and l_quantity < 3;
+  l_shipdate >= date '1993-01-01'
+  and l_shipdate < date '1993-01-01' + interval '1' year
+  and l_discount between 0.05 - 0.01 and 0.05 + 0.01
+  and l_quantity < 25;
 """
 
   val q7 = """
@@ -187,8 +190,8 @@ from
       and s_nationkey = n1.n_nationkey
       and c_nationkey = n2.n_nationkey
       and (
-        (n1.n_name = 'a' and n2.n_name = 'b')
-        or (n1.n_name = 'b' and n2.n_name = 'a')
+        (n1.n_name = 'SAUDI ARABIA' and n2.n_name = 'ARGENTINA')
+        or (n1.n_name = 'ARGENTINA' and n2.n_name = 'SAUDI ARABIA')
       )
       and l_shipdate between date '1995-01-01' and date '1996-12-31'
   ) as shipping
@@ -206,7 +209,7 @@ order by
 select
   o_year,
   sum(case
-    when nation = 'nation' then volume
+    when nation = 'ARGENTINA' then volume
     else 0
   end) / sum(volume) as mkt_share
 from
@@ -231,10 +234,10 @@ from
       and o_custkey = c_custkey
       and c_nationkey = n1.n_nationkey
       and n1.n_regionkey = r_regionkey
-      and r_name = 'rname'
+      and r_name = 'AMERICA'
       and s_nationkey = n2.n_nationkey
       and o_orderdate between date '1995-01-01' and date '1996-12-31'
-      and p_type = 'ptype'
+      and p_type = 'PROMO ANODIZED BRASS'
   ) as all_nations
 group by
   o_year
@@ -295,8 +298,8 @@ from
 where
   c_custkey = o_custkey
   and l_orderkey = o_orderkey
-  and o_orderdate >= date '1999-01-01'
-  and o_orderdate < date '1999-01-01' + interval '3' month
+  and o_orderdate >= date '1994-08-01'
+  and o_orderdate < date '1994-08-01' + interval '3' month
   and l_returnflag = 'R'
   and c_nationkey = n_nationkey
 group by
@@ -327,7 +330,7 @@ group by
   ps_partkey having
     sum(ps_supplycost * ps_availqty) > (
       select
-        sum(ps_supplycost * ps_availqty) * 300
+        sum(ps_supplycost * ps_availqty) * 0.0001
       from
         partsupp,
         supplier,
@@ -335,7 +338,7 @@ group by
       where
         ps_suppkey = s_suppkey
         and s_nationkey = n_nationkey
-        and n_name = 'name'
+        and n_name = 'ARGENTINA'
     )
 order by
   value desc;
@@ -361,11 +364,11 @@ from
   lineitem
 where
   o_orderkey = l_orderkey
-  and l_shipmode in ('mode0', 'mode1')
+  and l_shipmode in ('AIR', 'FOB')
   and l_commitdate < l_receiptdate
   and l_shipdate < l_commitdate
-  and l_receiptdate >= date '1998-01-01'
-  and l_receiptdate < date '1998-01-01' + interval '1' year
+  and l_receiptdate >= date '1993-01-01'
+  and l_receiptdate < date '1993-01-01' + interval '1' year
 group by
   l_shipmode
 order by
@@ -407,8 +410,8 @@ from
   part
 where
   l_partkey = p_partkey
-  and l_shipdate >= date '1999-01-01'
-  and l_shipdate < date '1999-01-01' + interval '1' month;
+  and l_shipdate >= date '1996-07-01'
+  and l_shipdate < date '1996-07-01' + interval '1' month;
 """
 
   val q16 = """
@@ -422,9 +425,9 @@ from
   part
 where
   p_partkey = ps_partkey
-  and p_brand <> 'foo'
-  and p_type not like 'bar%'
-  and p_size in (3, 4, 5, 6, 7, 8, 9, 10)
+  and p_brand <> 'Brand#43'
+  and p_type not like 'PROMO ANODIZED%'
+  and p_size in (15, 12, 33, 48, 41, 9, 2, 18)
   and ps_suppkey not in (
     select
       s_suppkey
@@ -452,8 +455,8 @@ from
   part
 where
   p_partkey = l_partkey
-  and p_brand = 'a'
-  and p_container = 'b'
+  and p_brand = 'Brand#45'
+  and p_container = 'LG BOX'
   and l_quantity < (
     select
       0.2 * avg(l_quantity)
@@ -484,7 +487,7 @@ where
       lineitem
     group by
       l_orderkey having
-        sum(l_quantity) > 330
+        sum(l_quantity) > 315
   )
   and c_custkey = o_custkey
   and o_orderkey = l_orderkey
@@ -502,40 +505,40 @@ limit 100;
 
   val q19 = """
 select
-  sum(l_extendedprice* (1 - l_discount)) as revenue
+        sum(l_extendedprice* (1 - l_discount)) as revenue
 from
-  lineitem,
-  part
+        lineitem,
+        part
 where
-  (
-    p_partkey = l_partkey
-    and p_brand = 'foo'
-    and p_container in ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
-    and l_quantity >= 4 and l_quantity <= 4 + 10
-    and p_size between 1 and 5
-    and l_shipmode in ('AIR', 'AIR REG')
-    and l_shipinstruct = 'DELIVER IN PERSON'
-  )
-  or
-  (
-    p_partkey = l_partkey
-    and p_brand = 'bar'
-    and p_container in ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
-    and l_quantity >= 5 and l_quantity <= 5 + 10
-    and p_size between 1 and 10
-    and l_shipmode in ('AIR', 'AIR REG')
-    and l_shipinstruct = 'DELIVER IN PERSON'
-  )
-  or
-  (
-    p_partkey = l_partkey
-    and p_brand = 'baz'
-    and p_container in ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
-    and l_quantity >= 6 and l_quantity <= 6 + 10
-    and p_size between 1 and 15
-    and l_shipmode in ('AIR', 'AIR REG')
-    and l_shipinstruct = 'DELIVER IN PERSON'
-  );
+        (
+                p_partkey = l_partkey
+                and p_brand = 'Brand#23'
+                and p_container in ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+                and l_quantity >= 10 and l_quantity <= 10 + 10
+                and p_size between 1 and 5
+                and l_shipmode in ('AIR', 'AIR REG')
+                and l_shipinstruct = 'DELIVER IN PERSON'
+        )
+        or
+        (
+                p_partkey = l_partkey
+                and p_brand = 'Brand#32'
+                and p_container in ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
+                and l_quantity >= 20 and l_quantity <= 20 + 10
+                and p_size between 1 and 10
+                and l_shipmode in ('AIR', 'AIR REG')
+                and l_shipinstruct = 'DELIVER IN PERSON'
+        )
+        or
+        (
+                p_partkey = l_partkey
+                and p_brand = 'Brand#34'
+                and p_container in ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+                and l_quantity >= 20 and l_quantity <= 20 + 10
+                and p_size between 1 and 15
+                and l_shipmode in ('AIR', 'AIR REG')
+                and l_shipinstruct = 'DELIVER IN PERSON'
+        );
 """
 
   val q20 = """
@@ -558,7 +561,7 @@ where
         from
           part
         where
-          p_name like 'foo%'
+          p_name like 'khaki%'
       )
       and ps_availqty > (
         select
@@ -568,12 +571,12 @@ where
         where
           l_partkey = ps_partkey
           and l_suppkey = ps_suppkey
-          and l_shipdate >= date '1999-01-01'
-          and l_shipdate < date '1999-01-01' + interval '1' year
+          and l_shipdate >= date '1997-01-01'
+          and l_shipdate < date '1997-01-01' + interval '1' year
       )
   )
   and s_nationkey = n_nationkey
-  and n_name = 'foo'
+  and n_name = 'ALGERIA'
 order by
   s_name;
 """
@@ -612,7 +615,7 @@ where
       and l3.l_receiptdate > l3.l_commitdate
   )
   and s_nationkey = n_nationkey
-  and n_name = 'foo'
+  and n_name = 'IRAN'
 group by
   s_name
 order by
@@ -635,7 +638,7 @@ from
       customer
     where
       substring(c_phone from 1 for 2) in
-        ('11', '22', '33', '44', '55', '66', '77')
+        ('41', '26', '36', '27', '38', '37', '22')
       and c_acctbal > (
         select
           avg(c_acctbal)
@@ -644,7 +647,7 @@ from
         where
           c_acctbal > 0.00
           and substring(c_phone from 1 for 2) in
-            ('11', '22', '33', '44', '55', '66', '77')
+            ('41', '26', '36', '27', '38', '37', '22')
       )
       and not exists (
         select
