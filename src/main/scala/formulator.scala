@@ -139,6 +139,21 @@ case class BIQPInstance(
 
 trait Formulator {
 
+  def optimize(
+    defns: Definitions,
+    stats: Statistics,
+    queries: Seq[ Seq[(PlanNode, EstimateContext, Estimate)] ]): Seq[PlanNode] = {
+
+    // TODO: use the quadratic program formulation
+
+    // for now, just ignore the cross query effects and optimize purely locally
+
+    queries.map { candidates =>
+      // find the min cost candidate
+      candidates.sortBy(_._3.cost).head._1
+    }
+  }
+
   private def toImm(hm: HashMap[String, HashMap[String, Int]]):
     Map[String, Map[String, Int]] = {
     hm.map { case (k, v) => (k, v.toMap) }.toMap

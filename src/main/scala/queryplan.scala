@@ -70,9 +70,7 @@ case class Estimate(
 
 object CostConstants {
 
-  // the number of seconds in one unit of cost from postgres
-  // this needs to be tuned per machine
-  final val SecPerPGUnit: Double = 1.0
+  final val PGUnitPerSec: Double = 85000.0
 
   final val NetworkXferBytesPerSec: Double = 10485760.0 // 10 MB/sec
 
@@ -105,7 +103,7 @@ object CostConstants {
       Onions.HOM -> (0.6982  / 1000.0))
 
   @inline def secToPGUnit(s: Double): Double = {
-    s / SecPerPGUnit
+    s * PGUnitPerSec
   }
 }
 
@@ -547,6 +545,32 @@ case class RemoteSql(stmt: SelectStmt,
 
     topDownTraverseCtx(reverseStmt0)
 
+    // adjust sequential scans to reflect extra onions
+    // TODO: we need to take onion sizes into account- for now, let's
+    // just assume all onions are the same size. So the cost we get
+    // from the DB includes 1 onion per column. We scan through the
+    // required+precomputed onions and any columns which require > 1
+    // onion get an additional cost tacked on to their sequential scans
+    var addSeqScanCost = 0.0
+    ssi.foreach { case (reln, nscans) =>
+      def proc(m: Map[String, Int]) = {
+        m.foreach { case (_, os) =>
+          val oseq = Onions.toSeq(os)
+          assert(oseq.size >= 1)
+          if (oseq.size > 1) {
+            val n = oseq.size - 1
+            // TODO: don't treat all onions the same size
+            addSeqScanCost += CostConstants.secToPGUnit(
+              4.0 * n.toDouble *
+              stats.stats(reln).row_count.toDouble / CostConstants.DiskReadBytesPerSec *
+              nscans.toDouble)
+          }
+        }
+      }
+      proc(ctx.requiredOnions.getOrElse(reln, Map.empty))
+      proc(ctx.precomputed.getOrElse(reln, Map.empty))
+    }
+
     // data xfer to client cost
     val td = tupleDesc
     val bytesToXfer = td.map {
@@ -556,7 +580,8 @@ case class RemoteSql(stmt: SelectStmt,
     }.sum * r.toDouble
 
     Estimate(
-      c + aggCost + subrelations.map(_._1.costEstimate(ctx, stats).cost).sum +
+      c + aggCost + addSeqScanCost +
+      subrelations.map(_._1.costEstimate(ctx, stats).cost).sum +
         CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec),
       r, rr.getOrElse(1), reverseStmt0, ssi)
   }
