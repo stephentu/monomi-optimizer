@@ -1,4 +1,5 @@
 #include "postgres.h"
+#include "fmgr.h"
 
 // these are the dummy UDFs needed to give postgres valid queries
 
