@@ -2185,12 +2185,12 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     // the set of relations for which it had created a HOM
     // group for
 
-    val candidates /* Seq[ Seq[(Set[String], OnionSet)] ] */ =
-      perms.map { p /* Seq[Seq[(Set[String], OnionSet)]] */ =>
-        val merged = p.map { g /* Seq[(Set[String], OnionSet)] */ =>
+    val candidates /* :Seq[ Seq[(Seq[String], OnionSet)] ] */ =
+      perms.map { p /* :Seq[Seq[(Set[String], OnionSet)]] */ =>
+        val merged = p.map { g /* :Seq[(Set[String], OnionSet)] */ =>
           (g.flatMap(_._1), OnionSet.mergeSeq(g.map(_._2)))
         }
-        CollectionUtils.uniqueInOrderWithKey(merged)(_._2)
+        CollectionUtils.uniqueInOrder(merged)
       }
 
     // ------- create a global set of groups -------- //
