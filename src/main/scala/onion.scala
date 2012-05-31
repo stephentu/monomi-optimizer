@@ -107,6 +107,24 @@ sealed abstract trait OnionType {
   def onion: Int
   @inline def isOneOf(mask: Int): Boolean = (onion & mask) != 0
   @inline def isPlain: Boolean = onion == Onions.PLAIN
+
+  def toCPP: String = onion match {
+    case Onions.PLAIN => "oNONE"
+    case Onions.DET   => "oDET"
+    case Onions.OPE   => "oOPE"
+    case Onions.SWP   => "oSWP"
+    case Onions.HOM | Onions.HOM_ROW_DESC | Onions.HOM_AGG => "oAGG"
+  }
+
+  // hack for now...
+  // TODO: need to take into account if we need the JOIN variants...
+  def seclevelToCPP: String = onion match {
+    case Onions.PLAIN => "SECLEVEL::PLAIN"
+    case Onions.DET   => "SECLEVEL::DET"
+    case Onions.OPE   => "SECLEVEL::OPE"
+    case Onions.SWP   => "SECLEVEL::SWP"
+    case Onions.HOM | Onions.HOM_ROW_DESC | Onions.HOM_AGG => "SECLEVEL::SEMANTIC_AGG"
+  }
 }
 
 case object PlainOnion extends OnionType {

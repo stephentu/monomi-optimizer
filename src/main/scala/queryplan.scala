@@ -107,7 +107,21 @@ object CostConstants {
   }
 }
 
-case class PosDesc(onion: OnionType, vectorCtx: Boolean)
+case class PosDesc(
+  origTpe: DataType, 
+  origFieldname: Option[(String, String)],
+  onion: OnionType, 
+  vectorCtx: Boolean) {
+
+  def toCPP: String = {
+    "db_column_desc(%s, %s, %s, %s, %b)".format(
+      origTpe.toCPP,
+      onion.toCPP,
+      onion.seclevelToCPP,
+      origFieldname.map(_._2).getOrElse(""),
+      vectorCtx)
+  }
+}
 
 case class UserAggDesc(
   rows: Long,
@@ -297,6 +311,8 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
     resolve(stmt, defns)
   }
 
+  def emitCPP(cg: CodeGenerator): Unit
+
   // printing stuff
   def pretty: String = pretty0(0)
 
@@ -322,7 +338,6 @@ object FieldNameHelpers {
     if (!s.contains("$")) None
     else Onions.onionFromStr(s.split("\\$").last)
   }
-
 }
 
 case class RemoteSql(stmt: SelectStmt,
@@ -447,7 +462,7 @@ case class RemoteSql(stmt: SelectStmt,
 
               def followProjs(e: SqlExpr): SqlExpr =
                 e match {
-                  case FieldIdent(_, _, ProjectionSymbol(name, ctx), _) =>
+                  case FieldIdent(_, _, ProjectionSymbol(name, ctx, _), _) =>
                     val expr1 = ctx.lookupProjection(name).get
                     followProjs(expr1)
                   case _ => e
@@ -458,7 +473,7 @@ case class RemoteSql(stmt: SelectStmt,
               keys.foldLeft(1.0) {
                 case (acc, expr) =>
                   val corr = followProjs(expr) match {
-                    case FieldIdent(_, _, ColumnSymbol(reln, col, _), _) =>
+                    case FieldIdent(_, _, ColumnSymbol(reln, col, _, _), _) =>
                       stats.stats.get(reln)
                         .flatMap(_.column_stats.get(col).map(x => math.abs(x.correlation)))
                         .getOrElse(DefaultGuess)
@@ -574,7 +589,7 @@ case class RemoteSql(stmt: SelectStmt,
     // data xfer to client cost
     val td = tupleDesc
     val bytesToXfer = td.map {
-      case PosDesc(onion, vecCtx) =>
+      case PosDesc(_, _, onion, vecCtx) =>
         // assume everything is 4 bytes now
         if (vecCtx) 4.0 * rr.get else 4.0
     }.sum * r.toDouble
@@ -584,6 +599,18 @@ case class RemoteSql(stmt: SelectStmt,
       subrelations.map(_._1.costEstimate(ctx, stats).cost).sum +
         CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec),
       r, rr.getOrElse(1), reverseStmt0, ssi)
+  }
+
+  def emitCPP(cg: CodeGenerator) = {
+    cg.print("new remote_sql_op(")
+    cg.printStr(stmt.sqlFromDialect(PostgresDialect)) 
+    cg.print(", %s".format( projs.map(_.toCPP).mkString("{", ", ", "}") ))
+    cg.print(", {")
+    subrelations.foreach(x => { 
+      x._1.emitCPP(cg)
+      cg.print(", ")
+    })
+    cg.print("})") 
   }
 }
 
@@ -598,7 +625,7 @@ case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
     // compute cost of xfering each row back to server
     val td = tupleDesc
     val bytesToXfer = td.map {
-      case PosDesc(onion, vecCtx) =>
+      case PosDesc(_, _, onion, vecCtx) =>
         // assume everything is 4 bytes now
         if (vecCtx) 4.0 * ch.rowsPerRow else 4.0
     }.sum * ch.rows.toDouble
@@ -606,6 +633,8 @@ case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
 
     ch.copy(cost = ch.cost + xferCost)
   }
+
+  def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
 
 case class LocalOuterJoinFilter(
@@ -665,6 +694,8 @@ case class LocalOuterJoinFilter(
     // TODO: estimate the cost
     Estimate(ch.cost, r, rr.getOrElse(1), stmt, ch.seqScanInfo)
   }
+
+  def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
 
 case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
@@ -729,25 +760,60 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
     // TODO: how do we cost filters?
     Estimate(ch.cost + subCosts, r, rr.getOrElse(1L), stmt, ch.seqScanInfo)
   }
+
+  def emitCPP(cg: CodeGenerator) = {
+    cg.print("new local_filter_op(")
+    cg.print(expr.toCPP)
+    cg.print(", ")
+    child.emitCPP(cg)
+    cg.print(", {")
+    subqueries.foreach(s => {s.emitCPP(cg); cg.print(", ")})
+    cg.print("})")
+  }
 }
 
-case class LocalTransform(trfms: Seq[Either[Int, SqlExpr]], child: PlanNode) extends PlanNode {
+case class LocalTransform(
+  trfms: Seq[Either[Int, (SqlExpr, SqlExpr)]] /* (orig, translated) */, 
+  child: PlanNode) extends PlanNode {
+
   assert(!trfms.isEmpty)
+
   def tupleDesc = {
     val td = child.tupleDesc
     trfms.map {
       case Left(pos) => td(pos)
 
       // TODO: allow for transforms to not remove vector context
-      case Right(_)  => PosDesc(PlainOnion, false)
+      case Right((o, _)) => 
+        val t = o.getType
+        PosDesc(t.tpe, t.field, PlainOnion, false)
     }
   }
+
   def pretty0(lvl: Int) =
     "* LocalTransform(transformation = " + trfms + ")" + childPretty(lvl, child)
 
   def costEstimate(ctx: EstimateContext, stats: Statistics) = {
     // we assume these operations are cheap
     child.costEstimate(ctx, stats)
+  }
+
+  def emitCPP(cg: CodeGenerator) = {
+    cg.print("new local_transform_op(")
+    cg.print("{")
+    trfms.foreach {
+      case Left(i) =>
+        cg.print("local_transform_op::trfm_desc(%d), ".format(i))
+      case Right((orig, texpr)) =>
+        val t = orig.getType
+        cg.print("local_transform_op::trfm_desc(std::make_pair(%s, %s)), ".format( 
+          PosDesc(t.tpe, t.field, PlainOnion, false).toCPP, 
+          texpr.toCPP
+        ))
+    }
+    cg.print("}, ")
+    child.emitCPP(cg) 
+    cg.print(")")
   }
 }
 
@@ -770,7 +836,7 @@ case class LocalGroupBy(
     assert(ch.equivStmt.groupBy.isEmpty)
 
     val nameSet = origKeys.flatMap {
-      case FieldIdent(_, _, ColumnSymbol(tbl, col, _), _) =>
+      case FieldIdent(_, _, ColumnSymbol(tbl, col, _, _), _) =>
         Some((tbl, col))
       case _ => None
     }.toSet
@@ -796,6 +862,7 @@ case class LocalGroupBy(
     // TODO: estimate the cost
     Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
   }
+  def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
 
 case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
@@ -827,6 +894,7 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
     // TODO: how do we cost filters?
     Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
   }
+  def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
 
 case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extends PlanNode {
@@ -845,6 +913,16 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
 
     child.costEstimate(ctx, stats)
   }
+
+  def emitCPP(cg: CodeGenerator) = {
+    cg.print(
+      "new local_order_by(%s, ".format(
+        sortKeys.map { 
+          case (i, o) => "std::make_pair(%d, %b)".format(i, o == DESC)
+        }.mkString("{", ", ", "}")))
+    child.emitCPP(cg)
+    cg.print(")")
+  }
 }
 
 case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
@@ -859,6 +937,12 @@ case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
     // of TPC-H
     Estimate(ch.cost, math.min(limit, ch.rows), ch.rowsPerRow,
              ch.equivStmt, ch.seqScanInfo)
+  }
+
+  def emitCPP(cg: CodeGenerator) = {
+    cg.print("new local_limit(%d, ".format(limit))
+    child.emitCPP(cg)
+    cg.print(")")
   }
 }
 
@@ -884,11 +968,11 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
     val td = child.tupleDesc
     def costPos(p: Int): Double = {
       td(p) match {
-        case PosDesc(HomGroupOnion(tbl, grp), _) =>
+        case PosDesc(_, _, HomGroupOnion(tbl, grp), _) =>
           val c = CostConstants.secToPGUnit(CostConstants.DecryptCostMap(Onions.HOM))
           c * ch.rows.toDouble // for now assume that each agg group needs to do 1 decryption
 
-        case PosDesc(RegularOnion(o), vecCtx) =>
+        case PosDesc(_, _, RegularOnion(o), vecCtx) =>
           val c = CostConstants.secToPGUnit(CostConstants.DecryptCostMap(o))
           c * ch.rows.toDouble * (if (vecCtx) ch.rowsPerRow.toDouble else 1.0)
 
@@ -898,6 +982,14 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
     }
     val contrib = positions.map(costPos).sum
     ch.copy(cost = ch.cost + contrib)
+  }
+
+  def emitCPP(cg: CodeGenerator) = {
+    cg.print(
+      "new local_decrypt_op(%s, ".format(
+        positions.map(_.toString).mkString("{", ", ", "}")))
+    child.emitCPP(cg)
+    cg.print(")")
   }
 }
 
@@ -937,4 +1029,6 @@ case class LocalEncrypt(
     val contrib = positions.map(costPos).sum
     ch.copy(cost = ch.cost + contrib)
   }
+
+  def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }

@@ -29,7 +29,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
   private def resolveAliases(e: SqlExpr): SqlExpr = {
     topDownTransformation(e) {
-      case FieldIdent(_, _, ProjectionSymbol(name, ctx), _) =>
+      case FieldIdent(_, _, ProjectionSymbol(name, ctx, _), _) =>
         val expr1 = ctx.lookupProjection(name).get
         replaceWith(resolveAliases(expr1))
       case x => keepGoing
@@ -91,7 +91,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       Some((r.get._1, r.get._2, e0))
     } else {
       e match {
-        case FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _) =>
+        case FieldIdent(_, _, ColumnSymbol(relation, name, ctx, _), _) =>
           if (ctx.relations(relation).isInstanceOf[SubqueryRelation]) {
             // recurse on the sub-relation
             ctx
@@ -153,7 +153,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     (SelectStmt, Seq[(DependentFieldPlaceholder, FieldIdent)]) = {
     val buf = new ArrayBuffer[(DependentFieldPlaceholder, FieldIdent)]
     (topDownTransformation(stmt) {
-      case fi @ FieldIdent(_, _, ColumnSymbol(_, _, ctx), _) =>
+      case fi @ FieldIdent(_, _, ColumnSymbol(_, _, ctx, _), _) =>
         if (ctx.isParentOf(stmt.ctx)) {
           val rep = DependentFieldPlaceholder(buf.size)
           buf += ((rep, fi))
@@ -233,7 +233,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       } else {
         def procSubqueryRef(e: SqlExpr): Option[(SqlExpr, Seq[HomDesc])] = {
           e match {
-            case fi @ FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _)
+            case fi @ FieldIdent(_, _, ColumnSymbol(relation, name, ctx, _), _)
               if ctx.relations(relation).isInstanceOf[SubqueryRelation] =>
               val idx =
                 ctx
@@ -259,7 +259,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
         }
         findOnionableExpr(e).flatMap { case (r, t, x) =>
           e match {
-            case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx), _)
+            case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx, _), _)
               if ctx.relations(relation).isInstanceOf[SubqueryRelation] => procSubqueryRef(e)
             case _ =>
               val qual = if (r == t) encTblName(t) else r
@@ -313,7 +313,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
         case _ =>
           def procSubqueryRef(e: SqlExpr) = {
             e match {
-              case fi @ FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _)
+              case fi @ FieldIdent(_, _, ColumnSymbol(relation, name, ctx, _), _)
                 if ctx.relations(relation).isInstanceOf[SubqueryRelation] =>
                 val idx =
                   ctx
@@ -333,7 +333,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
           val e0 = findOnionableExpr(e)
           e0.flatMap { case (r, t, x) =>
             e match {
-              case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx), _)
+              case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx, _), _)
                 if ctx.relations(relation).isInstanceOf[SubqueryRelation] => procSubqueryRef(e)
               case _ =>
                 onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).map {
@@ -1162,7 +1162,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
             exprs.foreach {
               case (e, o) if o != Onions.DET =>
                 e match {
-                  case FieldIdent(_, _, ColumnSymbol(relation, name, ctx), _) =>
+                  case FieldIdent(_, _, ColumnSymbol(relation, name, ctx, _), _) =>
                     if (ctx.relations(relation).isInstanceOf[SubqueryRelation]) {
                       val sr = ctx.relations(relation).asInstanceOf[SubqueryRelation]
                       val projExpr = sr.stmt.ctx.lookupProjection(name)
@@ -1562,7 +1562,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
             return None
           }
           e match {
-            case FieldIdent(_, _, ProjectionSymbol(name, _), _) =>
+            case FieldIdent(_, _, ProjectionSymbol(name, _, _), _) =>
               // named projection is easy
               e.ctx.lookupNamedProjectionIndex(name)
             case _ =>
@@ -1743,8 +1743,12 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     }
 
     val tdesc =
-      if (finalProjs.isEmpty) Seq(PosDesc(PlainOnion, false))
-      else finalProjs.map { case (_, _, o, v) => PosDesc(o, v) }.toSeq
+      if (finalProjs.isEmpty) Seq(PosDesc(UnknownType, None, PlainOnion, false))
+      else finalProjs.map { 
+        case (e, _, o, v) => 
+          val tpe = e.getType
+          PosDesc(tpe.tpe, tpe.field, o, v) 
+      }.toSeq
 
     // --join filters
     val stage0 =
@@ -1766,7 +1770,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
                 // to the relation it references
 
                 val refs = finalProjs.map {
-                  case (FieldIdent(_, _, ColumnSymbol(reln, _, _), _), _, _, _) => reln
+                  case (FieldIdent(_, _, ColumnSymbol(reln, _, _, _), _), _, _, _) => reln
                   case e =>
                     throw new RuntimeException("should see FieldIdent instead of " + e)
                 }
@@ -1851,7 +1855,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
           val projTrfms = projPosMaps.map {
             case Right((comp, mapping)) =>
               assert(comp.subqueries.isEmpty)
-              Right(comp.mkSqlExpr(mapping))
+              Right((comp.origExpr, comp.mkSqlExpr(mapping)))
             case Left((p, _)) => Left(p)
           }
 
@@ -1869,7 +1873,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
           val trfms = projTrfms ++ auxTrfms
 
-          def isPrefixIdentityTransform(trfms: Seq[Either[Int, SqlExpr]]): Boolean = {
+          def isPrefixIdentityTransform(trfms: Seq[Either[Int, (SqlExpr, SqlExpr)]]): Boolean = {
             trfms.zipWithIndex.foldLeft(true) {
               case (acc, (Left(p), idx)) => acc && p == idx
               case (acc, (Right(_), _))  => false
@@ -1915,7 +1919,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
           val orderTrfms =
             newLocalOrderBy.zip(localOrderByPosMaps).flatMap {
               case (Left(p), _)  => None
-              case (Right(c), m) => Some(Right(c.mkSqlExpr(m)))
+              case (Right(c), m) => Some(Right((c.origExpr, c.mkSqlExpr(m))))
             }
 
           var offset = projPosMaps.size

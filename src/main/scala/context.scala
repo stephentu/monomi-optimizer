@@ -4,16 +4,17 @@ import scala.collection.mutable.{ArrayBuffer, HashMap}
 
 abstract trait Symbol {
   val ctx: Context
+  val tpe: DataType
 }
 
 // a symbol corresponding to a reference to a column from a relation in this context.
 // note that this column is not necessarily projected in this context
-case class ColumnSymbol(relation: String, column: String, ctx: Context) extends Symbol
+case class ColumnSymbol(relation: String, column: String, ctx: Context, tpe: DataType) extends Symbol
 
 // a symbol corresponding to a reference to a projection in this context.
 // note b/c of sql scoping rules, this symbol can only appear in the keys of a
 // {group,order} by clause (but not the having clause of a group by)
-case class ProjectionSymbol(name: String, ctx: Context) extends Symbol
+case class ProjectionSymbol(name: String, ctx: Context, tpe: DataType) extends Symbol
 
 abstract trait ProjectionType
 case class NamedProjection(name: String, expr: SqlExpr, pos: Int) extends ProjectionType
@@ -56,7 +57,7 @@ class Context(val parent: Either[Definitions, Context]) {
         def lookupRelation(r: Relation): Option[SqlExpr] = r match {
           case TableRelation(t) =>
             defns.lookup(t, name).map(tc => {
-              FieldIdent(Some(t), name, ColumnSymbol(t, name, this), this)
+              FieldIdent(Some(t), name, ColumnSymbol(t, name, this, tc.tpe), this)
             })
           case SubqueryRelation(s) =>
             s.ctx.projections.flatMap {
@@ -94,11 +95,11 @@ class Context(val parent: Either[Definitions, Context]) {
 
     def lookupRelation(topLevel: String, r: Relation): Seq[Symbol] = r match {
       case TableRelation(t) =>
-        defns.lookup(t, name).map(tc => ColumnSymbol(topLevel, name, this)).toSeq
+        defns.lookup(t, name).map(tc => ColumnSymbol(topLevel, name, this, tc.tpe)).toSeq
       case SubqueryRelation(s) =>
         s.ctx.projections.flatMap {
           case NamedProjection(n0, expr, _) if n0 == name =>
-            Seq(ColumnSymbol(topLevel, name, this))
+            Seq(ColumnSymbol(topLevel, name, this, expr.getType.tpe))
           case WildcardProjection =>
             s.ctx.lookupColumn0(None, name, inProjScope, Some(topLevel))
           case _ => Seq.empty
@@ -112,7 +113,8 @@ class Context(val parent: Either[Definitions, Context]) {
         // to column lookups first - TODO: verify if this is correct sql scoping rules.
         val r = relations.flatMap { case (r, x) => lookupRelation(topLevel.getOrElse(r), x) }.toSeq
         if (r.isEmpty) {
-          lookupProjection0(name, false).map(_ => Seq(ProjectionSymbol(name, this))).getOrElse(Seq.empty)
+          lookupProjection0(name, false).map(
+            p => Seq(ProjectionSymbol(name, this, p.getType.tpe))).getOrElse(Seq.empty)
         } else r
     }
 

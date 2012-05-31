@@ -119,7 +119,7 @@ object BitUtils {
 }
 
 trait PrettyPrinters {
-  // TODO: escape
-  protected def quoteSingle(s: String): String = "'" + s + "'"
-  protected def quoteDbl(s: String): String = "\"" + s + "\""
+  // TODO: better escaping
+  protected def quoteSingle(s: String): String = "'" + s.replaceAll("'", "\\\\'") + "'"
+  protected def quoteDbl(s: String): String = "\"" + s.replaceAll("\"", "\\\\\"") + "\""
 }
