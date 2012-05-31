@@ -268,6 +268,7 @@ case class Exists(select: Subselect, ctx: Context = null) extends SqlExpr {
 
 case class FieldIdent(qualifier: Option[String], name: String, symbol: Symbol = null, ctx: Context = null) extends SqlExpr {
   override def getType = symbol match {
+    case null                            => super.getType
     case ColumnSymbol(reln, col, _, tpe) => TypeInfo(tpe, Some((reln, col)))
     case ProjectionSymbol(_, _, tpe)     => TypeInfo(tpe, None)
   }
@@ -482,7 +483,7 @@ case class NullLiteral(ctx: Context = null) extends LiteralExpr {
 }
 case class DateLiteral(d: String, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(DateType, None)
-  def toCPP = throw new RuntimeException("not implemented")
+  def toCPP = "new date_literal_node(%s)".format(quoteDbl(d))
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = Seq("date", quoteSingle(d)) mkString " "
 }
