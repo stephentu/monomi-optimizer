@@ -194,7 +194,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     assert(BitUtils.onlyOne(o))
     assert(e.isLiteral)
     // TODO: actual encryption
-    FunctionCall("encrypt", Seq(e, IntLiteral(o), keyConstraint))
+    FunctionCall("encrypt", Seq(e, IntLiteral(o), MetaFieldIdent(keyConstraint)))
   }
 
   // if encContext is PreserveOriginal, then the plan node generated faithfully

@@ -70,6 +70,8 @@ trait ProgramGenerator {
       cg.println("#include <execution/context.hh>")
       cg.println("#include <execution/operator_types.hh>")
 
+      plans.foreach(_.emitCPPHelpers(cg))
+
       plans.zipWithIndex.foreach { case (p, idx) =>
         cg.blockBegin("static void query_%d(exec_context& ctx) {".format(idx))
 

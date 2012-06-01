@@ -311,7 +311,7 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
     resolve(stmt, defns)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator): Unit = {}
+  def emitCPPHelpers(cg: CodeGenerator): Unit
 
   def emitCPP(cg: CodeGenerator): Unit
 
@@ -374,8 +374,8 @@ case class RemoteSql(stmt: SelectStmt,
         (Some(a.copy(args = args ++ Seq(StringLiteral(ctx.uniqueId())))), true)
 
       case s @ FunctionCall("searchSWP", args, _) =>
-        // need to assign a unique ID to this UDF
-        (Some(s.copy(args = args ++ Seq(StringLiteral(ctx.uniqueId())))), true)
+        // need to assign a unique ID to this UDF 
+        (Some(s.copy(args = args ++ Seq(NullLiteral(), StringLiteral(ctx.uniqueId())))), true)
 
       case FieldIdent(Some(qual), name, _, _) =>
         // check precomputed first
@@ -407,7 +407,7 @@ case class RemoteSql(stmt: SelectStmt,
             }
         }
 
-      case FunctionCall("encrypt", Seq(e, _), _) =>
+      case FunctionCall("encrypt", Seq(e, _, _), _) =>
         (Some(e), false)
 
       case _: BoundDependentFieldPlaceholder =>
@@ -436,16 +436,13 @@ case class RemoteSql(stmt: SelectStmt,
     def topDownTraverseCtx(stmt: SelectStmt): Unit = {
       topDownTraversal(stmt) {
 
-        case f @ FunctionCall("searchSWP", Seq(_, _, StringLiteral(id, _)), _) =>
+        case f @ FunctionCall("searchSWP", args, _) =>
+          val Seq(_, _, _, StringLiteral(id, _)) = args
           aggCost += m(id).rows * CostConstants.secToPGUnit(CostConstants.SwpSearchSecPerOp)
-          //println("call " + f.sql + " stats: " + m(id))
           false
 
-        case a @ AggCall(
-          "hom_agg",
-          Seq(_, StringLiteral(tbl, _), IntLiteral(grp, _), StringLiteral(id, _)),
-          sqlCtx) =>
-
+        case a @ AggCall("hom_agg", args, sqlCtx) =>
+          val Seq(_, StringLiteral(tbl, _), IntLiteral(grp, _), StringLiteral(id, _)) = args
           assert(sqlCtx == stmt.ctx)
 
           // compute correlation score
@@ -606,7 +603,9 @@ case class RemoteSql(stmt: SelectStmt,
   private var _paramClassName: String = null
   private var _paramStmt: SelectStmt = null
 
-  override def emitCPPHelpers(cg: CodeGenerator) = {
+  def emitCPPHelpers(cg: CodeGenerator) = {
+    subrelations.foreach(_._1.emitCPPHelpers(cg))
+      
     assert(_paramClassName eq null)
     assert(_paramStmt eq null)
 
@@ -625,7 +624,7 @@ case class RemoteSql(stmt: SelectStmt,
       }
 
       _paramStmt = topDownTransformation(stmt) {
-        case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), fi: FieldIdent), _) =>
+        case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), MetaFieldIdent(fi, _)), _) =>
           assert(e.isLiteral)
           assert(BitUtils.onlyOne(o.toInt))
           assert(fi.symbol.isInstanceOf[ColumnSymbol])
@@ -640,12 +639,10 @@ case class RemoteSql(stmt: SelectStmt,
           ret
 
         case FunctionCall("searchSWP", Seq(expr, pattern), _) =>
-          assert(pattern.isLiteral)
-          assert(pattern.isInstanceOf[StringLiteral]) // TODO: do a conversion
-          assert(expr.isInstanceOf[FieldIdent]) // TODO: too strict?
+          val FunctionCall("encrypt", Seq(p, _, MetaFieldIdent(fi, _)), _) = pattern
 
           // assert pattern is something we can handle...
-          val p0 = pattern.asInstanceOf[StringLiteral].v
+          val p0 = p.asInstanceOf[StringLiteral].v
           CollectionUtils.allIndicesOf(p0, '%').foreach { i =>
             assert(i == 0 || i == (p0.size - 1))
           }
@@ -665,7 +662,7 @@ case class RemoteSql(stmt: SelectStmt,
             
             cg.println(
               "Binary key(cm->getKey(cm->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(
-                expr.asInstanceOf[FieldIdent].symbol.asInstanceOf[ColumnSymbol].fieldPosition))
+                fi.symbol.asInstanceOf[ColumnSymbol].fieldPosition))
             cg.println(
               "Token t = CryptoManager::token(key, Binary(%s));".format(
                 quoteDbl(tokens.head.toLowerCase)))
@@ -725,6 +722,8 @@ case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
 
     ch.copy(cost = ch.cost + xferCost)
   }
+
+  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
 
   def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
@@ -786,6 +785,9 @@ case class LocalOuterJoinFilter(
     // TODO: estimate the cost
     Estimate(ch.cost, r, rr.getOrElse(1), stmt, ch.seqScanInfo)
   }
+
+  def emitCPPHelpers(cg: CodeGenerator) = 
+    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
 
   def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
@@ -853,6 +855,9 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
     Estimate(ch.cost + subCosts, r, rr.getOrElse(1L), stmt, ch.seqScanInfo)
   }
 
+  def emitCPPHelpers(cg: CodeGenerator) = 
+    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
+
   def emitCPP(cg: CodeGenerator) = {
     cg.print("new local_filter_op(")
     cg.print(expr.toCPP)
@@ -889,6 +894,8 @@ case class LocalTransform(
     // we assume these operations are cheap
     child.costEstimate(ctx, stats)
   }
+
+  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
 
   def emitCPP(cg: CodeGenerator) = {
     cg.print("new local_transform_op(")
@@ -954,6 +961,10 @@ case class LocalGroupBy(
     // TODO: estimate the cost
     Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
   }
+
+  def emitCPPHelpers(cg: CodeGenerator) = 
+    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
+
   def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
 
@@ -986,6 +997,10 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
     // TODO: how do we cost filters?
     Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
   }
+
+  def emitCPPHelpers(cg: CodeGenerator) = 
+    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
+
   def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
 
@@ -1005,6 +1020,8 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
 
     child.costEstimate(ctx, stats)
   }
+
+  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
 
   def emitCPP(cg: CodeGenerator) = {
     cg.print(
@@ -1030,6 +1047,8 @@ case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
     Estimate(ch.cost, math.min(limit, ch.rows), ch.rowsPerRow,
              ch.equivStmt, ch.seqScanInfo)
   }
+
+  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
 
   def emitCPP(cg: CodeGenerator) = {
     cg.print("new local_limit(%d, ".format(limit))
@@ -1076,6 +1095,8 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
     ch.copy(cost = ch.cost + contrib)
   }
 
+  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
+
   def emitCPP(cg: CodeGenerator) = {
     cg.print(
       "new local_decrypt_op(%s, ".format(
@@ -1121,6 +1142,8 @@ case class LocalEncrypt(
     val contrib = positions.map(costPos).sum
     ch.copy(cost = ch.cost + contrib)
   }
+
+  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
 
   def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }

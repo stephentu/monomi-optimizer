@@ -629,6 +629,15 @@ case class QueryParamPlaceholder(pos: Int, ctx: Context = null) extends SqlExpr 
   def sqlFromDialect(dialect: SqlDialect) = ":" + pos
 }
 
+// dummy placeholder in AST nodes. should be completely replaced 
+case class MetaFieldIdent(fi: FieldIdent, ctx: Context = null) extends SqlExpr {
+  override def getType = fi.getType
+  def toCPP = fi.toCPP
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def gatherFields = fi.gatherFields
+  def sqlFromDialect(dialect: SqlDialect) = fi.sqlFromDialect(dialect)
+}
+
 case class SubqueryPosition(pos: Int, args: Seq[SqlExpr], ctx: Context = null) extends SqlExpr {
   def toCPP = "new subselect_node(%d, %s)".format(pos, args.map(_.toCPP).mkString("{", ", ", "}"))
   def copyWithContext(c: Context) = copy(ctx = c)
