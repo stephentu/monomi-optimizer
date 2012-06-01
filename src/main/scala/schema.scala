@@ -25,6 +25,10 @@ class Definitions(val defns: Map[String, Seq[TableColumn]], val dbconn: Option[D
     defns.get(table).flatMap(_.filter(_.name == col).headOption)
   }
 
+  def lookupPosition(table: String, col: String): Option[Int] = {
+    defns.get(table).flatMap(_.zipWithIndex.filter(_._1.name == col).map(_._2).headOption)
+  }
+
   def scalaStr: String = {
     "new Definitions(Map(" + (defns.map { case (k, v) =>
       (quoteDbl(k), "Seq(" + v.map(_.scalaStr).mkString(", ") + ")")

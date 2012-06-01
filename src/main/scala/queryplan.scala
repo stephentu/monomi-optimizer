@@ -311,6 +311,8 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
     resolve(stmt, defns)
   }
 
+  def emitCPPHelpers(cg: CodeGenerator): Unit = {}
+
   def emitCPP(cg: CodeGenerator): Unit
 
   // printing stuff
@@ -343,7 +345,7 @@ object FieldNameHelpers {
 case class RemoteSql(stmt: SelectStmt,
                      projs: Seq[PosDesc],
                      subrelations: Seq[(RemoteMaterialize, SelectStmt)] = Seq.empty)
-  extends PlanNode with Transformers {
+  extends PlanNode with Transformers with PrettyPrinters {
 
   assert(stmt.projections.size == projs.size)
   def tupleDesc = projs
@@ -434,7 +436,7 @@ case class RemoteSql(stmt: SelectStmt,
     def topDownTraverseCtx(stmt: SelectStmt): Unit = {
       topDownTraversal(stmt) {
 
-        case f @ FunctionCall("searchSWP", Seq(_, _, _, StringLiteral(id, _)), _) =>
+        case f @ FunctionCall("searchSWP", Seq(_, _, StringLiteral(id, _)), _) =>
           aggCost += m(id).rows * CostConstants.secToPGUnit(CostConstants.SwpSearchSecPerOp)
           //println("call " + f.sql + " stats: " + m(id))
           false
@@ -601,9 +603,99 @@ case class RemoteSql(stmt: SelectStmt,
       r, rr.getOrElse(1), reverseStmt0, ssi)
   }
 
+  private var _paramClassName: String = null
+  private var _paramStmt: SelectStmt = null
+
+  override def emitCPPHelpers(cg: CodeGenerator) = {
+    assert(_paramClassName eq null)
+    assert(_paramStmt eq null)
+
+    _paramClassName = "param_generator_%s".format(cg.uniqueId())
+    cg.println("class %s : public sql_param_generator {".format(_paramClassName)) 
+    cg.println("public:")
+    cg.blockBegin("virtual param_map get_param_map(exec_context& ctx) {")
+
+      cg.println("param_map m;")
+
+      var i = 0
+      def nextId(): Int = {
+        val ret = i
+        i += 1
+        ret
+      }
+
+      _paramStmt = topDownTransformation(stmt) {
+        case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), fi: FieldIdent), _) =>
+          assert(e.isLiteral)
+          assert(BitUtils.onlyOne(o.toInt))
+          assert(fi.symbol.isInstanceOf[ColumnSymbol])
+
+          // TODO: figure out if we need join (assume we don't for now)
+          val id = nextId()
+          cg.println(
+            "m[%d] = %s;".format(
+              id, e.toCPPEncrypt(o.toInt, false, fi.symbol.asInstanceOf[ColumnSymbol])))
+
+          val ret = (Some(QueryParamPlaceholder(id)), false)
+          ret
+
+        case FunctionCall("searchSWP", Seq(expr, pattern), _) =>
+          assert(pattern.isLiteral)
+          assert(pattern.isInstanceOf[StringLiteral]) // TODO: do a conversion
+          assert(expr.isInstanceOf[FieldIdent]) // TODO: too strict?
+
+          // assert pattern is something we can handle...
+          val p0 = pattern.asInstanceOf[StringLiteral].v
+          CollectionUtils.allIndicesOf(p0, '%').foreach { i =>
+            assert(i == 0 || i == (p0.size - 1))
+          }
+
+          // split on %
+          val tokens = p0.split("%").filterNot(_.isEmpty)
+          assert(!tokens.isEmpty)
+          if (tokens.size > 1) {
+            throw new RuntimeException("cannot handle multiple tokens for now")
+          }
+
+          val id0 = nextId()
+          val id1 = nextId()
+
+          // generate code to encrypt the search token, and replace searchSWP w/ the params
+          cg.blockBegin("{")
+            
+            cg.println(
+              "Binary key(cm->getKey(cm->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(
+                expr.asInstanceOf[FieldIdent].symbol.asInstanceOf[ColumnSymbol].fieldPosition))
+            cg.println(
+              "Token t = CryptoManager::token(key, Binary(%s));".format(
+                quoteDbl(tokens.head.toLowerCase)))
+
+            cg.println(
+              "m[%d] = db_elem(t.ciph.content, t.ciph.len);".format(id0))
+            cg.println(
+              "m[%d] = db_elem(t.wordKey.content, t.wordKey.len);".format(id1))
+
+          cg.blockEnd("}")
+
+          (Some(
+            FunctionCall(
+              "searchSWP", Seq(QueryParamPlaceholder(id0), QueryParamPlaceholder(id1), expr))), true)
+
+        case _ => (None, true)
+      }.asInstanceOf[SelectStmt]
+
+      cg.println("return m;")
+
+    cg.blockEnd("}")
+    cg.println("}")
+  }
+
   def emitCPP(cg: CodeGenerator) = {
-    cg.print("new remote_sql_op(")
-    cg.printStr(stmt.sqlFromDialect(PostgresDialect)) 
+    assert(_paramClassName ne null)
+    assert(_paramStmt ne null)
+
+    cg.print("new remote_sql_op(new %s, ".format(_paramClassName))
+    cg.printStr(_paramStmt.sqlFromDialect(PostgresDialect)) 
     cg.print(", %s".format( projs.map(_.toCPP).mkString("{", ", ", "}") ))
     cg.print(", {")
     subrelations.foreach(x => { 

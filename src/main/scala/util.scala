@@ -112,6 +112,12 @@ object CollectionUtils {
       }
     }
   }
+
+  def allIndicesOf(s: String, c: Char): Seq[Int] = {
+    s.zipWithIndex.foldLeft( Seq.empty : Seq[Int] ) { 
+      case (xs, (c0, i)) => if (c == c0) xs ++ Seq(i) else xs
+    }
+  }
 }
 
 object BitUtils {

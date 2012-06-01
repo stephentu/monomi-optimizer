@@ -4,6 +4,8 @@ import java.io._
 
 class CodeGenerator(outputFile: File) extends PrettyPrinters {
 
+  private val _idGen = new NameGenerator("id")
+
   private val pw = new PrintWriter(new FileOutputStream(outputFile), true)
 
   private var _indent = 0
@@ -38,6 +40,8 @@ class CodeGenerator(outputFile: File) extends PrettyPrinters {
 
   def printStr(l: String): Unit = print(quoteDbl(l))
 
+  def uniqueId(): String = _idGen.uniqueId()
+
   private def printIndent(): Unit = {
     if (!_didIndent) {
       pw.print("  " * _indent)
@@ -62,6 +66,7 @@ trait ProgramGenerator {
 
       cg.println("#include <crypto-old/CryptoManager.hh>")
       cg.println("#include <edb/ConnectNew.hh>")
+      cg.println("#include <execution/encryption.hh>")
       cg.println("#include <execution/context.hh>")
       cg.println("#include <execution/operator_types.hh>")
 

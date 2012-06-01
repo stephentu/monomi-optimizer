@@ -9,7 +9,9 @@ abstract trait Symbol {
 
 // a symbol corresponding to a reference to a column from a relation in this context.
 // note that this column is not necessarily projected in this context
-case class ColumnSymbol(relation: String, column: String, ctx: Context, tpe: DataType) extends Symbol
+case class ColumnSymbol(relation: String, column: String, ctx: Context, tpe: DataType) extends Symbol {
+  def fieldPosition: Int = ctx.defns.lookupPosition(relation, column).get
+}
 
 // a symbol corresponding to a reference to a projection in this context.
 // note b/c of sql scoping rules, this symbol can only appear in the keys of a

@@ -190,11 +190,11 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     }
   }
 
-  private def encLiteral(e: SqlExpr, o: Int): SqlExpr = {
+  private def encLiteral(e: SqlExpr, o: Int, keyConstraint: FieldIdent): SqlExpr = {
     assert(BitUtils.onlyOne(o))
     assert(e.isLiteral)
     // TODO: actual encryption
-    FunctionCall("encrypt", Seq(e, IntLiteral(o)))
+    FunctionCall("encrypt", Seq(e, IntLiteral(o), keyConstraint))
   }
 
   // if encContext is PreserveOriginal, then the plan node generated faithfully
@@ -277,16 +277,18 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       e: SqlExpr, o: Int,
       subrels: Map[String, PlanNode],
       groupKeys: Map[Symbol, (FieldIdent, OnionType)],
-      aggContext: Boolean): Option[(SqlExpr, OnionType)] = {
+      aggContext: Boolean, 
+      keyConstraint: Option[FieldIdent]): Option[(SqlExpr, OnionType)] = {
       // need to check if we are constrained by group keys
       e match {
         case FieldIdent(_, _, sym, _) if aggContext =>
           groupKeys.get(sym) match {
             case Some((expr, o0)) if o0.isOneOf(o) => Some((expr, o0))
             case Some(_)                           => None // cannot support
-            case None                              => getSupportedExpr(e, o, subrels)
+            case None                              => 
+              getSupportedExpr(e, o, subrels, keyConstraint)
           }
-        case _ => getSupportedExpr(e, o, subrels)
+        case _ => getSupportedExpr(e, o, subrels, keyConstraint)
       }
     }
 
@@ -295,7 +297,10 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     // onions. use the return value to determine which onion was chosen.
     //
     // handles literals properly
-    def getSupportedExpr(e: SqlExpr, o: Int, subrels: Map[String, PlanNode]):
+    def getSupportedExpr(
+      e: SqlExpr, o: Int, 
+      subrels: Map[String, PlanNode], 
+      keyConstraint: Option[FieldIdent]):
       Option[(SqlExpr, OnionType)] = {
 
       e match {
@@ -303,7 +308,9 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
           // easy case
           Onions.pickOne(o) match {
             case Onions.PLAIN => Some((e.copyWithContext(null).asInstanceOf[SqlExpr], PlainOnion))
-            case o0           => Some((encLiteral(e, o0), OnionType.buildIndividual(o0))) // TODO: encryption
+            case o0           => 
+              Some((encLiteral(e, o0, keyConstraint.get), 
+                    OnionType.buildIndividual(o0))) // TODO: encryption
           }
 
         case d: DependentFieldPlaceholder =>
@@ -519,14 +526,14 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     case class RewriteContext(
       onions: Seq[Int],
       aggContext: Boolean, // aggContext means its OK for agg expressions to appear
-      respectStructure: Boolean // this only has any effect if the expr
-                                // cannot be answered on the server side and we need
-                                // to project fields for client evaluation. if true,
-                                // the projected fields respect the structure of the
-                                // expression (fields within aggs will be group_concat()-ed,
-                                // fields outside will be regularly projected). if false, then
-                                // the fields are never group_concat()-ed, regardless.
-
+      respectStructure: Boolean, // this only has any effect if the expr
+                                 // cannot be answered on the server side and we need
+                                 // to project fields for client evaluation. if true,
+                                 // the projected fields respect the structure of the
+                                 // expression (fields within aggs will be group_concat()-ed,
+                                 // fields outside will be regularly projected). if false, then
+                                 // the fields are never group_concat()-ed, regardless.
+      keyConstraint: Option[FieldIdent] = None // the field on the other side of a binary op
       ) {
 
       def this(onion: Int, aggContext: Boolean, respectStructure: Boolean) =
@@ -540,6 +547,11 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       def restrict: RewriteContext = copy(onions = Seq(onions.head))
 
       def restrictTo(o: Int) = new RewriteContext(o, aggContext, respectStructure)
+      def withKey(expr: SqlExpr): RewriteContext = expr match {
+        case fi : FieldIdent => copy(keyConstraint = Some(fi))
+        // TODO: subselects?
+        case _ => this
+      }
     }
 
     sealed abstract trait ServerRewriteMode
@@ -573,7 +585,8 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
                 } else {
                   getSupportedExprConstraintAware(
                     e, o, analysis.subrels,
-                    analysis.groupKeys, curRewriteCtx.aggContext)
+                    analysis.groupKeys, curRewriteCtx.aggContext,
+                    curRewriteCtx.keyConstraint)
                 }
               }
             }
@@ -657,16 +670,16 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
                 case (lhs, ss @ Subselect(_, _)) => handleOneSubselect(ss, lhs)
                 case (lhs, rhs) =>
                   CollectionUtils.optAnd2(
-                    doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.PLAIN)),
-                    doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.PLAIN)))
+                    doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.PLAIN).withKey(rhs)),
+                    doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.PLAIN).withKey(lhs)))
                   .orElse(
                     CollectionUtils.optAnd2(
-                      doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.DET)),
-                      doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.DET))))
+                      doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.DET).withKey(rhs)),
+                      doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.DET).withKey(lhs))))
                   .orElse(
                     CollectionUtils.optAnd2(
-                      doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.OPE)),
-                      doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.OPE))))
+                      doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.OPE).withKey(rhs)),
+                      doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.OPE).withKey(lhs))))
                   .map {
                     case ((lfi, _), (rfi, _)) =>
                       replaceWith(eq.copyWithChildren(lfi, rfi))
@@ -717,12 +730,12 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
                 case (lhs, ss @ Subselect(_, _)) => handleOneSubselect(ss, lhs)
                 case (lhs, rhs) =>
                   CollectionUtils.optAnd2(
-                    doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.PLAIN)),
-                    doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.PLAIN)))
+                    doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.PLAIN).withKey(rhs)),
+                    doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.PLAIN).withKey(lhs)))
                   .orElse(
                     CollectionUtils.optAnd2(
-                      doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.OPE)),
-                      doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.OPE))))
+                      doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.OPE).withKey(rhs)),
+                      doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.OPE).withKey(lhs))))
                   .map {
                     case ((lfi, _), (rfi, _)) =>
                       replaceWith(ieq.copyWithChildren(lfi, rfi))
@@ -734,16 +747,19 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
               onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
               CollectionUtils.optAnd2(
                 doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.SWP)),
-                doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.SWP))).map {
-                  case ((l0, _), (r0, _)) => replaceWith(FunctionCall("searchSWP", Seq(l0, r0, NullLiteral())))
+                doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.SWP).withKey(lhs))).map {
+                  case ((l0, _), (r0, _)) => replaceWith(FunctionCall("searchSWP", Seq(l0, r0)))
                 }.getOrElse(bailOut)
 
             // TODO: handle subqueries
             case in @ In(e, s, n, _) if curRewriteCtx.inClear =>
               onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
               def tryOnion(o: Int) = {
-                val t = (Seq(e) ++ s).map(x => doTransformServer(x, curRewriteCtx.restrictTo(o)))
-                CollectionUtils.optSeq(t).map { s0 =>
+                val e0 = doTransformServer(e, curRewriteCtx.restrictTo(o))
+                val t = s.map { x => 
+                  doTransformServer(x, curRewriteCtx.restrictTo(o).withKey(e))
+                }
+                CollectionUtils.optSeq(Seq(e0) ++ t).map { s0 =>
                   replaceWith(In(s0.head._1, s0.tail.map(_._1), n))
                 }
               }
@@ -838,7 +854,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
               onionRetVal.set(OnionType.buildIndividual(curRewriteCtx.onions.head))
               curRewriteCtx.onions.head match {
                 case Onions.PLAIN => replaceWith(e.copyWithContext(null).asInstanceOf[SqlExpr])
-                case o            => replaceWith(encLiteral(e, o))
+                case o            => replaceWith(encLiteral(e, o, curRewriteCtx.keyConstraint.get))
               }
 
             case e: SqlExpr =>
@@ -1027,7 +1043,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
             def translateField(fi: FieldIdent, aggContext: Boolean) = {
               getSupportedExprConstraintAware(
                 fi, Onions.DET | Onions.OPE, analysis.subrels,
-                analysis.groupKeys, aggContext)
+                analysis.groupKeys, aggContext, None)
               .getOrElse {
                 println("could not find DET/OPE enc for expr: " + fi)
                 println("orig: " + e.sql)
@@ -1425,9 +1441,9 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
         // check if we can answer the keys
         val serverKeys = gb.keys.map(k =>
-          getSupportedExpr(k, Onions.OPE, subqueryRelationPlans)
-            .orElse(getSupportedExpr(k, Onions.DET, subqueryRelationPlans))
-              .orElse(getSupportedExpr(k, Onions.PLAIN, subqueryRelationPlans)))
+          getSupportedExpr(k, Onions.OPE, subqueryRelationPlans, None)
+            .orElse(getSupportedExpr(k, Onions.DET, subqueryRelationPlans, None))
+              .orElse(getSupportedExpr(k, Onions.PLAIN, subqueryRelationPlans, None)))
 
         if (checkCanDoGroupByOnServer &&
             serverKeys.flatten.size == serverKeys.size) {
@@ -1542,12 +1558,12 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
         def getKeyInfoForExpr(f: SqlExpr) = {
           getSupportedExprConstraintAware(
             f, Onions.OPE,
-            subqueryRelationPlans, groupKeys.toMap, true)
+            subqueryRelationPlans, groupKeys.toMap, true, None)
           .map { case (e, o) => (f, e, o) }
           .orElse {
             getSupportedExprConstraintAware(
               f, Onions.DET,
-              subqueryRelationPlans, groupKeys.toMap, true)
+              subqueryRelationPlans, groupKeys.toMap, true, None)
             .map { case (e, o) => (f, e, o) }
           }
         }
@@ -1606,7 +1622,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
             o.keys.map(f =>
               (getSupportedExprConstraintAware(
                 f._1, Onions.OPE, subqueryRelationPlans,
-                groupKeys.toMap, true).map(_._1), f._2))
+                groupKeys.toMap, true, None).map(_._1), f._2))
           if (mapped.map(_._1).flatten.size == mapped.size) {
             // can support server side order by
             Some(SqlOrderBy(mapped.map(f => (f._1.get, f._2))))

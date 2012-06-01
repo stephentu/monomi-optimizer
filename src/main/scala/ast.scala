@@ -111,6 +111,10 @@ trait SqlExpr extends Node {
   def gatherFields: Seq[(FieldIdent, Boolean)]
 
   def toCPP: String
+
+  def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol): String = {
+    throw new RuntimeException("cannot encrypt non-constant")
+  }
 }
 
 trait Binop extends SqlExpr {
@@ -460,36 +464,88 @@ trait LiteralExpr extends SqlExpr {
 case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(IntType(8), None)
   def toCPP = "new int_literal_node(%d)".format(v)
+  override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
+    assert(BitUtils.onlyOne(onion))
+    assert(onion == Onions.DET || onion == Onions.OPE)
+    val s = if (onion == Onions.DET) "det" else "ope"
+    sym.tpe match {
+      case IntType(1) => 
+        "db_elem((int64_t)encrypt_u8_%s(ctx.crypto, %d, %d, %b))".format(s, v, sym.fieldPosition, join)
+      case IntType(4) =>
+        "db_elem((int64_t)encrypt_u32_%s(ctx.crypto, %d, %d, %b))".format(s, v, sym.fieldPosition, join)
+      case IntType(8) =>
+        "db_elem((int64_t)encrypt_u64_%s(ctx.crypto, %d, %d, %b))".format(s, v, sym.fieldPosition, join)
+      case t => 
+        throw new RuntimeException("invalid type for encryption: expected IntType, got: " + t)
+    }
+  }
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = v.toString
 }
 case class FloatLiteral(v: Double, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(DoubleType, None)
   def toCPP = "new double_literal_node(%f)".format(v)
+  override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
+    throw new RuntimeException("currently un-supported")
+  }
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = v.toString
 }
 case class StringLiteral(v: String, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(FixedLenString(v.length), None)
   def toCPP = "new string_literal_node(%s)".format(v)
+  override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
+    assert(BitUtils.onlyOne(onion))
+    assert(onion == Onions.DET || onion == Onions.OPE) // SWP handled elsewhere
+    val s = if (onion == Onions.DET) "det" else "ope"
+    sym.tpe match {
+      case _: FixedLenString | _: VariableLenString =>
+        "db_elem((int64_t)encrypt_string_%s(ctx.crypto, %s, %d, %b))".format(
+          s, quoteDbl(v), sym.fieldPosition, join)
+      case t => 
+        throw new RuntimeException("invalid type for encryption: expected some string type, got: " + t)
+    }
+  }
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = quoteSingle(v)
 }
 case class NullLiteral(ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(NullType, None)
   def toCPP = "new null_literal_node"
+  override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
+    "db_elem(db_elem::null_tag)"
+  }
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = "null"
 }
 case class DateLiteral(d: String, ctx: Context = null) extends LiteralExpr {
+  // check yyyy-mm-dd format
+  private val DateRegex = "(\\d+)-(\\d+)-(\\d+)".r
+  val (year, month, day) = {
+    val DateRegex(year, month, day) = d
+    (year.toInt, month.toInt, day.toInt)
+  }
+  private val _intRepr = (day | (month << 5) | (year << 9));
+
   override def getType = TypeInfo(DateType, None)
   def toCPP = "new date_literal_node(%s)".format(quoteDbl(d))
+  override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
+    assert(BitUtils.onlyOne(onion))
+    assert(onion == Onions.DET || onion == Onions.OPE)
+    assert(sym.tpe == DateType)
+    val s = if (onion == Onions.DET) "det" else "ope"
+    "db_elem((int64_t)encrypt_date_%s(ctx.crypto, %d, %d, %b))".format(
+      s, _intRepr, sym.fieldPosition, join)
+  }
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = Seq("date", quoteSingle(d)) mkString " "
 }
 case class IntervalLiteral(e: String, unit: ExtractType, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(IntervalType, None)
   def toCPP = throw new RuntimeException("not implemented")
+  override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
+    throw new RuntimeException("currently un-supported")
+  }
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = Seq("interval", quoteSingle(e), unit.toString) mkString " "
 }
@@ -563,6 +619,14 @@ case class BoundDependentFieldPlaceholder(pos: Int, onion: Int, ctx: Context = n
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = throw new RuntimeException("error")
   def sqlFromDialect(dialect: SqlDialect) = "param$" + pos + "$" + Onions.str(onion)
+}
+
+case class QueryParamPlaceholder(pos: Int, ctx: Context = null) extends SqlExpr {
+  assert(pos >= 0)
+  def toCPP = throw new RuntimeException("Should not happen")
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def gatherFields = throw new RuntimeException("error")
+  def sqlFromDialect(dialect: SqlDialect) = ":" + pos
 }
 
 case class SubqueryPosition(pos: Int, args: Seq[SqlExpr], ctx: Context = null) extends SqlExpr {
