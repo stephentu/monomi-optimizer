@@ -1759,11 +1759,11 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     }
 
     val tdesc =
-      if (finalProjs.isEmpty) Seq(PosDesc(UnknownType, None, PlainOnion, false))
+      if (finalProjs.isEmpty) Seq(PosDesc(UnknownType, None, PlainOnion, false, false))
       else finalProjs.map { 
         case (e, _, o, v) => 
           val tpe = e.getType
-          PosDesc(tpe.tpe, tpe.field, o, v) 
+          PosDesc(tpe.tpe, tpe.field.map(_.pos), o, tpe.field.map(_.partOfPK).getOrElse(false), v) 
       }.toSeq
 
     // --join filters

@@ -69,6 +69,7 @@ trait ProgramGenerator {
       cg.println("#include <execution/encryption.hh>")
       cg.println("#include <execution/context.hh>")
       cg.println("#include <execution/operator_types.hh>")
+      cg.println("#include <execution/eval_nodes.hh>")
 
       plans.foreach(_.emitCPPHelpers(cg))
 
@@ -80,9 +81,9 @@ trait ProgramGenerator {
           cg.println(";")
 
           cg.println("op->open(ctx);")
-          cg.blockBegin("while (op->has_next(ctx)) {")
+          cg.blockBegin("while (op->has_more(ctx)) {")
             
-            cg.println("db_tuple_vec v;")
+            cg.println("physical_operator::db_tuple_vec v;")
             cg.println("op->next(ctx, v);")
             cg.println("//TODO: print v")
 
@@ -102,7 +103,7 @@ trait ProgramGenerator {
 
         cg.println("int q = atoi(argv[1]);")
 
-        cg.println("CryptoManager cm(12345);")
+        cg.println("CryptoManager cm(\"12345\");")
         cg.println("PGConnect pg(DB_HOSTNAME, DB_USERNAME, DB_PASSWORD, DB_DATABASE, DB_PORT);")
         cg.println("exec_context ctx(&pg, &cm);")
 
@@ -129,9 +130,14 @@ trait ProgramGenerator {
     }
 
     def makeMakefile() = {
-      val makefile = new File(baseFolder, "Makefile")
+      val makefile = new File(baseFolder, "Makefrag")
       val cg = new CodeGenerator(makefile)
-
+      cg.println("OBJDIRS += generated")
+      cg.println("GENERATEDPROGS := program")
+      cg.println("GENERATEDPROGOBJS := $(patsubst %,$(OBJDIR)/generated/%,$(GENERATEDPROGS))")
+      cg.println("all: $(GENERATEDPROGOBJS)")
+      cg.println("$(GENERATEDPROGOBJS): %: %.o $(OBJDIR)/libedbparser.so  $(OBJDIR)/libedbutil.so $(OBJDIR)/libexecution.so")
+      cg.println("\t$(CXX) $< -o $@ -ledbparser  $(LDFLAGS) -ledbutil -lcryptdb -ledbcrypto -ledbcrypto2 -lexecution -lmysqlclient -ltbb -lgmp -lpq")
     }
 
     makeProgram()

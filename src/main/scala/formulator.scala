@@ -262,7 +262,7 @@ trait Formulator {
     // regular columns
     defns.defns.foreach { case (tbl, cols) =>
       cols.foreach {
-        case TableColumn(name, _) =>
+        case TableColumn(name, _, _) =>
           reg.get(tbl).flatMap(_.get(name)).foreach { o =>
             val os = Onions.toSeq(o)
             if (os.size > 1) {

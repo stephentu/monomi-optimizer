@@ -11,9 +11,9 @@ abstract trait Relation
 case class TableRelation(name: String) extends Relation
 case class SubqueryRelation(stmt: SelectStmt) extends Relation
 
-case class TableColumn(name: String, tpe: DataType) extends PrettyPrinters {
+case class TableColumn(name: String, tpe: DataType, partOfPK: Boolean) extends PrettyPrinters {
   def scalaStr: String =
-    "TableColumn(" + quoteDbl(name) + ", " + tpe.toString + ")"
+    "TableColumn(" + quoteDbl(name) + ", " + tpe.toString + ", " + partOfPK + ")"
 }
 
 class Definitions(val defns: Map[String, Seq[TableColumn]], val dbconn: Option[DbConn])
@@ -27,6 +27,10 @@ class Definitions(val defns: Map[String, Seq[TableColumn]], val dbconn: Option[D
 
   def lookupPosition(table: String, col: String): Option[Int] = {
     defns.get(table).flatMap(_.zipWithIndex.filter(_._1.name == col).map(_._2).headOption)
+  }
+
+  def lookupPartOfPK(table: String, col: String): Option[Boolean] = {
+    defns.get(table).flatMap(_.filter(_.name == col).headOption).map(_.partOfPK)
   }
 
   def scalaStr: String = {
@@ -102,9 +106,34 @@ numeric_precision, numeric_precision_radix, numeric_scale
 from information_schema.columns
 where table_schema = 'public' and table_name = ?
 """)
+  
+    val s1 = conn.prepareStatement("""
+select
+    a.attname as column_name
+from
+    information_schema.table_constraints tc,
+    pg_class t,
+    pg_class i,
+    pg_index ix,
+    pg_attribute a
+where
+    tc.table_name = ? 
+    and tc.constraint_type = 'PRIMARY KEY'
+    and t.oid = ix.indrelid
+    and i.oid = ix.indexrelid
+    and a.attrelid = t.oid
+    and a.attnum = ANY(ix.indkey)
+    and i.relname = tc.constraint_name
+""")
+
     val ret = new Definitions(tables.map(name => {
+      s1.setString(1, name)
+      val r1 = s1.executeQuery
+      val pkCols = r1.map(_.getString(1)).toSet
+
       s.setString(1, name)
       val r = s.executeQuery
+
       val columns = r.map(rs => {
         val cname = rs.getString(1)
         TableColumn(cname, rs.getString(2) match {
@@ -119,12 +148,13 @@ where table_schema = 'public' and table_name = ?
           case "smallint" => IntType(2)
           case "bytea" => VariableLenByteArray(None)
           case e => sys.error("unknown type: " + e)
-        })
+        }, pkCols.contains(cname))
       })
 
       (name, columns)
     }).toMap, Some(_dbconn))
     s.close()
+    s1.close()
     ret
   }
 

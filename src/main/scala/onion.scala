@@ -118,10 +118,10 @@ sealed abstract trait OnionType {
 
   // hack for now...
   // TODO: need to take into account if we need the JOIN variants...
-  def seclevelToCPP: String = onion match {
+  def seclevelToCPP(join: Boolean = false): String = onion match {
     case Onions.PLAIN => "SECLEVEL::PLAIN"
-    case Onions.DET   => "SECLEVEL::DET"
-    case Onions.OPE   => "SECLEVEL::OPE"
+    case Onions.DET   => if (join) "SECLEVEL::DETJOIN" else "SECLEVEL::DET"
+    case Onions.OPE   => if (join) "SECLEVEL::OPEJOIN" else "SECLEVEL::OPE"
     case Onions.SWP   => "SECLEVEL::SWP"
     case Onions.HOM | Onions.HOM_ROW_DESC | Onions.HOM_AGG => "SECLEVEL::SEMANTIC_AGG"
   }

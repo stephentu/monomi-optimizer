@@ -11,6 +11,7 @@ abstract trait Symbol {
 // note that this column is not necessarily projected in this context
 case class ColumnSymbol(relation: String, column: String, ctx: Context, tpe: DataType) extends Symbol {
   def fieldPosition: Int = ctx.defns.lookupPosition(relation, column).get
+  def partOfPK: Boolean = ctx.defns.lookupPartOfPK(relation, column).get
 }
 
 // a symbol corresponding to a reference to a projection in this context.

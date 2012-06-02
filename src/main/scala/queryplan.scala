@@ -109,16 +109,22 @@ object CostConstants {
 
 case class PosDesc(
   origTpe: DataType, 
-  origFieldname: Option[(String, String)],
+  origFieldPos: Option[Int],
   onion: OnionType, 
+  partOfPK: Boolean,
   vectorCtx: Boolean) {
 
+  // TODO: fix this hack- right now we go ahead and
+  // encrypt all dets of primary keys with detjoins
+  val join = partOfPK && onion == RegularOnion(Onions.DET)
+
   def toCPP: String = {
-    "db_column_desc(%s, %s, %s, %s, %b)".format(
+    "db_column_desc(%s, %d, %s, %s, %d, %b)".format(
       origTpe.toCPP,
+      origTpe.size,
       onion.toCPP,
-      onion.seclevelToCPP,
-      origFieldname.map(_._2).getOrElse(""),
+      onion.seclevelToCPP(join),
+      origFieldPos.getOrElse(0),
       vectorCtx)
   }
 }
@@ -588,7 +594,7 @@ case class RemoteSql(stmt: SelectStmt,
     // data xfer to client cost
     val td = tupleDesc
     val bytesToXfer = td.map {
-      case PosDesc(_, _, onion, vecCtx) =>
+      case PosDesc(_, _, onion, _, vecCtx) =>
         // assume everything is 4 bytes now
         if (vecCtx) 4.0 * rr.get else 4.0
     }.sum * r.toDouble
@@ -661,16 +667,16 @@ case class RemoteSql(stmt: SelectStmt,
           cg.blockBegin("{")
             
             cg.println(
-              "Binary key(cm->getKey(cm->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(
+              "Binary key(ctx.crypto->getKey(ctx.crypto->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(
                 fi.symbol.asInstanceOf[ColumnSymbol].fieldPosition))
             cg.println(
               "Token t = CryptoManager::token(key, Binary(%s));".format(
                 quoteDbl(tokens.head.toLowerCase)))
 
             cg.println(
-              "m[%d] = db_elem(t.ciph.content, t.ciph.len);".format(id0))
+              "m[%d] = db_elem((const char *)t.ciph.content, t.ciph.len);".format(id0))
             cg.println(
-              "m[%d] = db_elem(t.wordKey.content, t.wordKey.len);".format(id1))
+              "m[%d] = db_elem((const char *)t.wordKey.content, t.wordKey.len);".format(id1))
 
           cg.blockEnd("}")
 
@@ -684,7 +690,7 @@ case class RemoteSql(stmt: SelectStmt,
       cg.println("return m;")
 
     cg.blockEnd("}")
-    cg.println("}")
+    cg.println("};")
   }
 
   def emitCPP(cg: CodeGenerator) = {
@@ -714,7 +720,7 @@ case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
     // compute cost of xfering each row back to server
     val td = tupleDesc
     val bytesToXfer = td.map {
-      case PosDesc(_, _, onion, vecCtx) =>
+      case PosDesc(_, _, onion, _, vecCtx) =>
         // assume everything is 4 bytes now
         if (vecCtx) 4.0 * ch.rowsPerRow else 4.0
     }.sum * ch.rows.toDouble
@@ -883,7 +889,9 @@ case class LocalTransform(
       // TODO: allow for transforms to not remove vector context
       case Right((o, _)) => 
         val t = o.getType
-        PosDesc(t.tpe, t.field, PlainOnion, false)
+        PosDesc(
+          t.tpe, t.field.map(_.pos), PlainOnion, 
+          t.field.map(_.partOfPK).getOrElse(false), false)
     }
   }
 
@@ -906,7 +914,9 @@ case class LocalTransform(
       case Right((orig, texpr)) =>
         val t = orig.getType
         cg.print("local_transform_op::trfm_desc(std::make_pair(%s, %s)), ".format( 
-          PosDesc(t.tpe, t.field, PlainOnion, false).toCPP, 
+          PosDesc(
+            t.tpe, t.field.map(_.pos), PlainOnion, 
+            t.field.map(_.partOfPK).getOrElse(false), false).toCPP, 
           texpr.toCPP
         ))
     }
@@ -1079,11 +1089,11 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
     val td = child.tupleDesc
     def costPos(p: Int): Double = {
       td(p) match {
-        case PosDesc(_, _, HomGroupOnion(tbl, grp), _) =>
+        case PosDesc(_, _, HomGroupOnion(tbl, grp), _, _) =>
           val c = CostConstants.secToPGUnit(CostConstants.DecryptCostMap(Onions.HOM))
           c * ch.rows.toDouble // for now assume that each agg group needs to do 1 decryption
 
-        case PosDesc(_, _, RegularOnion(o), vecCtx) =>
+        case PosDesc(_, _, RegularOnion(o), _, vecCtx) =>
           val c = CostConstants.secToPGUnit(CostConstants.DecryptCostMap(o))
           c * ch.rows.toDouble * (if (vecCtx) ch.rowsPerRow.toDouble else 1.0)
 

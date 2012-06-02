@@ -272,9 +272,9 @@ case class Exists(select: Subselect, ctx: Context = null) extends SqlExpr {
 
 case class FieldIdent(qualifier: Option[String], name: String, symbol: Symbol = null, ctx: Context = null) extends SqlExpr {
   override def getType = symbol match {
-    case null                            => super.getType
-    case ColumnSymbol(reln, col, _, tpe) => TypeInfo(tpe, Some((reln, col)))
-    case ProjectionSymbol(_, _, tpe)     => TypeInfo(tpe, None)
+    case null                                   => super.getType
+    case cs @ ColumnSymbol(reln, col, ctx, tpe) => TypeInfo(tpe, Some(FieldInfo(reln, col, cs.fieldPosition, cs.partOfPK)))
+    case ProjectionSymbol(_, _, tpe)            => TypeInfo(tpe, None)
   }
   def toCPP = throw new RuntimeException("Should not happen")
   def copyWithContext(c: Context) = copy(symbol = null, ctx = c)
@@ -500,7 +500,7 @@ case class StringLiteral(v: String, ctx: Context = null) extends LiteralExpr {
     val s = if (onion == Onions.DET) "det" else "ope"
     sym.tpe match {
       case _: FixedLenString | _: VariableLenString =>
-        "db_elem((int64_t)encrypt_string_%s(ctx.crypto, %s, %d, %b))".format(
+        "db_elem(encrypt_string_%s(ctx.crypto, %s, %d, %b))".format(
           s, quoteDbl(v), sym.fieldPosition, join)
       case t => 
         throw new RuntimeException("invalid type for encryption: expected some string type, got: " + t)
