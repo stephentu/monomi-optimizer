@@ -85,7 +85,7 @@ trait ProgramGenerator {
             
             cg.println("physical_operator::db_tuple_vec v;")
             cg.println("op->next(ctx, v);")
-            cg.println("//TODO: print v")
+            cg.println("physical_operator::print_tuples(v);")
 
           cg.blockEnd("}")
           cg.println("op->close(ctx);")
@@ -104,8 +104,9 @@ trait ProgramGenerator {
         cg.println("int q = atoi(argv[1]);")
 
         cg.println("CryptoManager cm(\"12345\");")
+        cg.println("crypto_manager_stub cm_stub(&cm, CRYPTO_USE_OLD_OPE);")
         cg.println("PGConnect pg(DB_HOSTNAME, DB_USERNAME, DB_PASSWORD, DB_DATABASE, DB_PORT);")
-        cg.println("exec_context ctx(&pg, &cm);")
+        cg.println("exec_context ctx(&pg, &cm_stub);")
 
         cg.blockBegin("switch (q) {")
           (0 until plans.size).foreach { i =>
@@ -120,13 +121,18 @@ trait ProgramGenerator {
     }
 
     def makeConfig() = {
-      val configFile = new File(baseFolder, "db_config.h")
+      val configFile = new File(baseFolder, "db_config.h.sample")
       val cg = new CodeGenerator(configFile)
+      cg.println("// copy this file to db_config.h, filling in the appropriate values")
       cg.println("#define DB_HOSTNAME \"localhost\"")
       cg.println("#define DB_USERNAME \"user\"")
       cg.println("#define DB_PASSWORD \"pass\"")
       cg.println("#define DB_DATABASE \"db\"")
       cg.println("#define DB_PORT     5432")
+
+      cg.println("")
+
+      cg.println("#define CRYPTO_USE_OLD_OPE false")
     }
 
     def makeMakefile() = {

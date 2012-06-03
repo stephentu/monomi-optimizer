@@ -629,7 +629,15 @@ case class RemoteSql(stmt: SelectStmt,
         ret
       }
 
+      def subMarkers(q: String): String = q.replaceAll("\\$", "_")
+
       _paramStmt = topDownTransformation(stmt) {
+        case FieldIdent(qual, name, _, _) => 
+          (Some(FieldIdent(qual.map(subMarkers), subMarkers(name))), false)
+
+        case TableRelationAST(name, alias, _) =>
+          (Some(TableRelationAST(subMarkers(name), alias)), false)
+
         case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), MetaFieldIdent(fi, _)), _) =>
           assert(e.isLiteral)
           assert(BitUtils.onlyOne(o.toInt))
@@ -667,7 +675,7 @@ case class RemoteSql(stmt: SelectStmt,
           cg.blockBegin("{")
             
             cg.println(
-              "Binary key(ctx.crypto->getKey(ctx.crypto->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(
+              "Binary key(ctx.crypto->cm->getKey(ctx.crypto->cm->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(
                 fi.symbol.asInstanceOf[ColumnSymbol].fieldPosition))
             cg.println(
               "Token t = CryptoManager::token(key, Binary(%s));".format(

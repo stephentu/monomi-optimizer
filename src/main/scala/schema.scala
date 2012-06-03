@@ -99,38 +99,40 @@ where table_catalog = ? and table_schema = 'public'
 
   def loadSchema() = {
     val tables = listTables()
-    val s = conn.prepareStatement("""
-select
-column_name, data_type, character_maximum_length,
-numeric_precision, numeric_precision_radix, numeric_scale
-from information_schema.columns
-where table_schema = 'public' and table_name = ?
-""")
-  
-    val s1 = conn.prepareStatement("""
-select
-    a.attname as column_name
-from
-    information_schema.table_constraints tc,
-    pg_class t,
-    pg_class i,
-    pg_index ix,
-    pg_attribute a
-where
-    tc.table_name = ? 
-    and tc.constraint_type = 'PRIMARY KEY'
-    and t.oid = ix.indrelid
-    and i.oid = ix.indexrelid
-    and a.attrelid = t.oid
-    and a.attnum = ANY(ix.indkey)
-    and i.relname = tc.constraint_name
-""")
 
     val ret = new Definitions(tables.map(name => {
+  
+      val s1 = conn.prepareStatement("""
+  select
+      a.attname as column_name
+  from
+      information_schema.table_constraints tc,
+      pg_class t,
+      pg_class i,
+      pg_index ix,
+      pg_attribute a
+  where
+      tc.table_name = ? 
+      and tc.constraint_type = 'PRIMARY KEY'
+      and t.oid = ix.indrelid
+      and i.oid = ix.indexrelid
+      and a.attrelid = t.oid
+      and a.attnum = ANY(ix.indkey)
+      and i.relname = tc.constraint_name
+  """)
+    
       s1.setString(1, name)
       val r1 = s1.executeQuery
       val pkCols = r1.map(_.getString(1)).toSet
+      s1.close()
 
+      val s = conn.prepareStatement("""
+  select
+  column_name, data_type, character_maximum_length,
+  numeric_precision, numeric_precision_radix, numeric_scale
+  from information_schema.columns
+  where table_schema = 'public' and table_name = ?
+  """)
       s.setString(1, name)
       val r = s.executeQuery
 
@@ -150,11 +152,13 @@ where
           case e => sys.error("unknown type: " + e)
         }, pkCols.contains(cname))
       })
+      s.close()
 
-      (name, columns)
+      (name, columns.reverse) // TODO: not sure why the result set is coming in 
+                              // reverse order, but not really interested in
+                              // debugging it now
     }).toMap, Some(_dbconn))
-    s.close()
-    s1.close()
+
     ret
   }
 
