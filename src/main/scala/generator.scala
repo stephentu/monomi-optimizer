@@ -1445,6 +1445,10 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
             .orElse(getSupportedExpr(k, Onions.DET, subqueryRelationPlans, None))
               .orElse(getSupportedExpr(k, Onions.PLAIN, subqueryRelationPlans, None)))
 
+        // TODO: we must check, that if this group by has a having clause,
+        // and we pulled a clause out of the where clause, then we cannot run
+        // the having clause on the server (must apply a LocalGroupFilter)
+        // we currently get this wrong
         if (checkCanDoGroupByOnServer &&
             serverKeys.flatten.size == serverKeys.size) {
           // ok to go ahead with server side group by

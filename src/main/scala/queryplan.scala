@@ -986,6 +986,8 @@ case class LocalGroupBy(
   def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
 
+// this node is for when we have to remove the HAVING clause
+// from a group by, but we still keep the group by. 
 case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
                             child: PlanNode, subqueries: Seq[PlanNode])
   extends PlanNode {
