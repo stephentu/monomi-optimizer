@@ -27,14 +27,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
   private def negate(f: Node => Boolean): Node => Boolean = (n: Node) => { !f(n) }
 
-  private def resolveAliases(e: SqlExpr): SqlExpr = {
-    topDownTransformation(e) {
-      case FieldIdent(_, _, ProjectionSymbol(name, ctx, _), _) =>
-        val expr1 = ctx.lookupProjection(name).get
-        replaceWith(resolveAliases(expr1))
-      case x => keepGoing
-    }.asInstanceOf[SqlExpr]
-  }
+  private def resolveAliases(e: SqlExpr): SqlExpr = e.resolveAliases 
 
   private def splitTopLevelConjunctions(e: SqlExpr): Seq[SqlExpr] = {
     def split(e: SqlExpr, buffer: ArrayBuffer[SqlExpr]): ArrayBuffer[SqlExpr] = {
@@ -1056,7 +1049,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
               case (f, inAggCtx) =>
                 if (inAggCtx && curRewriteCtx.respectStructure) {
                   val (ft, o) = translateField(f, true)
-                  (f, ExprProj(GroupConcat(ft, ","), None), o, true)
+                  (f, ExprProj(GroupConcat(ft, ",", f.getType.tpe.isStringType), None), o, true)
                 } else {
                   val (ft, o) = translateField(f, false)
                   (f, ExprProj(ft, None), o, false)
@@ -1523,15 +1516,17 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
           case cc @ ClientComputation(_, _, p, sp, _) =>
             def procProjs(p: Seq[(SqlExpr, SqlProj, OnionType, Boolean)]) = {
               p.map {
-                case t @ (_, ep @ ExprProj(e, _, _), _, v) if !v =>
-                  def wrapWithGroupConcat(e: SqlExpr) = GroupConcat(e, ",")
+                case t @ (o, ep @ ExprProj(e, _, _), _, v) if !v =>
+                  def wrapWithGroupConcat(e: SqlExpr, h: Boolean) = GroupConcat(e, ",", h)
                   e match {
                     case FieldIdent(_, _, sym, _) =>
                       groupKeys.get(sym).map { _ => t }.getOrElse {
-                        t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e)), _4 = true)
+                        t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, o.getType.tpe.isStringType)), 
+                               _4 = true)
                       }
                     case _ =>
-                      t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e)), _4 = true)
+                      t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, o.getType.tpe.isStringType)), 
+                             _4 = true)
                   }
                 case e => e
               }
@@ -1766,7 +1761,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       if (finalProjs.isEmpty) Seq(PosDesc(UnknownType, None, PlainOnion, false, false))
       else finalProjs.map { 
         case (e, _, o, v) => 
-          val tpe = e.getType
+          val tpe = e.findCanonical.getType
           PosDesc(tpe.tpe, tpe.field.map(_.pos), o, tpe.field.map(_.partOfPK).getOrElse(false), v) 
       }.toSeq
 

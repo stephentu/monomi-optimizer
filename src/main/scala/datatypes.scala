@@ -6,6 +6,8 @@ abstract trait DataType {
   }
   def toCPP: String
   def size: Int
+
+  def isStringType: Boolean = false
 }
 
 case object BoolType extends DataType {
@@ -54,6 +56,8 @@ case class FixedLenString(len: Int) extends DataType {
     case VariableLenString(m) => VariableLenString(math.max(len, m))
     case _ => super.commonBound(that)
   }
+
+  override def isStringType = true
 }
 
 case class VariableLenString(max: Int = java.lang.Integer.MAX_VALUE) extends DataType {
@@ -64,6 +68,8 @@ case class VariableLenString(max: Int = java.lang.Integer.MAX_VALUE) extends Dat
     case VariableLenString(m) => VariableLenString(math.max(max, m))
     case _ => super.commonBound(that)
   }
+
+  override def isStringType = true
 }
 
 case object DateType extends DataType {
@@ -84,6 +90,8 @@ case class VariableLenByteArray(max: Option[Int]) extends DataType {
     case VariableLenByteArray(None)    => VariableLenByteArray(None)
     case _ => super.commonBound(that)
   }
+
+  override def isStringType = true
 }
 
 // this shouldn't be necessary, but exists b/c we don't have perfect type information

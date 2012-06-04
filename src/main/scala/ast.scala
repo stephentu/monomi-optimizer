@@ -59,13 +59,35 @@ case class StarProj(ctx: Context = null) extends SqlProj {
   def sqlFromDialect(dialect: SqlDialect) = "*"
 }
 
-trait SqlExpr extends Node {
+trait SqlExpr extends Node with Transformers {
   def getType: TypeInfo = TypeInfo(UnknownType, None)
   def isLiteral: Boolean = false
   def evalLiteral: Option[DbElem] = None
 
   // is the r-value of this expression a literal?
   def isRValueLiteral: Boolean = isLiteral
+
+  def resolveAliases: SqlExpr = {
+    topDownTransformation(this) {
+      case FieldIdent(_, _, ProjectionSymbol(name, ctx, _), _) =>
+        val expr1 = ctx.lookupProjection(name).get
+        (Some(expr1.resolveAliases), false)
+      case x => (None, true)
+    }.asInstanceOf[SqlExpr]
+  }
+
+  def findCanonical: SqlExpr = {
+    def find0(e: SqlExpr): SqlExpr = e match {
+      case FieldIdent(_, _, ColumnSymbol(reln, name, ctx, _), _) =>
+        ctx.relations(reln) match {
+          case SubqueryRelation(stmt) =>
+            stmt.ctx.lookupProjection(name).get.findCanonical
+          case _ => e
+        }
+      case _ => e
+    }
+    find0(resolveAliases)
+  }
 
   // return value is:
   // ( (table) relation name for this node's ctx, global table name )
@@ -305,7 +327,11 @@ case class Exists(select: Subselect, ctx: Context = null) extends SqlExpr {
 
 case class FieldIdent(qualifier: Option[String], name: String, symbol: Symbol = null, ctx: Context = null) extends SqlExpr {
   override def getType = symbol match {
-    case null                                   => super.getType
+    case null                                   => 
+      // need to look it up in the context
+      if (ctx ne null) TypeInfo(ctx.lookupColumn(qualifier, name, false).head.tpe, None)
+      else super.getType
+
     case cs @ ColumnSymbol(reln, col, ctx, tpe) => TypeInfo(tpe, Some(FieldInfo(reln, col, cs.fieldPosition, cs.partOfPK)))
     case ProjectionSymbol(_, _, tpe)            => TypeInfo(tpe, None)
   }
@@ -366,7 +392,7 @@ case class Max(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
   def gatherFields = expr.gatherFields.map(_.copy(_2 = true))
   def sqlFromDialect(dialect: SqlDialect) = "max(" + expr.sqlFromDialect(dialect) + ")"
 }
-case class GroupConcat(expr: SqlExpr, sep: String, ctx: Context = null) extends SqlAgg {
+case class GroupConcat(expr: SqlExpr, sep: String, hexify: Boolean = false, ctx: Context = null) extends SqlAgg {
   override def getType = TypeInfo(VariableLenString(), None)
   def toCPP = throw new RuntimeException("Should not happen")
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -375,7 +401,11 @@ case class GroupConcat(expr: SqlExpr, sep: String, ctx: Context = null) extends 
     case MySQLDialect =>
       Seq("group_concat(", Seq(expr.sqlFromDialect(dialect), quoteSingle(sep)).mkString(", "), ")").mkString("")
     case PostgresDialect =>
-      Seq("array_to_string(array_agg(", expr.sqlFromDialect(dialect), "), ", quoteSingle(sep), ")").mkString("")
+      if (hexify) { 
+        Seq("array_to_string(array_agg(encode(", expr.sqlFromDialect(dialect), ", 'hex')), ", quoteSingle(sep), ")").mkString("")
+      } else {
+        Seq("array_to_string(array_agg(", expr.sqlFromDialect(dialect), "), ", quoteSingle(sep), ")").mkString("")
+      }
   }
 }
 case class AggCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extends SqlAgg {
@@ -413,6 +443,10 @@ case object DAY extends ExtractType {
 }
 
 case class Extract(expr: SqlExpr, what: ExtractType, ctx: Context = null) extends SqlFunction {
+  override def getType = what match {
+    case YEAR => TypeInfo(IntType(2), None)
+    case _    => TypeInfo(IntType(1), None)
+  }
   val name = "extract"
   val args = Seq(expr)
   def toCPP = "new extract_node(%s, %s)".format(expr.toCPP, what.toCPP)
@@ -434,7 +468,7 @@ case class Substring(expr: SqlExpr, from: Int, length: Option[Int], ctx: Context
 case class CaseExprCase(cond: SqlExpr, expr: SqlExpr, ctx: Context = null) extends SqlExpr {
   override def getType = expr.getType
   def gatherFields = cond.gatherFields ++ expr.gatherFields
-  def toCPP = throw new RuntimeException("not implemented")
+  def toCPP = "new case_expr_case_node(%s, %s)".format(cond.toCPP, expr.toCPP)
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = Seq("when", cond.sqlFromDialect(dialect), "then", expr.sqlFromDialect(dialect)) mkString " "
 }
@@ -463,7 +497,9 @@ case class CaseWhenExpr(cases: Seq[CaseExprCase], default: Option[SqlExpr], ctx:
     val elems = (cases ++ default.toList)
     elems.tail.foldLeft(elems.head.getType)((acc, elem) => acc.commonBound(elem.getType))
   }
-  def toCPP = throw new RuntimeException("not implemented")
+  def toCPP = "new case_when_node(%s, %s)".format(
+    cases.map(_.toCPP).mkString("{", ", ", "}"),
+    default.map(_.toCPP).getOrElse("NULL"))
   def copyWithContext(c: Context) = copy(ctx = c)
   override def isLiteral =
     cases.filter(x => !x.cond.isLiteral || !x.expr.isLiteral).isEmpty &&
@@ -529,7 +565,7 @@ case class FloatLiteral(v: Double, ctx: Context = null) extends LiteralExpr {
 case class StringLiteral(v: String, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(FixedLenString(v.length), None)
   override def evalLiteral = Some(StringElem(v))
-  def toCPP = "new string_literal_node(%s)".format(v)
+  def toCPP = "new string_literal_node(%s)".format(quoteDbl(v))
   override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
     assert(BitUtils.onlyOne(onion))
     assert(onion == Onions.DET || onion == Onions.OPE) // SWP handled elsewhere

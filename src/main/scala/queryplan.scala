@@ -425,6 +425,10 @@ case class RemoteSql(stmt: SelectStmt,
       case FunctionCall("hom_row_desc_lit", Seq(e), _) =>
         (Some(e), false)
 
+      case gc : GroupConcat =>
+        // don't pass hexify to the plain text query
+        (Some(gc.copy(hexify = false)), true)
+
       case _ => (None, true)
     }.asInstanceOf[SelectStmt]
 
@@ -899,7 +903,7 @@ case class LocalTransform(
 
       // TODO: allow for transforms to not remove vector context
       case Right((o, _)) => 
-        val t = o.getType
+        val t = o.findCanonical.getType
         PosDesc(
           t.tpe, t.field.map(_.pos), PlainOnion, 
           t.field.map(_.partOfPK).getOrElse(false), false)
@@ -923,7 +927,11 @@ case class LocalTransform(
       case Left(i) =>
         cg.print("local_transform_op::trfm_desc(%d), ".format(i))
       case Right((orig, texpr)) =>
-        val t = orig.getType
+        val t = orig.findCanonical.getType
+        if (t.tpe == UnknownType) {
+          System.err.println("ERROR: " + orig)
+          System.err.println("ERROR: " + orig.findCanonical)
+        }
         cg.print("local_transform_op::trfm_desc(std::make_pair(%s, %s)), ".format( 
           PosDesc(
             t.tpe, t.field.map(_.pos), PlainOnion, 

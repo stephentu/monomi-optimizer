@@ -10,8 +10,15 @@ abstract trait Symbol {
 // a symbol corresponding to a reference to a column from a relation in this context.
 // note that this column is not necessarily projected in this context
 case class ColumnSymbol(relation: String, column: String, ctx: Context, tpe: DataType) extends Symbol {
-  def fieldPosition: Int = ctx.defns.lookupPosition(relation, column).get
-  def partOfPK: Boolean = ctx.defns.lookupPartOfPK(relation, column).get
+  assert(tpe != UnknownType)
+  def fieldPosition: Int = 
+    ctx.lookupPosition(relation, column).getOrElse {
+      0  // precomputed values go here- we assume field pos of 0
+    }
+  def partOfPK: Boolean = 
+    ctx.lookupPartOfPK(relation, column).getOrElse {
+      false  // precomputed values go here- we assume they are not part of pkey
+    }
 }
 
 // a symbol corresponding to a reference to a projection in this context.
@@ -35,6 +42,20 @@ class Context(val parent: Either[Definitions, Context]) {
       cur = cur.parent.right.toOption.orNull
     }
     false
+  }
+
+  def lookupPosition(relation: String, column: String): Option[Int] = {
+    relations.get(relation).flatMap {
+      case TableRelation(r) => defns.lookupPosition(r, column)
+      case _                => None
+    }
+  }
+
+  def lookupPartOfPK(relation: String, column: String): Option[Boolean] = {
+    relations.get(relation).flatMap {
+      case TableRelation(r) => defns.lookupPartOfPK(r, column)
+      case _                => None
+    }
   }
 
   // lookup a projection with the given name in this context.
@@ -102,6 +123,9 @@ class Context(val parent: Either[Definitions, Context]) {
       case SubqueryRelation(s) =>
         s.ctx.projections.flatMap {
           case NamedProjection(n0, expr, _) if n0 == name =>
+            if (expr.getType.tpe == UnknownType) {
+              System.err.println("bad expr: " + expr)
+            }
             Seq(ColumnSymbol(topLevel, name, this, expr.getType.tpe))
           case WildcardProjection =>
             s.ctx.lookupColumn0(None, name, inProjScope, Some(topLevel))
@@ -110,6 +134,7 @@ class Context(val parent: Either[Definitions, Context]) {
     }
     val res = qual match {
       case Some(q) =>
+        //System.err.println("relations.get(q = %s): ".format(q) + relations.get(q))
         relations.get(q).map(x => lookupRelation(topLevel.getOrElse(q), x)).getOrElse(Seq.empty)
       case None =>
         // projection lookups can only happen if no qualifier, and we currently give preference
