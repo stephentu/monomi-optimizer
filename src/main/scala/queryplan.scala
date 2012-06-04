@@ -643,11 +643,14 @@ case class RemoteSql(stmt: SelectStmt,
           assert(BitUtils.onlyOne(o.toInt))
           assert(fi.symbol.isInstanceOf[ColumnSymbol])
 
+          // constant fold the expr before encrypting it
+          val e0 = e.evalLiteral.map(_.toAST).getOrElse(e)
+
           // TODO: figure out if we need join (assume we don't for now)
           val id = nextId()
           cg.println(
             "m[%d] = %s;".format(
-              id, e.toCPPEncrypt(o.toInt, false, fi.symbol.asInstanceOf[ColumnSymbol])))
+              id, e0.toCPPEncrypt(o.toInt, false, fi.symbol.asInstanceOf[ColumnSymbol])))
 
           val ret = (Some(QueryParamPlaceholder(id)), false)
           ret

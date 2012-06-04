@@ -1,5 +1,7 @@
 package edu.mit.cryptdb
 
+import java.util.Calendar
+
 sealed abstract trait SqlDialect
 case object MySQLDialect extends SqlDialect
 case object PostgresDialect extends SqlDialect
@@ -60,6 +62,7 @@ case class StarProj(ctx: Context = null) extends SqlProj {
 trait SqlExpr extends Node {
   def getType: TypeInfo = TypeInfo(UnknownType, None)
   def isLiteral: Boolean = false
+  def evalLiteral: Option[DbElem] = None
 
   // is the r-value of this expression a literal?
   def isRValueLiteral: Boolean = isLiteral
@@ -224,6 +227,21 @@ case class Like(lhs: SqlExpr, rhs: SqlExpr, negate: Boolean, ctx: Context = null
 case class Plus(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
   val opStr = "+"
   val cppOpStr = "add_node"
+
+  override def evalLiteral = {
+    lhs.evalLiteral.flatMap { l =>
+      rhs.evalLiteral.flatMap { r =>
+        (l, r) match {
+          case (d : DateElem, i: IntervalElem) => Some(d.addInterval(i))
+          case (i : IntervalElem, d: DateElem) => Some(d.addInterval(i))
+
+          // TODO: more cases when we need them
+          case _ => None
+        }
+      }
+    }
+  }
+
   def copyWithContext(c: Context) = copy(ctx = c)
   def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
@@ -231,6 +249,21 @@ case class Plus(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
 case class Minus(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
   val opStr = "-"
   val cppOpStr = "sub_node"
+
+  override def evalLiteral = {
+    lhs.evalLiteral.flatMap { l =>
+      rhs.evalLiteral.flatMap { r =>
+        (l, r) match {
+          case (d : DateElem, i: IntervalElem) => Some(d.subtractInterval(i))
+          case (i : IntervalElem, d: DateElem) => Some(d.subtractInterval(i))
+
+          // TODO: more cases when we need them
+          case _ => None
+        }
+      }
+    }
+  }
+
   def copyWithContext(c: Context) = copy(ctx = c)
   def copyWithChildren(lhs: SqlExpr, rhs: SqlExpr) = copy(lhs = lhs, rhs = rhs, ctx = null)
 }
@@ -464,6 +497,7 @@ trait LiteralExpr extends SqlExpr {
 case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(IntType(8), None)
   def toCPP = "new int_literal_node(%d)".format(v)
+  override def evalLiteral = Some(IntElem(v))
   override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
     assert(BitUtils.onlyOne(onion))
     assert(onion == Onions.DET || onion == Onions.OPE)
@@ -484,6 +518,7 @@ case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
 }
 case class FloatLiteral(v: Double, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(DoubleType, None)
+  override def evalLiteral = Some(DoubleElem(v))
   def toCPP = "new double_literal_node(%f)".format(v)
   override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
     throw new RuntimeException("currently un-supported")
@@ -493,6 +528,7 @@ case class FloatLiteral(v: Double, ctx: Context = null) extends LiteralExpr {
 }
 case class StringLiteral(v: String, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(FixedLenString(v.length), None)
+  override def evalLiteral = Some(StringElem(v))
   def toCPP = "new string_literal_node(%s)".format(v)
   override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
     assert(BitUtils.onlyOne(onion))
@@ -511,6 +547,7 @@ case class StringLiteral(v: String, ctx: Context = null) extends LiteralExpr {
 }
 case class NullLiteral(ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(NullType, None)
+  override def evalLiteral = Some(NullElem)
   def toCPP = "new null_literal_node"
   override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
     "db_elem(db_elem::null_tag)"
@@ -523,25 +560,33 @@ case class DateLiteral(d: String, ctx: Context = null) extends LiteralExpr {
   private val DateRegex = "(\\d+)-(\\d+)-(\\d+)".r
   val (year, month, day) = {
     val DateRegex(year, month, day) = d
+    assert(month.toInt >= 1 && month.toInt <= 12)
+    assert(day.toInt >= 1 && day.toInt <= 31)
     (year.toInt, month.toInt, day.toInt)
   }
   private val _intRepr = (day | (month << 5) | (year << 9));
 
   override def getType = TypeInfo(DateType, None)
+  override def evalLiteral = Some(DateElem({
+    val c = Calendar.getInstance
+    c.set(year, month - 1 /* month is 0-based for calendar*/, day)
+    c.getTime
+  }))
   def toCPP = "new date_literal_node(%s)".format(quoteDbl(d))
   override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
     assert(BitUtils.onlyOne(onion))
     assert(onion == Onions.DET || onion == Onions.OPE)
     assert(sym.tpe == DateType)
     val s = if (onion == Onions.DET) "det" else "ope"
-    "db_elem((int64_t)encrypt_date_%s(ctx.crypto, %d, %d, %b))".format(
-      s, _intRepr, sym.fieldPosition, join)
+    "db_elem((int64_t)encrypt_date_%s(ctx.crypto, %d /*%s*/, %d, %b))".format(
+      s, _intRepr, d, sym.fieldPosition, join)
   }
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = Seq("date", quoteSingle(d)) mkString " "
 }
 case class IntervalLiteral(e: String, unit: ExtractType, ctx: Context = null) extends LiteralExpr {
   override def getType = TypeInfo(IntervalType, None)
+  override def evalLiteral = Some(IntervalElem(e.toInt, unit))
   def toCPP = throw new RuntimeException("not implemented")
   override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
     throw new RuntimeException("currently un-supported")
