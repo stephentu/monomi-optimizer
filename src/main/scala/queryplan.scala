@@ -314,7 +314,15 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
     // this is used to debug whether or not our sql statements sent
     // to the DB for cardinality estimation are valid or not
 
-    resolve(stmt, defns)
+    try { 
+      resolve(stmt, defns)
+    } catch {
+      case e =>
+        System.err.println("Bad sql stmt: " + stmt.sql)
+        System.err.println("Offending Node:")
+        System.err.println(pretty)
+        throw e
+    }
   }
 
   def emitCPPHelpers(cg: CodeGenerator): Unit
@@ -891,7 +899,22 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
 }
 
 case class LocalTransform(
-  trfms: Seq[Either[Int, (SqlExpr, SqlExpr)]] /* (orig, translated) */, 
+  /* (orig, opt orig proj name, translated) */
+  trfms: Seq[Either[Int, (SqlExpr, Option[String], SqlExpr)]], 
+
+  /** 
+   * A query which represents what this node projects post transformation
+   *
+   * We need this because query structure is lost when we pick parts of it
+   * apart, and it is very hard to reconstruct a semantically correct query
+   * w/o having some assistance.
+   *
+   * At this point in the tree, we are more worried about cardinality estimations,
+   * than database cost estimations, so we are ok with a plan which differs
+   * significantly from how the encrypted plan will actually execute
+   */
+  origStmt: SelectStmt,
+
   child: PlanNode) extends PlanNode {
 
   assert(!trfms.isEmpty)
@@ -902,7 +925,7 @@ case class LocalTransform(
       case Left(pos) => td(pos)
 
       // TODO: allow for transforms to not remove vector context
-      case Right((o, _)) => 
+      case Right((o, _, _)) => 
         val t = o.findCanonical.getType
         PosDesc(
           t.tpe, t.field.map(_.pos), PlainOnion, 
@@ -915,7 +938,44 @@ case class LocalTransform(
 
   def costEstimate(ctx: EstimateContext, stats: Statistics) = {
     // we assume these operations are cheap
-    child.costEstimate(ctx, stats)
+    // TODO: this might not really be true - measure if it is
+    val ch = child.costEstimate(ctx, stats)
+    
+
+    // we get hints from the plan generator about what our equivStmt 
+    // should look like
+    ch.copy(equivStmt = origStmt)
+
+    // this didn't really work below- the idea was to 
+    // project the inner child as a subquery- lots of little
+    // corner cases make this hard to get right...
+
+    //val newProjs = {
+    //  val origProjs = ch.equivStmt.projections
+    //  trfms.map {
+    //    case Left(i) => 
+    //      origProjs(i) match {
+    //        case ExprProj(_, Some(a), _) => 
+    //          ExprProj(FieldIdent(None, a), None) 
+    //        case StarProj(_) => throw new RuntimeException("unimpl")
+    //        case e => e // TODO: not really right...
+    //      }
+    //    case Right((o, a, _)) => ExprProj(o, a)
+    //  }
+    //}
+
+    //val newStmt = 
+    //  resolveCheck(
+    //    SelectStmt(
+    //      newProjs, 
+    //      Some(Seq(SubqueryRelationAST(ch.equivStmt, ctx.uniqueId()))),
+    //      None, 
+    //      None, 
+    //      None, 
+    //      None),
+    //    ctx.defns) 
+
+    //ch.copy(equivStmt = newStmt)
   }
 
   def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
@@ -926,7 +986,7 @@ case class LocalTransform(
     trfms.foreach {
       case Left(i) =>
         cg.print("local_transform_op::trfm_desc(%d), ".format(i))
-      case Right((orig, texpr)) =>
+      case Right((orig, _, texpr)) =>
         val t = orig.findCanonical.getType
         if (t.tpe == UnknownType) {
           System.err.println("ERROR: " + orig)
@@ -963,25 +1023,47 @@ case class LocalGroupBy(
     val ch = child.costEstimate(ctx, stats)
     assert(ch.equivStmt.groupBy.isEmpty)
 
+    println("origKeys: " + origKeys)
+
     val nameSet = origKeys.flatMap {
-      case FieldIdent(_, _, ColumnSymbol(tbl, col, _, _), _) =>
-        Some((tbl, col))
-      case _ => None
+      case FieldIdent(q, n, ColumnSymbol(tbl, col, _, _), _) =>
+        Seq(Left((tbl, col))) ++ (if (q.isDefined) Seq.empty else Seq(Right(n)))
+      case FieldIdent(q, n, ProjectionSymbol(name, _, _), _) =>
+        Seq(Right(name)) ++ (if (q.isDefined) Seq.empty else Seq(Right(n)))
     }.toSet
+
+    println("nameSet: " + nameSet)
+
+    def wrapWithGroupConcat(e: SqlExpr) = GroupConcat(e, ",")
 
     val stmt =
       resolveCheck(
         ch.equivStmt.copy(
           // need to rewrite projections
-          projections = ch.equivStmt.projections.map {
-            case e @ ExprProj(fi @ FieldIdent(qual, name, _, _), _, _) =>
-              def wrapWithGroupConcat(e: SqlExpr) = GroupConcat(e, ",")
-              qual.flatMap { q =>
-                if (nameSet.contains((q, name))) Some(e) else None
-              }.getOrElse(e.copy(expr = wrapWithGroupConcat(fi)))
 
-            // TODO: not sure what to do in this case...
+          // TODO: the rules for when to group_concat projects is kind of 
+          // fragile now
+          projections = ch.equivStmt.projections.map {
+            case e @ ExprProj(fi @ FieldIdent(qual, name, _, _), projName, _) =>
+              //println("e: " + e)
+              if (projName.map(n => nameSet.contains(Right(n))).getOrElse(false)) {
+                e
+              } else {
+                qual.flatMap { q =>
+                  if (nameSet.contains(Left((q, name)))) Some(e) else None
+                }.getOrElse(e.copy(expr = wrapWithGroupConcat(fi)))
+              }
+
+            case e @ ExprProj(expr, projName, _) => 
+              if (projName.map(n => nameSet.contains(Right(n))).getOrElse(false)) {
+                e
+              } else {
+                e.copy(expr = wrapWithGroupConcat(expr))
+              }
+
+            // TODO: what do we do here?
             case e => e
+        
           },
           groupBy = Some(SqlGroupBy(origKeys, origFilter))),
         ctx.defns)
@@ -994,7 +1076,16 @@ case class LocalGroupBy(
   def emitCPPHelpers(cg: CodeGenerator) = 
     (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
 
-  def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
+  def emitCPP(cg: CodeGenerator) = {
+    val pos = keys.map { 
+      case TuplePosition(i, _) => i
+      case e => throw new RuntimeException("TODO: unsupported: " + e)
+    }
+    cg.print("new local_group_by(%s, ".format(
+      pos.map(_.toString).mkString("{", ", ", "}")))
+    child.emitCPP(cg)
+    cg.print(")")
+  }
 }
 
 // this node is for when we have to remove the HAVING clause

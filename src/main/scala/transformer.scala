@@ -25,7 +25,7 @@ trait PlanTransformers {
       case node @ RemoteMaterialize(_, c) => node.copy(child = recur(c))
       case node @ LocalOuterJoinFilter(_, _, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))
       case node @ LocalFilter(_, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))
-      case node @ LocalTransform(_, c) => node.copy(child = recur(c))
+      case node @ LocalTransform(_, _, c) => node.copy(child = recur(c))
       case node @ LocalGroupBy(_, _, _, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))
       case node @ LocalGroupFilter(_, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))
       case node @ LocalOrderBy(_, c) => node.copy(child = recur(c))

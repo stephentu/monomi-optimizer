@@ -103,6 +103,11 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
   private def encTblName(t: String) = t + "$enc"
 
+  private def verifyPlanNode[P <: PlanNode](p: P): P = {
+    val _unused = p.tupleDesc // has many sanity checks
+    p
+  }
+
   def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode =
     generatePlanFromOnionSet0(stmt, onionSet, PreserveOriginal)
 
@@ -513,8 +518,14 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
     // these correspond 1 to 1 with the new projections in the encrypted
     // re-written query
-    // values are: (orig expr, projection, what onion it is projected in, vector ctx)
-    val finalProjs = new ArrayBuffer[(SqlExpr, SqlProj, OnionType, Boolean)]
+    // values are: 
+    //    (orig expr, 
+    //     optional orig proj name, 
+    //     projection, 
+    //     what onion it is projected in, 
+    //     vector ctx)
+    val finalProjs = 
+      new ArrayBuffer[(SqlExpr, Option[String], SqlProj, OnionType, Boolean)]
 
     case class RewriteContext(
       onions: Seq[Int],
@@ -1340,6 +1351,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
     val finalSubqueryRelationPlans = new ArrayBuffer[(RemoteMaterialize, SelectStmt)]
 
+    var remoteMaterializeAdded = false
     cur = cur.relations.map { r =>
       var mode: ServerRewriteMode = ServerAll
       def rewriteSqlRelation(s: SqlRelation): SqlRelation =
@@ -1395,12 +1407,115 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
                 // otherwise, add a RemoteMaterialize node
                 val name0 = subRelnGen.uniqueId()
                 finalSubqueryRelationPlans += ((RemoteMaterialize(name0, p), ss))
+                remoteMaterializeAdded = true
                 TableRelationAST(name0, Some(name))
             }
         }
       cur.copy(relations = Some(r.map(rewriteSqlRelation)))
     }.getOrElse(cur)
 
+    // Special case optimization: This is kind of a hack
+    // the idea is, if we have queries of the form:
+    //
+    //   SELECT ...
+    //   FROM ( <inner subquery> ) AS ident
+    //   WHERE ... 
+    //   GROUP BY ...
+    //   ORDER BY ...
+    //   LIMIT ...
+    //
+    // and we are forced to handle the subquery separately, instead
+    // of doing a remote materialize, we should simply do all the operations
+    // locally. We restrict this optimization to only apply when we have
+    // one subquery
+
+    if (encContext == PreserveOriginal && /* we only do this for the outer most query */
+        remoteMaterializeAdded) { /* necessary but not sufficient condition for this opt to be applicable */
+      // need to check if the query only had one relation, and that it was replaced with 
+      // a remote materialize plan
+      cur.relations.filter(_.size == 1).flatMap(_.head match {
+            case TableRelationAST(name0, _, _) => 
+              finalSubqueryRelationPlans.filter(_._1.name == name0).headOption
+            case _ => None
+      }) match {
+        case Some((rm, origSS)) =>
+          // now that we have the RM, unwrap it and make sure we are able to see
+          // all the subquery projections in the plaintext 
+
+          def unwrap(n: PlanNode): PlanNode = n match {
+            case RemoteMaterialize(_, p) => unwrap(p)
+            case LocalEncrypt(_, p)      => unwrap(p)
+            case p                       => p
+          }
+
+          val p = unwrap(rm)
+          val td = p.tupleDesc
+          if (td.size == origSS.projections.size &&
+              td.filter(_.onion != PlainOnion).isEmpty) {
+            // TODO: not 100% sure this guarantees us that we have
+            // exactly the original query in the clear, but it seems to be 
+            // a reasonable check
+
+            // now we just translate each of the operations as local ops, re-writting
+            // all references to the subquery in terms of tuple positions
+
+            def rewritePre[N <: Node](n: Node): N = {
+              topDownTransformation(n) {
+                case FieldIdent(_, _, ColumnSymbol(_, col, _, _), _) =>
+                  val p = origSS.ctx.lookupNamedProjectionIndex(col).get
+                  (Some(TuplePosition(p)), false)
+
+                case FieldIdent(_, _, ProjectionSymbol(name, ctx, _), _) =>
+                  throw new RuntimeException("should not see proj symbol in pre-projection")
+
+                case e => (None, true)
+              }.asInstanceOf[N]
+            }
+
+            // where clause
+            var res = 
+              cur.filter.map(f => LocalFilter(rewritePre[SqlExpr](f), f, p, Seq.empty)).getOrElse(p)
+
+            // group by clause
+            res = 
+              cur.groupBy.map(gb =>
+                LocalGroupBy(gb.keys.map(x => rewritePre[SqlExpr](x)), gb.keys,
+                             gb.having.map(x => rewritePre[SqlExpr](x)), gb.having,
+                             res, Seq.empty)).getOrElse(res)
+
+            // projections
+            val trfms = cur.projections.map {
+                case ExprProj(e, a, _) => (e, a, rewritePre(e))
+                case StarProj(_)       => throw new RuntimeException("Unhandled")
+              }
+
+            res = LocalTransform(
+              trfms.map(Right(_)), origSS.copy(orderBy = None, limit = None), res)
+
+            // order by
+            res = 
+              cur.orderBy.map { ob =>
+                LocalOrderBy(
+                  ob.keys.map { 
+                    case (FieldIdent(_, _, ColumnSymbol(_, col, _, _), _), ot) =>
+                      (origSS.ctx.lookupNamedProjectionIndex(col).get, ot)
+
+                    case (FieldIdent(_, _, ProjectionSymbol(name, ctx, _), _), ot) =>
+                      (ctx.lookupNamedProjectionIndex(name).get, ot)
+
+                    case (e, ot) => throw new RuntimeException("cannot handle: " + e)
+                  }, res) }.getOrElse(res)
+
+            // limit
+            res = cur.limit.map(l => LocalLimit(l, res)).getOrElse(res)
+
+            return verifyPlanNode(res)
+          }
+
+        case _ =>
+      }
+    }
+        
     // --- filters --- //
     cur = cur
       .filter
@@ -1650,7 +1765,13 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     cur = {
 
       val projectionCache = new HashMap[(SqlExpr, OnionType), (Int, Boolean)]
-      def projectionInsert(origExpr: SqlExpr, p: SqlProj, o: OnionType, v: Boolean): Int = {
+      def projectionInsert(
+          origExpr: SqlExpr, 
+          origProjName: Option[String],
+          p: SqlProj, 
+          o: OnionType, 
+          v: Boolean): Int = {
+
         assert(p.isInstanceOf[ExprProj])
         val ExprProj(e, _, _) = p
         val (i0, v0) =
@@ -1658,7 +1779,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
           .getOrElse {
             // doesn't exist, need to insert
             val i = finalProjs.size
-            finalProjs += ((origExpr, p, o, v))
+            finalProjs += ((origExpr, origProjName, p, o, v))
 
             // insert into cache
             projectionCache += ((e, o) -> (i, v))
@@ -1672,7 +1793,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       def processClientComputation(comp: ClientComputation): CompProjMapping = {
         def proc(ps: Seq[(SqlExpr, SqlProj, OnionType, Boolean)]) =
           ps.map { case (e, p, o, v) =>
-            (p, projectionInsert(e, p, o, v))
+            (p, projectionInsert(e, None, p, o, v))
           }.toMap
         CompProjMapping(proc(comp.projections), proc(comp.subqueryProjections))
       }
@@ -1726,7 +1847,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
               case Left((expr, onion)) =>
                 //println("got left: " + expr.sql)
-                val stmtIdx = projectionInsert(e, ExprProj(expr, a), onion, false)
+                val stmtIdx = projectionInsert(e, a, ExprProj(expr, a), onion, false)
                 projPosMaps += Left((stmtIdx, onion))
               case Right((optExpr, comp)) =>
                 assert(!optExpr.isDefined)
@@ -1739,7 +1860,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       }
 
       cur.copy(projections =
-        finalProjs.map(_._2).toSeq ++
+        finalProjs.map(_._3).toSeq ++
         (if (!finalProjs.isEmpty) Seq.empty else Seq(ExprProj(IntLiteral(1), None))))
     }
 
@@ -1752,15 +1873,10 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     def wrapDecryptionNodeMap(p: PlanNode, m: CompProjMapping): PlanNode =
       wrapDecryptionNodeSeq(p, m.projMap.values.toSeq)
 
-    def verifyPlanNode[P <: PlanNode](p: P): P = {
-      val _unused = p.tupleDesc // has many sanity checks
-      p
-    }
-
     val tdesc =
       if (finalProjs.isEmpty) Seq(PosDesc(UnknownType, None, PlainOnion, false, false))
       else finalProjs.map { 
-        case (e, _, o, v) => 
+        case (e, _, _, o, v) => 
           val tpe = e.findCanonical.getType
           PosDesc(tpe.tpe, tpe.field.map(_.pos), o, tpe.field.map(_.partOfPK).getOrElse(false), v) 
       }.toSeq
@@ -1785,7 +1901,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
                 // to the relation it references
 
                 val refs = finalProjs.map {
-                  case (FieldIdent(_, _, ColumnSymbol(reln, _, _, _), _), _, _, _) => reln
+                  case (FieldIdent(_, _, ColumnSymbol(reln, _, _, _), _), _, _, _, _) => reln
                   case e =>
                     throw new RuntimeException("should see FieldIdent instead of " + e)
                 }
@@ -1870,7 +1986,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
           val projTrfms = projPosMaps.map {
             case Right((comp, mapping)) =>
               assert(comp.subqueries.isEmpty)
-              Right((comp.origExpr, comp.mkSqlExpr(mapping)))
+              Right((comp.origExpr, None, comp.mkSqlExpr(mapping)))
             case Left((p, _)) => Left(p)
           }
 
@@ -1888,7 +2004,9 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
           val trfms = projTrfms ++ auxTrfms
 
-          def isPrefixIdentityTransform(trfms: Seq[Either[Int, (SqlExpr, SqlExpr)]]): Boolean = {
+          def isPrefixIdentityTransform(
+            trfms: Seq[Either[Int, (SqlExpr, Option[String], SqlExpr)]]): Boolean = {
+
             trfms.zipWithIndex.foldLeft(true) {
               case (acc, (Left(p), idx)) => acc && p == idx
               case (acc, (Right(_), _))  => false
@@ -1899,7 +2017,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
           val stage3 =
             if (trfms.size == s0.tupleDesc.size &&
                 isPrefixIdentityTransform(trfms)) s0
-            else LocalTransform(trfms, s0)
+            else LocalTransform(trfms, stmt.copy(orderBy = None, limit = None), s0)
 
           // need to update localOrderByPosMaps with new proj info
           val updateIdx = auxTrfmMSeq.toMap
@@ -1934,7 +2052,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
           val orderTrfms =
             newLocalOrderBy.zip(localOrderByPosMaps).flatMap {
               case (Left(p), _)  => None
-              case (Right(c), m) => Some(Right((c.origExpr, c.mkSqlExpr(m))))
+              case (Right(c), m) => Some(Right((c.origExpr, None, c.mkSqlExpr(m))))
             }
 
           var offset = projPosMaps.size
@@ -1955,10 +2073,13 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
             val allTrfms = (0 until projPosMaps.size).map { i => Left(i) } ++ orderTrfms
             LocalTransform(
               (0 until projPosMaps.size).map { i => Left(i) },
+              stmt.copy(limit = None),
               LocalOrderBy(
                 orderByVec,
-                LocalTransform(allTrfms,
-                  if (!decryptionVec.isEmpty) LocalDecrypt(decryptionVec, stage3) else stage3)))
+                LocalTransform(
+                  allTrfms,
+                  stmt.copy(orderBy = None, limit = None),
+                  (if (!decryptionVec.isEmpty) LocalDecrypt(decryptionVec, stage3) else stage3))))
           }
         } else {
           stage3

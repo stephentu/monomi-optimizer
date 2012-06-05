@@ -28,7 +28,7 @@ trait PlanTraversals {
       case RemoteMaterialize(_, c) => recur(c)
       case LocalOuterJoinFilter(_, _, _, c, s) => recur(c); s.foreach(recur)
       case LocalFilter(_, _, c, s) => recur(c); s.foreach(recur)
-      case LocalTransform(_, c) => recur(c)
+      case LocalTransform(_, _, c) => recur(c)
       case LocalGroupBy(_, _, _, _, c, s) => recur(c); s.foreach(recur)
       case LocalGroupFilter(_, _, c, s) => recur(c); s.foreach(recur)
       case LocalOrderBy(_, c) => recur(c)
