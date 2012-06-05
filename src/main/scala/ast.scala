@@ -571,6 +571,11 @@ case class StringLiteral(v: String, ctx: Context = null) extends LiteralExpr {
     assert(onion == Onions.DET || onion == Onions.OPE) // SWP handled elsewhere
     val s = if (onion == Onions.DET) "det" else "ope"
     sym.tpe match {
+      case FixedLenString(1) =>
+        // special case char
+        assert(v.length == 1)
+        "db_elem((int64_t)encrypt_u8_%s(ctx.crypto, %d /*%s*/, %d, %b))".format(
+          s, v.getBytes.apply(0).asInstanceOf[Int], v, sym.fieldPosition, join)
       case _: FixedLenString | _: VariableLenString =>
         "db_elem(encrypt_string_%s(ctx.crypto, %s, %d, %b))".format(
           s, quoteDbl(v), sym.fieldPosition, join)

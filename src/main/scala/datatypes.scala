@@ -49,7 +49,9 @@ case class DecimalType(scale: Int, precision: Int) extends DataType {
 }
 
 case class FixedLenString(len: Int) extends DataType {
-  def toCPP = "db_elem::TYPE_STRING"
+  assert(len > 0)
+  def toCPP = 
+    if (len == 1) "db_elem::TYPE_CHAR" else "db_elem::TYPE_STRING"
   def size = len
   override def commonBound(that: DataType) = that match {
     case FixedLenString(l) => FixedLenString(math.max(len, l))
