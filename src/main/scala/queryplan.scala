@@ -1123,7 +1123,15 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
   def emitCPPHelpers(cg: CodeGenerator) = 
     (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
 
-  def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
+  def emitCPP(cg: CodeGenerator) = {
+    cg.print("new local_group_filter(")
+    cg.print(filter.toCPP)
+    cg.print(", ")
+    child.emitCPP(cg)
+    cg.print(", {")
+    subqueries.foreach(s => {s.emitCPP(cg); cg.print(", ")})
+    cg.print("})")
+  }
 }
 
 case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extends PlanNode {
