@@ -58,6 +58,7 @@ trait ProgramGenerator {
     def makeProgram() = {
       val progFile = new File(baseFolder, "program.cc")
       val cg = new CodeGenerator(progFile)
+      cg.println("// WARNING: This is an auto-generated file")
       cg.println("#include \"db_config.h\"")
       
       cg.println("#include <cassert>")
