@@ -102,3 +102,18 @@ class GeneratorSpec extends Specification {
   }
 
 }
+
+class MultiGeneratorSpec extends Specification {
+  object resolver extends Resolver
+  object generator extends Generator
+
+  "MultiGenerator" should {
+    "make plans for all of tpch queries" in {
+      val queries = Queries.AllQueries
+      val p = new SQLParser
+      val unresolved = queries.map(p.parse(_))
+      val resolved = unresolved.map(x => resolver.resolve(x.get, TestSchema.definition))
+      generator.generateCandidatePlans(resolved).size must_== queries.size
+    }
+  }
+}

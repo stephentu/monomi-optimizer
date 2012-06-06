@@ -129,3 +129,13 @@ trait PrettyPrinters {
   protected def quoteSingle(s: String): String = "'" + s.replaceAll("'", "\\\\'") + "'"
   protected def quoteDbl(s: String): String = "\"" + s.replaceAll("\"", "\\\\\"") + "\""
 }
+
+trait Timer {
+  def timedRunMillis[A](f: => A): (Double, A) = {
+    val start = System.nanoTime
+    val ret = f
+    val end = System.nanoTime
+    val ms = ((end - start).toDouble / 1000000.0)
+    (ms, ret)
+  }
+}

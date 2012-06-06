@@ -64,6 +64,10 @@ trait SqlExpr extends Node with Transformers {
   def isLiteral: Boolean = false
   def evalLiteral: Option[DbElem] = None
 
+  // returns an AST node which recursive folds as much as possible
+  def constantFold: SqlExpr = 
+    evalLiteral.map(_.toAST.copyWithContext(ctx).asInstanceOf[SqlExpr]).getOrElse(this)
+
   // is the r-value of this expression a literal?
   def isRValueLiteral: Boolean = isLiteral
 
@@ -145,6 +149,12 @@ trait SqlExpr extends Node with Transformers {
 trait Binop extends SqlExpr {
   val lhs: SqlExpr
   val rhs: SqlExpr
+
+  override def constantFold = {
+    val x = copyWithChildren(lhs.constantFold, rhs.constantFold)
+    x.evalLiteral.map(_.toAST.copyWithContext(ctx).asInstanceOf[SqlExpr])
+      .getOrElse(x.copyWithContext(ctx).asInstanceOf[SqlExpr])
+  }
 
   override def getType = lhs.getType.commonBound(rhs.getType) 
 

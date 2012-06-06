@@ -280,6 +280,8 @@ trait PgQueryPlanExtractor {
 
     val r =
       try {
+        //println("sending query to psql:")
+        //println(sql)
         dbconn.getConn.createStatement.executeQuery("EXPLAIN (VERBOSE, FORMAT JSON) " + sql)
       } catch {
         case e =>
@@ -613,8 +615,9 @@ case class RemoteSql(stmt: SelectStmt,
 
     Estimate(
       c + aggCost + addSeqScanCost +
-      subrelations.map(_._1.costEstimate(ctx, stats).cost).sum +
-        CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec),
+        subrelations.map(_._1.costEstimate(ctx, stats).cost).sum +
+        CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec) +
+        CostConstants.secToPGUnit( 0.001 /* 1ms latency to contact server */ ),
       r, rr.getOrElse(1), reverseStmt0, ssi)
   }
 
@@ -871,8 +874,14 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
         m.get(idx).filterNot(_.isEmpty).map { pos =>
           // check any pos in agg ctx
           if (!pos.filter(p => td(p).vectorCtx).isEmpty) {
+            //println(
+            //  "subquery(%d): cpi = %f, effective_rows = %d".format(
+            //    idx, costPerInvocation.cost, ch.rows * ch.rowsPerRow))
             costPerInvocation.cost * ch.rows * ch.rowsPerRow
           } else {
+            //println(
+            //  "subquery(%d): cpi = %f, effective_rows = %d".format(
+            //    idx, costPerInvocation.cost, ch.rows))
             costPerInvocation.cost * ch.rows
           }
         }.getOrElse(costPerInvocation.cost)
@@ -895,7 +904,7 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
 
   def emitCPP(cg: CodeGenerator) = {
     cg.print("new local_filter_op(")
-    cg.print(expr.toCPP)
+    cg.print(expr.constantFold.toCPP)
     cg.print(", ")
     child.emitCPP(cg)
     cg.print(", {")
@@ -1027,9 +1036,25 @@ case class LocalGroupBy(
 
   def costEstimate(ctx: EstimateContext, stats: Statistics) = {
     val ch = child.costEstimate(ctx, stats)
-    assert(ch.equivStmt.groupBy.isEmpty)
 
-    println("origKeys: " + origKeys)
+    // TODO: this is a bit of a hack
+    val equivStmt =
+      if (ch.equivStmt.groupBy.isEmpty) ch.equivStmt 
+      else {
+        SelectStmt(
+          ch.equivStmt.projections.map {
+            case ExprProj(_, Some(alias), _) => ExprProj(FieldIdent(None, alias), None)
+            case e @ ExprProj(_, None, _)    => e.copyWithContext(null).asInstanceOf[ExprProj]
+            case _                           => throw new RuntimeException("cannot handle")
+          },
+          Some(Seq(SubqueryRelationAST(ch.equivStmt, ctx.uniqueId()))),
+          None,
+          None,
+          None,
+          None)
+      }
+
+    //println("origKeys: " + origKeys)
 
     val nameSet = origKeys.flatMap {
       case FieldIdent(q, n, ColumnSymbol(tbl, col, _, _), _) =>
@@ -1038,18 +1063,18 @@ case class LocalGroupBy(
         Seq(Right(name)) ++ (if (q.isDefined) Seq.empty else Seq(Right(n)))
     }.toSet
 
-    println("nameSet: " + nameSet)
+    //println("nameSet: " + nameSet)
 
     def wrapWithGroupConcat(e: SqlExpr) = GroupConcat(e, ",")
 
     val stmt =
       resolveCheck(
-        ch.equivStmt.copy(
+        equivStmt.copy(
           // need to rewrite projections
 
           // TODO: the rules for when to group_concat projects is kind of 
           // fragile now
-          projections = ch.equivStmt.projections.map {
+          projections = equivStmt.projections.map {
             case e @ ExprProj(fi @ FieldIdent(qual, name, _, _), projName, _) =>
               //println("e: " + e)
               if (projName.map(n => nameSet.contains(Right(n))).getOrElse(false)) {

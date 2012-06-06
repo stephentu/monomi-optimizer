@@ -3,7 +3,8 @@ package edu.mit.cryptdb
 import scala.collection.mutable.{
   ArrayBuffer, HashMap, HashSet, Seq => MSeq, Map => MMap }
 
-trait Generator extends Traversals with PlanTraversals with Transformers with PlanTransformers {
+trait Generator extends Traversals 
+  with PlanTraversals with Transformers with PlanTransformers with Timer {
 
   private def topDownTraverseContext(start: Node, ctx: Context)(f: Node => Boolean) = {
     topDownTraversal(start) {
@@ -858,7 +859,10 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
               onionRetVal.set(OnionType.buildIndividual(curRewriteCtx.onions.head))
               curRewriteCtx.onions.head match {
                 case Onions.PLAIN => replaceWith(e.copyWithContext(null).asInstanceOf[SqlExpr])
-                case o            => replaceWith(encLiteral(e, o, curRewriteCtx.keyConstraint.get))
+                case o            => 
+                  curRewriteCtx.keyConstraint.map { 
+                    k => replaceWith(encLiteral(e, o, k)) 
+                  }.getOrElse(bailOut)
               }
 
             case e: SqlExpr =>
@@ -2311,7 +2315,9 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
     // make onionSets all reference global precomputed expressions
     // (HOM groups are still local though, b/c they are handled separately)
-    val onionSets = onionSets0.map(_.map(_.withGlobalPrecompExprs(precompExprMap)))
+    val onionSets = onionSets0.zip(stmts).map { case (os, stmt) =>
+      os.map(_.withGlobalPrecompExprs(precompExprMap)).map(c => fillOnionSet(stmt, c)).toSet.toSeq
+    }
 
     // ------- generate various permutations -------- //
 
@@ -2328,7 +2334,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
     val candidates /* :Seq[ Seq[(Seq[String], OnionSet)] ] */ =
       perms.map { p /* :Seq[Seq[(Set[String], OnionSet)]] */ =>
         val merged = p.map { g /* :Seq[(Set[String], OnionSet)] */ =>
-          (g.flatMap(_._1), OnionSet.mergeSeq(g.map(_._2)))
+          (g.flatMap(_._1).toSet.toSeq, OnionSet.mergeSeq(g.map(_._2)))
         }
         CollectionUtils.uniqueInOrder(merged)
       }
@@ -2463,21 +2469,28 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       (k, v.map { case (k, v) => (v, k) }.toMap)
     }.toMap
 
+    // TODO: parallelize this loop
     val uniquePlans =
       stmts.zip(candidates).zip(perQueryInterestMap).zipWithIndex.map {
         case (((stmt, cands), im), idx) if im.isEmpty =>
 
-          println("trying query %d with %d onions".format(idx, cands.size))
-
-          CollectionUtils.uniqueInOrderWithKey(
-            cands.map(_._2).map(c => fillOnionSet(stmt, c)).map {
-              o => (stmt, generatePlanFromOnionSet(stmt, o), o)
-            })(_._2)
+          println("trying query %d with %d onions...".format(idx, cands.size))
+          val (time, res) = 
+            timedRunMillis(
+              CollectionUtils.uniqueInOrderWithKey(
+                cands.map(_._2).map {
+                  o => (stmt, generatePlanFromOnionSet(stmt, o), o)
+                })(_._2))
+          println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
+          res
 
         case (((stmt, cands), im), idx) =>
 
-          if (im.keys.size > 1)
+          if (im.keys.size > 1) {
+            System.err.println("WARNING: query is generating multi-group candidates:")
+            System.err.println("  " + stmt.sql)
             throw new RuntimeException("TODO: implement handling > 1 group relation")
+          }
 
           val reln = im.keys.head
           val exprSplits /* Seq[ Seq[Seq[SqlExpr]] ] */ =
@@ -2489,6 +2502,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
           val oSets =
             for (split <- exprSplits; cand <- cands) yield {
+              // TODO: relax assumption
               assert(cand._1.size <= 1)
               if (cand._1.contains(reln)) {
                 cand._2.withGroups(Map(reln -> split))
@@ -2497,12 +2511,15 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
               }
             }
 
-          println("trying query %d with %d onions".format(idx, oSets.size))
-
-          CollectionUtils.uniqueInOrderWithKey(
-            oSets.map(c => fillOnionSet(stmt, c)).map {
-              o => (stmt, generatePlanFromOnionSet(stmt, o), o)
-            })(_._2)
+          println("trying query %d with %d onions...".format(idx, oSets.size))
+          val (time, res) = 
+            timedRunMillis(
+              CollectionUtils.uniqueInOrderWithKey(
+                oSets.map {
+                  o => (stmt, generatePlanFromOnionSet(stmt, o), o)
+                })(_._2))
+          println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
+          res
       }
 
     val globalOpts = buildGlobalOptsFromPlans(uniquePlans.flatMap(_.map(x => (x._2, x._3))))
@@ -2512,6 +2529,14 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
   @inline
   private def fillOnionSet(stmt: SelectStmt, o: OnionSet): OnionSet = {
     o.complete(stmt.ctx.defns)
+  }
+
+  @inline
+  private def mkPowerSetOnionSet(os: Seq[OnionSet]): Seq[Seq[OnionSet]] = {
+    println("powerset over %d elements...".format(os.size))
+    val (time, res) = timedRunMillis(CollectionUtils.powerSetMinusEmpty(os)) 
+    println("  took %f ms".format(time))
+    res
   }
 
   private def mkGloballyAwarePlanWithEstimate(
@@ -2660,17 +2685,44 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
   def generateCandidatePlans(stmt: SelectStmt): CandidatePlans = {
     val o0 = generateOnionSets(stmt)
+
+    //println("onions:")
+    //o0.foreach { o =>
+    //  println(o)
+    //  println()
+    //}
+
     val precompExprMap = mkGlobalPreCompExprMap(o0)
-    val o = o0.map(_.withGlobalPrecompExprs(precompExprMap))
-    val perms = CollectionUtils.powerSetMinusEmpty(o)
+    val o = o0.map(_.withGlobalPrecompExprs(precompExprMap)).map(c => fillOnionSet(stmt, c)).toSet.toSeq
+
+    //println("onions to powerset:")
+    //o.foreach { o =>
+    //  println(o)
+    //  println()
+    //}
+
+    val perms = mkPowerSetOnionSet(o)
+
     // merge all perms, then unique
     val candidates = CollectionUtils.uniqueInOrder(perms.map(p => OnionSet.mergeSeq(p)))
-    println("trying query with %d onions".format(candidates.size))
-    val uniquePlans =
-      CollectionUtils.uniqueInOrderWithKey(
-        candidates.map(c => fillOnionSet(stmt, c)).map {
-          o => (stmt, generatePlanFromOnionSet(stmt, o), o)
-        })(_._2)
+
+    //println("candidate onions")
+    //candidates.foreach { o =>
+    //  println(o.compactToString)
+    //  println()
+    //}
+
+    println("trying query with %d onions...".format(candidates.size))
+    if (candidates.size > 10000) {
+      println("  WARNING: a high number of onions for sql: " + stmt.sql)
+    }
+    val (time, uniquePlans) =
+      timedRunMillis(
+        CollectionUtils.uniqueInOrderWithKey(
+          candidates.map {
+            o => (stmt, generatePlanFromOnionSet(stmt, o), o)
+          })(_._2))
+    println("  generated %d unique plans in %f ms".format(uniquePlans.size, time))
 
     // compute global opts from the unique plans
     val globalOpts = buildGlobalOptsFromPlans(uniquePlans.map(x => (x._2, x._3)))
@@ -2687,6 +2739,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       selectFn: (SelectStmt, Seq[OnionSet]) => Seq[OnionSet]): Seq[OnionSet] = {
 
       var workingSet : Seq[OnionSet] = bootstrap
+      val subselectSets = new ArrayBuffer[OnionSet]
 
       def add(exprs: Seq[(SqlExpr, Int)]): Boolean = {
         val e0 = exprs.map { case (e, o) => findOnionableExpr(e).map(e0 => (e0, o)) }.flatten
@@ -2711,19 +2764,29 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
 
         getPotentialCryptoOpts(e, o) match {
           case Some(exprs) => add(exprs)
+            // TODO: should we still traverse for subselects (as we do below)?
+
           case None =>
+
+            // traverse for subselects
+            topDownTraversal(e) {
+              case Subselect(ss, _) =>
+                subselectSets ++= selectFn(ss, Seq(new OnionSet))
+                false // we'll recurse in the invocation to selectFn()
+              case _ => true
+            }
+
             e match {
-              case Subselect(ss, _)                 => workingSet = selectFn(ss, workingSet)
-              case Exists(Subselect(ss, _), _)      => workingSet = selectFn(ss, workingSet)
 
               // one-level deep binop optimizations
-              case Plus(l, r, _)                    => binopOp(l, r)
-              case Minus(l, r, _)                   => binopOp(l, r)
-              case Mult(l, r, _)                    => binopOp(l, r)
-              case Div(l, r, _)                     => binopOp(l, r)
+              // TODO: why do we need this?
+              case Plus(l, r, _)                      => binopOp(l, r)
+              case Minus(l, r, _)                     => binopOp(l, r)
+              case Mult(l, r, _)                      => binopOp(l, r)
+              case Div(l, r, _)                       => binopOp(l, r)
 
               // TODO: more opts?
-              case _                                =>
+              case _                                  =>
             }
         }
       }
@@ -2734,10 +2797,8 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
         if (clauses.size == 1) {
           procExprPrimitive(clauses.head, o)
         } else {
-          val sets = clauses.flatMap(c => traverseContext(c, ctx, Onions.PLAIN, bootstrap, selectFn))
-          workingSet = workingSet.map { ws =>
-            sets.foldLeft(ws) { case (acc, elem) => acc.merge(elem) }
-          }
+          workingSet = 
+            clauses.flatMap(c => traverseContext(c, ctx, Onions.PLAIN, workingSet.map(_.copy), selectFn))
         }
       }
 
@@ -2752,7 +2813,7 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
         case _                   => /* no-op */
       }
 
-      workingSet
+      workingSet ++ subselectSets.toSeq
     }
 
     def buildForSelectStmt(stmt: SelectStmt, bootstrap: Seq[OnionSet]): Seq[OnionSet] = {
@@ -2777,6 +2838,35 @@ trait Generator extends Traversals with PlanTraversals with Transformers with Pl
       val s2 = f.map(e => traverseContext(e, ctx, Onions.PLAIN, bootstrap.map(_.copy), buildForSelectStmt))
       val s3 = g.map(e => traverseContext(e, ctx, Onions.Comparable, bootstrap.map(_.copy), buildForSelectStmt))
       val s4 = o.map(e => traverseContext(e, ctx, Onions.IEqualComparable, bootstrap.map(_.copy), buildForSelectStmt))
+
+      //println("onions for stmt: " + stmt.sql)
+
+      //println("bootstrap onions (size = %d):".format(bootstrap.size))
+      //bootstrap.foreach(println)
+      //println()
+
+      //println("s0 onions (size = %d):".format(s0.size))
+      //s0.foreach(println)
+      //println()
+
+      //println("s1 onions (size = %d):".format(s1.map(_.size).getOrElse(0)))
+      //s1.foreach(_.foreach(println))
+      //println()
+
+      //println("s2 onions (size = %d):".format(s2.map(_.size).getOrElse(0)))
+      //s2.foreach(_.foreach(println))
+      //println()
+
+      //println("s3 onions (size = %d):".format(s3.map(_.size).getOrElse(0)))
+      //s3.foreach(_.foreach(println))
+      //println()
+
+      //println("s4 onions (size = %d):".format(s4.map(_.size).getOrElse(0)))
+      //s4.foreach(_.foreach(println))
+      //println()
+
+      //println("-----")
+
       (s0 ++ s1.getOrElse(Seq.empty) ++ s2.getOrElse(Seq.empty) ++
       s3.getOrElse(Seq.empty) ++ s4.getOrElse(Seq.empty)).filterNot(_.isEmpty)
     }

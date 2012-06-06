@@ -346,6 +346,19 @@ class OnionSet {
 
   def isEmpty: Boolean = opts.isEmpty && packedHOMs.isEmpty
 
+  def compactToString: String = {
+    val o = opts.flatMap { case (k, (s, v)) =>
+      val x = v & (~Onions.DET)
+      if (x != 0) {
+        Some((k, (s, x)))
+      } else { 
+        None
+      }
+    }
+    "OnionSet(compact_opts = " + o.toString +
+    ", packedHOMs = " + packedHOMs.toString + ")"
+  }
+
   override def toString =
     "OnionSet(opts = " + opts.toString +
     ", packedHOMs = " + packedHOMs.toString + ")"

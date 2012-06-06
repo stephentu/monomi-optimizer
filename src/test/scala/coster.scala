@@ -3,25 +3,22 @@ package edu.mit.cryptdb
 import tpch._
 import org.specs2.mutable._
 
-class CosterSpec extends Specification {
+class CosterSpec extends Specification with SchemaInit {
 
   object resolver extends Resolver
   object generator extends Generator
-
-  // this relies on having a valid connection to the database
-  private val _props = new java.util.Properties
-  _props.setProperty("user", "stephentu")
+  object coster extends Coster
 
   private def doTest(q: String) = {
     val parser = new SQLParser
     val r = parser.parse(q)
-    val pg = new PgSchema("localhost", 5432, "tpch_0_05", _props)
+    val pg = init()
     val schema = pg.loadSchema()
     val stats = pg.loadStats()
     val s0 = resolver.resolve(r.get, schema)
     val plans = generator.generateCandidatePlans(s0)
     plans must not be empty
-    plans.map { case (p, c) => p.costEstimate(c, stats) }
+    coster.costPlan(plans,stats)
   }
 
   "Coster" should {
@@ -110,4 +107,26 @@ class CosterSpec extends Specification {
     }
   }
 
+}
+
+class MultiCosterSpec extends Specification with SchemaInit {
+
+  object resolver extends Resolver
+  object generator extends Generator
+  object coster extends Coster
+
+  "MultiGenerator" should {
+    "cost plans for all of tpch queries" in {
+      val queries = Queries.AllQueries
+      val p = new SQLParser
+      val unresolved = queries.map(p.parse(_))
+      val pg = init()
+      val schema = pg.loadSchema()
+      val stats = pg.loadStats()
+      val resolved = unresolved.map(x => resolver.resolve(x.get, schema))
+      val plans = generator.generateCandidatePlans(resolved)
+      plans.size must_== queries.size
+      coster.costPlans(plans, stats) must_== queries.size
+    }
+  }
 }
