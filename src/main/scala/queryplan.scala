@@ -650,6 +650,13 @@ case class RemoteSql(stmt: SelectStmt,
         case TableRelationAST(name, alias, _) =>
           (Some(TableRelationAST(subMarkers(name), alias)), false)
 
+        case BoundDependentFieldPlaceholder(pos, onion, _) =>
+          val id = nextId()
+          // right now, we just assume the passed in argument is already the correct onion
+          // TODO: fix this assumption
+          cg.println("m[%d] = ctx.args->columns.at(%d);".format(id, pos))
+          (Some(QueryParamPlaceholder(id)), false)
+
         case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), MetaFieldIdent(fi, _)), _) =>
           assert(e.isLiteral)
           assert(BitUtils.onlyOne(o.toInt))
@@ -664,8 +671,7 @@ case class RemoteSql(stmt: SelectStmt,
             "m[%d] = %s;".format(
               id, e0.toCPPEncrypt(o.toInt, false, fi.symbol.asInstanceOf[ColumnSymbol])))
 
-          val ret = (Some(QueryParamPlaceholder(id)), false)
-          ret
+          (Some(QueryParamPlaceholder(id)), false)
 
         case FunctionCall("searchSWP", Seq(expr, pattern), _) =>
           val FunctionCall("encrypt", Seq(p, _, MetaFieldIdent(fi, _)), _) = pattern

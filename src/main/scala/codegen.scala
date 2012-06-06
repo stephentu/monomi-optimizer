@@ -70,6 +70,7 @@ trait ProgramGenerator {
       cg.println("#include <execution/context.hh>")
       cg.println("#include <execution/operator_types.hh>")
       cg.println("#include <execution/eval_nodes.hh>")
+      cg.println("#include <execution/query_cache.hh>")
 
       plans.foreach(_.emitCPPHelpers(cg))
 
@@ -106,7 +107,8 @@ trait ProgramGenerator {
         cg.println("CryptoManager cm(\"12345\");")
         cg.println("crypto_manager_stub cm_stub(&cm, CRYPTO_USE_OLD_OPE);")
         cg.println("PGConnect pg(DB_HOSTNAME, DB_USERNAME, DB_PASSWORD, DB_DATABASE, DB_PORT);")
-        cg.println("exec_context ctx(&pg, &cm_stub);")
+        cg.println("query_cache cache;")
+        cg.println("exec_context ctx(&pg, &cm_stub, &cache);")
 
         cg.blockBegin("switch (q) {")
           (0 until plans.size).foreach { i =>
