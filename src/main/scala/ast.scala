@@ -419,6 +419,11 @@ case class GroupConcat(expr: SqlExpr, sep: String, hexify: Boolean = false, ctx:
   }
 }
 case class AggCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extends SqlAgg {
+  // incomplete list
+  override def getType = name match {
+    case "hom_agg" => TypeInfo(VariableLenString(), None)
+    case _         => super.getType 
+  }
   def toCPP = "new agg_call_node(%s, %s)".format(quoteDbl(name), args.map(_.toCPP).mkString("{", ", ", "}")) 
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = args.flatMap(_.gatherFields)

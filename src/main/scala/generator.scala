@@ -431,7 +431,8 @@ trait Generator extends Traversals
 
     var cur = stmt // the current statement, as we update it
 
-    val _hiddenNames = new NameGenerator("_hidden")
+    val _hiddenNamePrefix = "_hidden$"
+    val _hiddenNames = new NameGenerator(_hiddenNamePrefix)
 
     // local filter + name of concrete {table,subquery} relations
     // to nullify (named in this context) if the filter fails (none if inner join)
@@ -1878,10 +1879,23 @@ trait Generator extends Traversals
       wrapDecryptionNodeSeq(p, m.projMap.values.toSeq)
 
     val tdesc =
-      if (finalProjs.isEmpty) Seq(PosDesc(UnknownType, None, PlainOnion, false, false))
+      if (finalProjs.isEmpty) Seq(PosDesc(IntType(4), None, PlainOnion, false, false))
       else finalProjs.map { 
-        case (e, _, _, o, v) => 
-          val tpe = e.findCanonical.getType
+        case (e, _, p, o, v) => 
+          val tpe = e match {
+            case FieldIdent(None, n, _, _) if n.startsWith(_hiddenNamePrefix) =>
+              // for hidden names, use the projection expression
+              val ExprProj(e, _, _) = p
+              val r = e.getType
+              println(n + ": " + r)
+              r
+            case _ => e.findCanonical.getType
+          } 
+          if (tpe.tpe == UnknownType) {
+            println("ERROR: UnknownType for expr: " + e)
+            println("e.findCanonical: " + e.findCanonical)
+            println("p: " + p)
+          }
           PosDesc(tpe.tpe, tpe.field.map(_.pos), o, tpe.field.map(_.partOfPK).getOrElse(false), v) 
       }.toSeq
 
