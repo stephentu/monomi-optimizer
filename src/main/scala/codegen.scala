@@ -66,12 +66,14 @@ trait ProgramGenerator {
       cg.println("#include <iostream>")
 
       cg.println("#include <crypto-old/CryptoManager.hh>")
+      cg.println("#include <crypto/paillier.hh>")
       cg.println("#include <edb/ConnectNew.hh>")
       cg.println("#include <execution/encryption.hh>")
       cg.println("#include <execution/context.hh>")
       cg.println("#include <execution/operator_types.hh>")
       cg.println("#include <execution/eval_nodes.hh>")
       cg.println("#include <execution/query_cache.hh>")
+      cg.println("#include <util/util.hh>")
 
       plans.foreach(_.emitCPPHelpers(cg))
 

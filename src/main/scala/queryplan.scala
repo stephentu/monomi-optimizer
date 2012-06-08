@@ -401,7 +401,7 @@ case class RemoteSql(stmt: SelectStmt,
           .map(x => (Some(rewriteWithQual(x, qual0)), false))
           .getOrElse {
             // rowids are rewritten to 0
-            if (ctx.homGroups.contains(qual0) && name0 == "rowid") {
+            if (ctx.homGroups.contains(qual0) && name0 == "row_id") {
               ((Some(IntLiteral(0)), false))
             } else if (qual != qual0 || name != name0) {
               ((Some(FieldIdent(Some(qual0), name0)), false))
@@ -659,6 +659,31 @@ case class RemoteSql(stmt: SelectStmt,
           // TODO: fix this assumption
           cg.println("m[%d] = ctx.args->columns.at(%d);".format(id, pos))
           (Some(QueryParamPlaceholder(id)), false)
+
+        case AggCall("hom_agg", Seq(f0, StringLiteral(reln, _), IntLiteral(gid, _)), _) =>
+          // need args of format:
+
+          // public_key (bytea),
+          // filename (varchar),
+          // agg_size (int64),      
+          // rows_per_agg (int64),      
+          // row_id (int64),
+
+          // TODO: we need to compute these values instead of hardcoding
+          val plainSizeBits = 1256
+          val rowsPerAgg = 3
+
+          val id = nextId()
+          cg.blockBegin("{")
+            cg.println("static const size_t RowColPackPlainSize = %d;".format(plainSizeBits))
+            cg.println("static const size_t RowColPackCipherSize = RowColPackPlainSize * 2;")
+            cg.println("auto sk = Paillier_priv::keygen(RowColPackCipherSize / 2, RowColPackCipherSize / 8);")
+            cg.println("Paillier_priv pp(sk);")
+            cg.println("auto pk = pp.pubkey();")
+            cg.println("m[%d] = db_elem(StringFromZZ(pk[0] * pk[0]));".format(id))
+          cg.blockEnd("}")
+
+          (Some(AggCall("agg_hash", Seq(QueryParamPlaceholder(id), StringLiteral("lineitem_enc/group_%d".format(gid)), IntLiteral(plainSizeBits * 2 / 8), IntLiteral(rowsPerAgg), f0))), true)
 
         case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), MetaFieldIdent(fi, _)), _) =>
           assert(e.isLiteral)

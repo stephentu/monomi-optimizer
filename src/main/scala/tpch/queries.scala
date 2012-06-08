@@ -19,7 +19,7 @@ select
 from
   lineitem
 where
-  l_shipdate <= date '1998-01-01' - interval '5' day
+  l_shipdate <= date '1998-01-01'
 group by
   l_returnflag,
   l_linestatus

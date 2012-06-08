@@ -265,7 +265,7 @@ trait Generator extends Traversals
               val h = onionSet.lookupPackedHOM(t, x)
               if (h.isEmpty) None
               else {
-                Some((FieldIdent(Some(qual), "rowid"), h.map { case (g, p) => HomDesc(t, g, p) }))
+                Some((FieldIdent(Some(qual), "row_id"), h.map { case (g, p) => HomDesc(t, g, p) }))
               }
           }
         }
@@ -2320,6 +2320,8 @@ trait Generator extends Traversals
   // return value 1-to-1 with input stmts (stmts.size == ret.size)
   def generateCandidatePlans(stmts: Seq[SelectStmt]): Seq[CandidatePlans] = {
     val onionSets0 /* Seq[Seq[OnionSet]] */ = stmts.map(generateOnionSets)
+
+    //println(onionSets0)
 
     // ------- create a global set of precomputed expressions -------- //
 

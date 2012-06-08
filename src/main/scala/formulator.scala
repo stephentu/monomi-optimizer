@@ -290,7 +290,9 @@ trait Formulator {
     globalOpts.homGroups.foreach { case (reln, groups) =>
       // sanity check
       assert( groups.toSet.size == groups.size )
+      println("relation " + reln + " hom groups:")
       (0 until groups.size).foreach { g =>
+        println("  %d: %s".format(g, groups(g).map(_.sql).mkString("{", ", ", "}")))
         globalXAssignHom.getOrElseUpdate(reln, HashMap.empty).put(g, nextPos())
       }
     }
