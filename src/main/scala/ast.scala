@@ -264,8 +264,10 @@ case class Plus(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
     lhs.evalLiteral.flatMap { l =>
       rhs.evalLiteral.flatMap { r =>
         (l, r) match {
-          case (d : DateElem, i: IntervalElem) => Some(d.addInterval(i))
-          case (i : IntervalElem, d: DateElem) => Some(d.addInterval(i))
+          case (d : DateElem, i: IntervalElem)  => Some(d.addInterval(i))
+          case (i : IntervalElem, d: DateElem)  => Some(d.addInterval(i))
+          case (IntElem(li), IntElem(ri))       => Some(IntElem(li + ri))
+          case (DoubleElem(ld), DoubleElem(rd)) => Some(DoubleElem(ld + rd))
 
           // TODO: more cases when we need them
           case _ => None
@@ -286,8 +288,10 @@ case class Minus(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop 
     lhs.evalLiteral.flatMap { l =>
       rhs.evalLiteral.flatMap { r =>
         (l, r) match {
-          case (d : DateElem, i: IntervalElem) => Some(d.subtractInterval(i))
-          case (i : IntervalElem, d: DateElem) => Some(d.subtractInterval(i))
+          case (d : DateElem, i: IntervalElem)  => Some(d.subtractInterval(i))
+          case (i : IntervalElem, d: DateElem)  => Some(d.subtractInterval(i))
+          case (IntElem(li), IntElem(ri))       => Some(IntElem(li - ri))
+          case (DoubleElem(ld), DoubleElem(rd)) => Some(DoubleElem(ld - rd))
 
           // TODO: more cases when we need them
           case _ => None
@@ -560,6 +564,13 @@ case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
         "db_elem((int64_t)encrypt_u32_%s(ctx.crypto, %d, %d, %b))".format(s, v, sym.fieldPosition, join)
       case IntType(8) =>
         "db_elem((int64_t)encrypt_u64_%s(ctx.crypto, %d, %d, %b))".format(s, v, sym.fieldPosition, join)
+
+      case DecimalType(15, 2) =>
+        // TODO: hack for TPC-H
+        assert(onion == Onions.OPE) // laziness
+
+        "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, %d, %b), 16)))".format(v * 100, v.toString, sym.fieldPosition, join)
+
       case t => 
         throw new RuntimeException("invalid type for encryption: expected IntType, got: " + t)
     }
@@ -572,7 +583,16 @@ case class FloatLiteral(v: Double, ctx: Context = null) extends LiteralExpr {
   override def evalLiteral = Some(DoubleElem(v))
   def toCPP = "new double_literal_node(%f)".format(v)
   override def toCPPEncrypt(onion: Int, join: Boolean, sym: ColumnSymbol) = {
-    throw new RuntimeException("currently un-supported")
+    assert(BitUtils.onlyOne(onion))
+    assert(onion == Onions.OPE) // laziness
+    sym.tpe match {
+      case DecimalType(15, 2) =>
+        // TODO: hack for TPC-H
+        "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, %d, %b), 16)))".format((v * 100.0).toLong, v.toString, sym.fieldPosition, join)
+
+      case t => 
+        throw new RuntimeException("unsupported type for encrypting float literal: " + t)
+    }
   }
   def copyWithContext(c: Context) = copy(ctx = c)
   def sqlFromDialect(dialect: SqlDialect) = v.toString
