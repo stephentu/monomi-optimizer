@@ -196,6 +196,14 @@ trait Generator extends Traversals
     FunctionCall("encrypt", Seq(e, IntLiteral(o), MetaFieldIdent(keyConstraint)))
   }
 
+  // names are unique over a generator instance
+
+  private val _subselectMaterializeNamePrefix = "_subselect$"
+  private val _subselectMaterializeNames = new NameGenerator(_subselectMaterializeNamePrefix)
+
+  private val _hiddenNamePrefix = "_hidden$"
+  private val _hiddenNames = new NameGenerator(_hiddenNamePrefix)
+
   // if encContext is PreserveOriginal, then the plan node generated faithfully
   // recreates the original statement- that is, the result set has the same
   // (unencrypted) type as the result set of stmt.
@@ -431,8 +439,29 @@ trait Generator extends Traversals
 
     var cur = stmt // the current statement, as we update it
 
-    val _hiddenNamePrefix = "_hidden$"
-    val _hiddenNames = new NameGenerator(_hiddenNamePrefix)
+    val subselectNodes = new HashMap[String, (PlanNode, SelectStmt)]
+
+    def addSubselectAndReturnPlaceholder(p: PlanNode, origSS: SelectStmt): SqlExpr = {
+      val id = _subselectMaterializeNames.uniqueId() 
+      subselectNodes += (id -> (p, origSS))
+      NamedSubselectPlaceholder(id)
+    }
+
+    def mergeNamedSubselects(m: Map[String, (PlanNode, SelectStmt)]): Unit = {
+      // TODO: assert no name clashes
+      subselectNodes ++= m
+    }
+
+    val finalSubqueryRelationPlans = new ArrayBuffer[(RemoteMaterialize, SelectStmt)]
+
+    def mergeSubrelations(b: Seq[(RemoteMaterialize, SelectStmt)]): Unit = {
+      finalSubqueryRelationPlans ++= b
+    }
+
+    def mergeRemoteSql(rs: RemoteSql): Unit = {
+      mergeSubrelations(rs.subrelations)
+      mergeNamedSubselects(rs.namedSubselects)
+    }
 
     // local filter + name of concrete {table,subquery} relations
     // to nullify (named in this context) if the filter fails (none if inner join)
@@ -639,8 +668,11 @@ trait Generator extends Traversals
                       e0.flatMap { case (expr, _) =>
                         generatePlanFromOnionSet0(
                           ss.subquery, onionSet, EncProj(Seq(onion), true)) match {
-                          case RemoteSql(q0, _, _) => Some(eq.copyWithChildren(expr, Subselect(q0)))
-                          case _                   => None
+                          case rs @ RemoteSql(q0, _, _, _) => 
+                            mergeRemoteSql(rs)
+                            Some(eq.copyWithChildren(expr, Subselect(q0)))
+                          // TODO: use named subselect
+                          case _                        => None
                         }
                       }
                     }
@@ -658,17 +690,25 @@ trait Generator extends Traversals
                   val spOPEs   = mkSeq(Onions.OPE)
 
                   (spPLAINs(0), spPLAINs(1)) match {
-                    case (RemoteSql(q0p, _, _), RemoteSql(q1p, _, _)) =>
+                    case (r1 @ RemoteSql(q0p, _, _, _), r2 @ RemoteSql(q1p, _, _, _)) =>
+                      mergeRemoteSql(r1)
+                      mergeRemoteSql(r2)
                       replaceWith(eq.copyWithChildren(Subselect(q0p), Subselect(q1p)))
                     case _ =>
                       (spDETs(0), spDETs(1)) match {
-                        case (RemoteSql(q0p, _, _), RemoteSql(q1p, _, _)) =>
+                        case (r1 @ RemoteSql(q0p, _, _, _), r2 @ RemoteSql(q1p, _, _, _)) =>
+                          mergeRemoteSql(r1)
+                          mergeRemoteSql(r2)
                           replaceWith(eq.copyWithChildren(Subselect(q0p), Subselect(q1p)))
                         case _ =>
                           (spOPEs(0), spOPEs(1)) match {
-                            case (RemoteSql(q0p, _, _), RemoteSql(q1p, _, _)) =>
+                            case (r1 @ RemoteSql(q0p, _, _, _), r2 @ RemoteSql(q1p, _, _, _)) =>
+                              mergeRemoteSql(r1)
+                              mergeRemoteSql(r2)
                               replaceWith(eq.copyWithChildren(Subselect(q0p), Subselect(q1p)))
-                            case _ => bailOut
+                            case _ => 
+                              // TODO: use named subselect
+                              bailOut
                           }
                       }
                   }
@@ -706,7 +746,10 @@ trait Generator extends Traversals
                       e0.flatMap { case (expr, _) =>
                         generatePlanFromOnionSet0(
                           ss.subquery, onionSet, EncProj(Seq(onion), true)) match {
-                          case RemoteSql(q0, _, _) => Some(ieq.copyWithChildren(expr, Subselect(q0)))
+                          case rs @ RemoteSql(q0, _, _, _) => 
+                            mergeRemoteSql(rs)
+                            Some(ieq.copyWithChildren(expr, Subselect(q0)))
+                          // TODO: use named subselect
                           case _                   => None
                         }
                       }
@@ -723,11 +766,15 @@ trait Generator extends Traversals
                   val spPLAINs = mkSeq(Onions.PLAIN)
                   val spOPEs   = mkSeq(Onions.OPE)
                   (spPLAINs(0), spPLAINs(1)) match {
-                    case (RemoteSql(q0p, _, _), RemoteSql(q1p, _, _)) =>
+                    case (r1 @ RemoteSql(q0p, _, _, _), r2 @ RemoteSql(q1p, _, _, _)) =>
+                      mergeRemoteSql(r1)
+                      mergeRemoteSql(r2)
                       replaceWith(ieq.copyWithChildren(Subselect(q0p), Subselect(q1p)))
                     case _ =>
                       (spOPEs(0), spOPEs(1)) match {
-                        case (RemoteSql(q0p, _, _), RemoteSql(q1p, _, _)) =>
+                        case (r1 @ RemoteSql(q0p, _, _, _), r2 @ RemoteSql(q1p, _, _, _)) =>
+                          mergeRemoteSql(r1)
+                          mergeRemoteSql(r2)
                           replaceWith(ieq.copyWithChildren(Subselect(q0p), Subselect(q1p)))
                         case _ => bailOut
                       }
@@ -754,7 +801,8 @@ trait Generator extends Traversals
               CollectionUtils.optAnd2(
                 doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.SWP)),
                 doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.SWP).withKey(lhs))).map {
-                  case ((l0, _), (r0, _)) => replaceWith(FunctionCall("searchSWP", Seq(l0, r0)))
+                  case ((l0, _), (r0, _)) => 
+                    replaceWith(FunctionCall("searchSWP", Seq(l0, r0)))
                 }.getOrElse(bailOut)
 
             // TODO: handle subqueries
@@ -769,7 +817,22 @@ trait Generator extends Traversals
                   replaceWith(In(s0.head._1, s0.tail.map(_._1), n))
                 }
               }
-              tryOnion(Onions.DET).orElse(tryOnion(Onions.OPE)).getOrElse(bailOut)
+              tryOnion(Onions.DET).orElse(tryOnion(Onions.OPE)).getOrElse {
+                s match {
+                  case Seq(Subselect(ss, _)) =>
+                    // try DET, then OPE, then bailout
+                    doTransformServer(e, curRewriteCtx.restrictTo(Onions.DET)).map(x => (x, Onions.DET))
+                    .orElse(
+                      doTransformServer(e, curRewriteCtx.restrictTo(Onions.OPE)).map(x => (x, Onions.OPE)))
+                    .map {
+                      case ((e0, _), o) =>
+                        val p = generatePlanFromOnionSet0(ss, onionSet, EncProj(Seq(o), true))
+                        replaceWith(In(e0, Seq(addSubselectAndReturnPlaceholder(p, ss)), n))
+                    }.getOrElse(bailOut)
+
+                  case _ => bailOut
+                }
+              }
 
             case not @ Not(e, _) if curRewriteCtx.inClear =>
               onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
@@ -779,8 +842,10 @@ trait Generator extends Traversals
             case ex @ Exists(ss, _) if curRewriteCtx.inClear =>
               onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
               generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveCardinality) match {
-                case RemoteSql(q, _, _) => replaceWith(Exists(Subselect(q)))
-                case _                  => bailOut
+                case rs @ RemoteSql(q, _, _, _) => 
+                  mergeRemoteSql(rs)
+                  replaceWith(Exists(Subselect(q)))
+                case _                          => bailOut
               }
 
             case cs @ CountStar(_) if curRewriteCtx.inClear && curRewriteCtx.aggContext =>
@@ -1354,8 +1419,6 @@ trait Generator extends Traversals
 
     // --- relations --- //
 
-    val finalSubqueryRelationPlans = new ArrayBuffer[(RemoteMaterialize, SelectStmt)]
-
     var remoteMaterializeAdded = false
     cur = cur.relations.map { r =>
       var mode: ServerRewriteMode = ServerAll
@@ -1406,7 +1469,7 @@ trait Generator extends Traversals
               case (p : RemoteSql, _) =>
                 // if remote sql, then keep the subquery as subquery in the server sql,
                 // while adding the plan's subquery children to our children directly
-                finalSubqueryRelationPlans ++= p.subrelations
+                mergeRemoteSql(p)
                 SubqueryRelationAST(p.stmt, name)
               case (p, ss) =>
                 // otherwise, add a RemoteMaterialize node
@@ -1904,7 +1967,10 @@ trait Generator extends Traversals
       verifyPlanNode(
         newLocalJoinFilters
           .zip(localJoinFilterPosMaps)
-          .foldLeft( RemoteSql(cur, tdesc, finalSubqueryRelationPlans.toSeq) : PlanNode ) {
+          .foldLeft( 
+            RemoteSql(cur, tdesc, 
+                      finalSubqueryRelationPlans.toSeq, 
+                      subselectNodes.toMap) : PlanNode ) {
             case (acc, ((comp, rlnsToNull, reln), mapping)) =>
               if (rlnsToNull.isEmpty) {
                 // regular inner join, use LocalFilter
@@ -2575,7 +2641,7 @@ trait Generator extends Traversals
     val homGroups = new HashMap[String, HashSet[Int]]
 
     val pnew = topDownTransformation(rewrittenPlan) {
-      case r @ RemoteSql(stmt, _, _) =>
+      case r @ RemoteSql(stmt, _, _, _) =>
         val s = topDownTransformation(stmt) {
           case FieldIdent(qual, name, _, _) =>
             assert(qual.isDefined)
@@ -2650,7 +2716,7 @@ trait Generator extends Traversals
       val homGroups = new HashMap[String, HashSet[Seq[SqlExpr]]]
 
       topDownTraversal(plan) {
-        case RemoteSql(stmt, _, _) =>
+        case RemoteSql(stmt, _, _, _) =>
           topDownTraversal(stmt) {
             case FieldIdent(qual, name, _, _) =>
               assert(qual.isDefined)

@@ -24,7 +24,9 @@ trait PlanTraversals {
 
     def recur(n0: PlanNode) = topDownTraversal0(Some(n), n0)(preVisit, visit, postVisit)
     n match {
-      case RemoteSql(_, _, s) => s.foreach(x => recur(x._1))
+      case RemoteSql(_, _, s, n) => 
+        s.foreach(x => recur(x._1))
+        n.foreach(x => recur(x._2._1))
       case RemoteMaterialize(_, c) => recur(c)
       case LocalOuterJoinFilter(_, _, _, c, s) => recur(c); s.foreach(recur)
       case LocalFilter(_, _, c, s) => recur(c); s.foreach(recur)

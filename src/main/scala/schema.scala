@@ -66,7 +66,7 @@ trait DbConn {
   def getConn: Connection
 }
 
-class PgDbConn(hostname: String, port: Int, db: String, props: Properties) extends DbConn {
+class PgDbConn(val hostname: String, val port: Int, val db: String, val props: Properties) extends DbConn {
   Class.forName("org.postgresql.Driver")
   val getConn = DriverManager.getConnection(
     "jdbc:postgresql://%s:%d/%s".format(hostname, port, db), props)
@@ -77,20 +77,18 @@ trait Schema {
   def loadStats(): Statistics
 }
 
-class PgSchema(hostname: String, port: Int, db: String, props: Properties)
-extends Schema with PgQueryPlanExtractor {
+class PgDbConnSchema(_dbconn: PgDbConn) extends Schema with PgQueryPlanExtractor {
+
+  private val conn = _dbconn.getConn
 
   import Conversions._
-
-  private val _dbconn = new PgDbConn(hostname, port, db, props)
-  private val conn = _dbconn.getConn
 
   private def listTables(): Seq[String] = {
     val s = conn.prepareStatement("""
 select table_name from information_schema.tables
-where table_catalog = ? and table_schema = 'public'
+where table_catalog = ? and (table_schema = 'public' or table_schema like 'pg_temp_%')
       """)
-    s.setString(1, db)
+    s.setString(1, _dbconn.db)
     val r = s.executeQuery
     val tables = r.map(_.getString(1))
     s.close()
@@ -131,7 +129,7 @@ where table_catalog = ? and table_schema = 'public'
   column_name, data_type, character_maximum_length,
   numeric_precision, numeric_precision_radix, numeric_scale
   from information_schema.columns
-  where table_schema = 'public' and table_name = ?
+  where (table_schema = 'public' or table_schema like 'pg_temp_%') and table_name = ?
   """)
       s.setString(1, name)
       val r = s.executeQuery
@@ -292,6 +290,7 @@ where table_catalog = ? and table_schema = 'public'
 
   def loadStats() = {
     val schema = loadSchema()
+    // TODO: this currently doesn't work for temp tables
     val s = conn.prepareStatement("""
 select
   attname, null_frac, n_distinct, correlation,
@@ -339,3 +338,6 @@ where schemaname = 'public' and tablename = ?
     ret
   }
 }
+
+class PgSchema(hostname: String, port: Int, db: String, props: Properties)
+  extends PgDbConnSchema(new PgDbConn(hostname, port, db, props)) 

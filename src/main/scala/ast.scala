@@ -715,6 +715,13 @@ case class SqlOrderBy(keys: Seq[(SqlExpr, OrderType)], ctx: Context = null) exte
 
 // synthetic nodes
 
+case class NamedSubselectPlaceholder(name: String, ctx: Context = null) extends SqlExpr {
+  def toCPP = throw new RuntimeException("error")
+  def copyWithContext(c: Context) = copy(ctx = c)
+  def gatherFields = throw new RuntimeException("error")
+  def sqlFromDialect(dialect: SqlDialect) = ":" + name
+}
+
 case class TuplePosition(pos: Int, ctx: Context = null) extends SqlExpr {
   def toCPP = "new tuple_pos_node(%d)".format(pos)
   def copyWithContext(c: Context) = copy(ctx = c)

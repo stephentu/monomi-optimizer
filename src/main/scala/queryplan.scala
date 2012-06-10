@@ -197,8 +197,7 @@ trait PgQueryPlanExtractor {
       val userAggMapFold = noOverwriteFoldLeft(childrenNodes.map(_._2).map(_._4).toSeq)
       val selMapFold = noOverwriteFoldLeft(innerOuterChildren.map(_._5).toSeq)
       val seqScanInfoFold = childrenNodes.foldLeft(Map.empty : Map[String, Int]) {
-        case (acc, est) =>
-          mergePlus(acc, est._2._6)
+        case (acc, est) => mergePlus(acc, est._2._6)
       }
 
       val tpe = node("Node Type")
@@ -265,9 +264,16 @@ trait PgQueryPlanExtractor {
 
           val (r, rr) = (planRows, None)
 
+          // exclude temp tables from SSI costs
+          // TODO: this is hacky
+          val ssiMapRhs = 
+            if (reln.startsWith(RemoteSql.globalUniqueNameGenerator.prefix)) {
+              (Map.empty : Map[String, Int])
+            } else Map(reln -> 1)
+
           (totalCost, r, rr,
            noOverwriteFoldLeft(Seq(userAggMapFold, m)),
-           Map(reln -> planRows), mergePlus(seqScanInfoFold, Map(reln -> 1)))
+           Map(reln -> planRows), mergePlus(seqScanInfoFold, ssiMapRhs))
 
         case t =>
           // simple case, just read from this node only
@@ -278,27 +284,34 @@ trait PgQueryPlanExtractor {
 
     import Conversions._
 
-    val r =
+    // TODO: do a better job not leaking the stmt object
+    val stmt = dbconn.getConn.createStatement
+    val r = 
       try {
         //println("sending query to psql:")
         //println(sql)
-        dbconn.getConn.createStatement.executeQuery("EXPLAIN (VERBOSE, FORMAT JSON) " + sql)
+        stmt.executeQuery("EXPLAIN (VERBOSE, FORMAT JSON) " + sql)
       } catch {
         case e =>
           println("bad sql:")
           println(sql)
+          stmt.close()
           throw e
       }
     val res = r.map { rs =>
       val planJson =
         // JSON parser is not thread safe
-        JSON.synchronized { JSON.parseFull(rs.getString(1)) }
+        JSON.synchronized { 
+          //println(rs.getString(1))
+          JSON.parseFull(rs.getString(1)) 
+        }
       (for (L(l) <- planJson;
             M(m) = l.head;
             M(p) <- m.get("Plan")) yield extractInfoFromQueryPlan(p)).getOrElse(
         throw new RuntimeException("unexpected return from postgres: " + planJson)
       )
     }
+    stmt.close()
 
     (res.head._1, res.head._2, res.head._3, res.head._4, res.head._6)
   }
@@ -358,16 +371,32 @@ object FieldNameHelpers {
   }
 }
 
+object RemoteSql {
+  // TODO: this is a hack- we should really cleanup the temp tables
+  val globalUniqueNameGenerator = new ThreadSafeNameGenerator("_fresh")
+}
+
 case class RemoteSql(stmt: SelectStmt,
                      projs: Seq[PosDesc],
-                     subrelations: Seq[(RemoteMaterialize, SelectStmt)] = Seq.empty)
+
+                     /* These stmts have side-effect of causing a temp table on the
+                      * server to be loaded */ 
+                     subrelations: Seq[(RemoteMaterialize, SelectStmt)] = Seq.empty,
+                   
+                     /* These stmts will be evaluated by the query to substitute values.
+                      * these subselects do *not* accept a/dsf
+                      rguments, so they can be safely
+                      * run at the beginning of the query */
+                     namedSubselects: Map[String, (PlanNode, SelectStmt)] = Map.empty)
+
   extends PlanNode with Transformers with PrettyPrinters {
 
   assert(stmt.projections.size == projs.size)
   def tupleDesc = projs
   def pretty0(lvl: Int) = {
     "* RemoteSql(sql = " + stmt.sql + ", projs = " + projs + ")" +
-    subrelations.map(c => childPretty(lvl, c._1)).mkString("")
+    subrelations.map(c => childPretty(lvl, c._1)).mkString("") +
+    namedSubselects.map(c => childPretty(lvl, c._2._1)).mkString("")
   }
 
   def costEstimate(ctx: EstimateContext, stats: Statistics) = {
@@ -384,6 +413,7 @@ case class RemoteSql(stmt: SelectStmt,
         case _ => (None, true)
       }.asInstanceOf[N]
 
+    var reloadSchema = false
     val reverseStmt = topDownTransformation(stmt) {
       case a @ AggCall("hom_agg", args, _) =>
         // need to assign a unique ID to this hom agg
@@ -423,6 +453,40 @@ case class RemoteSql(stmt: SelectStmt,
             }
         }
 
+      case In(e, Seq(NamedSubselectPlaceholder(name, _)), n, _) => 
+        val ch = namedSubselects(name)._1.costEstimate(ctx, stats)
+        println("IN clause for namedSubselect=(%s) contains (%d) elements".format(name, ch.rows.toInt))
+        if (ch.rows.toInt > 10000) {
+          // if we have too many elements for the IN clause, then we just stash the
+          // values into a temp table
+          val tempTableName = RemoteSql.globalUniqueNameGenerator.uniqueId()
+          val stmt = ctx.defns.dbconn.get.getConn.createStatement
+          stmt.executeUpdate("CREATE TEMPORARY TABLE %s ( col0 INTEGER )".format(tempTableName))
+          stmt.executeUpdate("INSERT INTO %s VALUES %s".format(
+            tempTableName,
+            (1 to ch.rows.toInt).map(x => "(%d)".format(x * 2)).mkString(",")))
+          stmt.executeUpdate("ANALYZE %s".format(tempTableName))
+          stmt.close()
+          reloadSchema = true
+          (Some(In(e, Seq(Subselect(
+            SelectStmt(
+              Seq(ExprProj(FieldIdent(None, "col0"), None)),
+              Some(Seq(TableRelationAST(tempTableName, None))),
+              None,
+              None,
+              None,
+              None))), false)), true)
+        } else {
+          (Some(In(e, (1 to ch.rows.toInt).map(x => IntLiteral(x * 2)).toSeq, n)), true)
+        }
+
+      case NamedSubselectPlaceholder(name, _) =>
+        // TODO: we should generate something smarter than this
+        // - at least the # should be a reasonable number for what it is
+        // - replacing
+        // TODO: we should also generate the right TYPE of literal placeholder
+        (Some(IntLiteral(12345)), false)
+
       case FunctionCall("encrypt", Seq(e, _, _), _) =>
         (Some(e), false)
 
@@ -430,6 +494,7 @@ case class RemoteSql(stmt: SelectStmt,
         // TODO: we should generate something smarter than this
         // - at least the # should be a reasonable number for what it is
         // - replacing
+        // TODO: we should also generate the right TYPE of literal placeholder
         (Some(IntLiteral(12345)), false)
 
       case FunctionCall("hom_row_desc_lit", Seq(e), _) =>
@@ -442,7 +507,13 @@ case class RemoteSql(stmt: SelectStmt,
       case _ => (None, true)
     }.asInstanceOf[SelectStmt]
 
-    val reverseStmt0 = resolveCheck(reverseStmt, ctx.defns, true)
+    val reverseStmt0 = 
+      if (reloadSchema) {
+        val schema = new PgDbConnSchema(ctx.defns.dbconn.get.asInstanceOf[PgDbConn])
+        resolveCheck(reverseStmt, schema.loadSchema(), true)
+      } else {
+        resolveCheck(reverseStmt, ctx.defns, true)
+      }
 
     // server query execution cost
     val (c, r, rr, m, ssi) =
@@ -613,12 +684,27 @@ case class RemoteSql(stmt: SelectStmt,
         if (vecCtx) 4.0 * rr.get else 4.0
     }.sum * r.toDouble
 
+    // subrelations
+    val srCosts = subrelations.map(_._1.costEstimate(ctx, stats))
+    val nsCosts = namedSubselects.map(_._2._1.costEstimate(ctx, stats))
+
+    def mergePlus(lhs: Map[String, Int], rhs: Map[String, Int]): Map[String, Int] = {
+      (lhs.keys ++ rhs.keys).map { k =>
+        (k, lhs.getOrElse(k, 0) + rhs.getOrElse(k, 0))
+      }.toMap
+    }
+
+    val ssiMerged = 
+      (srCosts.map(_.seqScanInfo) ++ nsCosts.map(_.seqScanInfo) ++ Seq(ssi))
+        .foldLeft( Map.empty : Map[String, Int] )(mergePlus)
+
     Estimate(
       c + aggCost + addSeqScanCost +
-        subrelations.map(_._1.costEstimate(ctx, stats).cost).sum +
+        srCosts.map(_.cost).sum +
+        nsCosts.map(_.cost).sum + 
         CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec) +
         CostConstants.secToPGUnit( 0.001 /* 1ms latency to contact server */ ),
-      r, rr.getOrElse(1), reverseStmt0, ssi)
+      r, rr.getOrElse(1), reverseStmt0, ssiMerged)
   }
 
   private var _paramClassName: String = null
@@ -761,7 +847,13 @@ case class RemoteSql(stmt: SelectStmt,
       x._1.emitCPP(cg)
       cg.print(", ")
     })
-    cg.print("})") 
+    cg.print("}, util::map_from_pair_vec({") 
+    namedSubselects.foreach { case (name, (plan, _)) => 
+      cg.print("std::make_pair(%s, ".format(quoteDbl(name)))
+      plan.emitCPP(cg)
+      cg.print("), ")
+    }
+    cg.print("})")
   }
 }
 

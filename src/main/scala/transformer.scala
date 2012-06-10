@@ -21,7 +21,9 @@ trait PlanTransformers {
     def recur[N0 <: PlanNode](n0: N0) =
       topDownTransformation0(Some(newNode), n0)(f).asInstanceOf[N0]
     newNode match {
-      case node @ RemoteSql(_, _, s) => node.copy(subrelations = s.map(x => (recur(x._1), x._2)))
+      case node @ RemoteSql(_, _, s, n) => 
+        node.copy(subrelations = s.map(x => (recur(x._1), x._2)),
+                  namedSubselects = n.map(x => (x._1, (recur(x._2._1), x._2._2))).toMap)
       case node @ RemoteMaterialize(_, c) => node.copy(child = recur(c))
       case node @ LocalOuterJoinFilter(_, _, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))
       case node @ LocalFilter(_, _, c, s) => node.copy(child = recur(c), subqueries = s.map(recur))

@@ -24,12 +24,19 @@ class ResultSetWrapper(rs: ResultSet) {
 }
 
 // NOT THREAD SAFE
-class NameGenerator(prefix: String) {
+class NameGenerator(val prefix: String) {
   private var _ctr: Long = 0L
   def uniqueId(): String = {
     val ret = prefix + _ctr
     _ctr += 1
     ret
+  }
+}
+
+class ThreadSafeNameGenerator(val prefix: String) {
+  private val _ctr = new java.util.concurrent.atomic.AtomicLong
+  def uniqueId(): String = {
+    prefix + _ctr.getAndIncrement().toString
   }
 }
 
