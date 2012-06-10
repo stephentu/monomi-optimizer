@@ -145,4 +145,9 @@ trait Timer {
     val ms = ((end - start).toDouble / 1000000.0)
     (ms, ret)
   }
+
+  def timedRunMillisNoReturn[A](f: => A): Double = {
+    val (t, _) = timedRunMillis(f)
+    t
+  }
 }

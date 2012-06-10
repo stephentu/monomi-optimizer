@@ -396,7 +396,7 @@ case class RemoteSql(stmt: SelectStmt,
                       * run at the beginning of the query */
                      namedSubselects: Map[String, (PlanNode, SelectStmt)] = Map.empty)
 
-  extends PlanNode with Transformers with PrettyPrinters {
+  extends PlanNode with Transformers with PrettyPrinters with Timer {
 
   assert(stmt.projections.size == projs.size)
   def tupleDesc = projs
@@ -469,10 +469,22 @@ case class RemoteSql(stmt: SelectStmt,
           val tempTableName = RemoteSql.globalUniqueNameGenerator.uniqueId()
           val stmt = ctx.defns.dbconn.get.getConn.createStatement
           stmt.executeUpdate("CREATE TEMPORARY TABLE %s ( col0 INTEGER )".format(tempTableName))
-          stmt.executeUpdate("INSERT INTO %s VALUES %s".format(
-            tempTableName,
-            (1 to ch.rows.toInt).map(x => "(%d)".format(x * 2)).mkString(",")))
-          stmt.executeUpdate("ANALYZE %s".format(tempTableName))
+          // only put 10000 because I don't think anymore values will 
+          // change the query plan meaningfully, but just waste time instead
+          val insertTime = 
+            timedRunMillisNoReturn(
+              stmt.executeUpdate("INSERT INTO %s VALUES %s".format(
+                tempTableName,
+                (1 to 10000).map(x => "(%d)".format(x * 2)).mkString(","))))
+
+          println("insert time for temp table %s is %f ms".format(tempTableName, insertTime))
+
+          val analyzeTime = 
+            timedRunMillisNoReturn(
+              stmt.executeUpdate("ANALYZE %s".format(tempTableName)))
+
+          println("analyze time for temp table %s is %f ms".format(tempTableName, analyzeTime))
+
           stmt.close()
           reloadSchema = true
           (Some(In(e, Seq(Subselect(
