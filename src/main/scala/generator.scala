@@ -2387,7 +2387,7 @@ trait Generator extends Traversals
   def generateCandidatePlans(stmts: Seq[SelectStmt]): Seq[CandidatePlans] = {
     val onionSets0 /* Seq[Seq[OnionSet]] */ = stmts.map(generateOnionSets)
 
-    //println(onionSets0)
+    println(onionSets0)
 
     // ------- create a global set of precomputed expressions -------- //
 
@@ -2862,13 +2862,18 @@ trait Generator extends Traversals
 
               // one-level deep binop optimizations
               // TODO: why do we need this?
-              case Plus(l, r, _)                      => binopOp(l, r)
-              case Minus(l, r, _)                     => binopOp(l, r)
-              case Mult(l, r, _)                      => binopOp(l, r)
-              case Div(l, r, _)                       => binopOp(l, r)
+              case Plus(l, r, _)  => binopOp(l, r)
+              case Minus(l, r, _) => binopOp(l, r)
+              case Mult(l, r, _)  => binopOp(l, r)
+              case Div(l, r, _)   => binopOp(l, r)
+
+              case Gt(l, r, _)    => binopOp(l, r)
+              case Ge(l, r, _)    => binopOp(l, r)
+              case Lt(l, r, _)    => binopOp(l, r)
+              case Le(l, r, _)    => binopOp(l, r)
 
               // TODO: more opts?
-              case _                                  =>
+              case _              => 
             }
         }
       }
