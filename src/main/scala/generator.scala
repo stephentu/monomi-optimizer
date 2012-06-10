@@ -2387,7 +2387,7 @@ trait Generator extends Traversals
   def generateCandidatePlans(stmts: Seq[SelectStmt]): Seq[CandidatePlans] = {
     val onionSets0 /* Seq[Seq[OnionSet]] */ = stmts.map(generateOnionSets)
 
-    println(onionSets0)
+    //println(onionSets0)
 
     // ------- create a global set of precomputed expressions -------- //
 

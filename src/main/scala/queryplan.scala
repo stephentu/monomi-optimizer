@@ -322,7 +322,14 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
 
   def tupleDesc: Seq[PosDesc]
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics): Estimate
+  protected def costEstimateImpl(ctx: EstimateContext, stats: Statistics): Estimate
+  protected var _lastCostEstimate : Option[Estimate] = None
+
+  def costEstimate(ctx: EstimateContext, stats: Statistics): Estimate = {
+    val ret = costEstimateImpl(ctx, stats)
+    _lastCostEstimate = Some(ret)
+    ret
+  }
 
   protected def resolveCheck(stmt: SelectStmt, defns: Definitions, force: Boolean = false):
     SelectStmt = {
@@ -394,12 +401,12 @@ case class RemoteSql(stmt: SelectStmt,
   assert(stmt.projections.size == projs.size)
   def tupleDesc = projs
   def pretty0(lvl: Int) = {
-    "* RemoteSql(sql = " + stmt.sql + ", projs = " + projs + ")" +
+    "* RemoteSql(cost = " + _lastCostEstimate + ", sql = " + stmt.sql + ", projs = " + projs + ")" +
     subrelations.map(c => childPretty(lvl, c._1)).mkString("") +
     namedSubselects.map(c => childPretty(lvl, c._2._1)).mkString("")
   }
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     // TODO: this is very hacky, and definitely prone to error
     // but it's a lot of mindless work to propagate the precise
     // node replacement information, so we just use some text
@@ -860,9 +867,9 @@ case class RemoteSql(stmt: SelectStmt,
 case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
-    "* RemoteMaterialize(name = " + name + ")" + childPretty(lvl, child)
+    "* RemoteMaterialize(cost = " + _lastCostEstimate + ", name = " + name + ")" + childPretty(lvl, child)
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     val ch = child.costEstimate(ctx, stats)
 
     // compute cost of xfering each row back to server
@@ -894,13 +901,13 @@ case class LocalOuterJoinFilter(
 
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) = {
-    "* LocalOuterJoinFilter(filter = " + expr.sql +
+    "* LocalOuterJoinFilter(cost = " + _lastCostEstimate + ", filter = " + expr.sql +
       ", posToNull = " + posToNull + ")" +
       childPretty(lvl, child) +
       subqueries.map(c => childPretty(lvl, c)).mkString("")
   }
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     val ch = child.costEstimate(ctx, stats)
 
     // we need to find a way to map the original relation given to the modified
@@ -950,12 +957,12 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
                        child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) = {
-    "* LocalFilter(filter = " + expr.sql + ")" +
+    "* LocalFilter(cost = " + _lastCostEstimate + ", filter = " + expr.sql + ")" +
       childPretty(lvl, child) +
       subqueries.map(c => childPretty(lvl, c)).mkString("")
   }
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
 
     // find one-time-invoke subqueries (so we can charge them once, instead of for each
     // per-row invocation)
@@ -1065,9 +1072,9 @@ case class LocalTransform(
   }
 
   def pretty0(lvl: Int) =
-    "* LocalTransform(transformation = " + trfms + ")" + childPretty(lvl, child)
+    "* LocalTransform(cost = " + _lastCostEstimate + ", transformation = " + trfms + ")" + childPretty(lvl, child)
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     // we assume these operations are cheap
     // TODO: this might not really be true - measure if it is
     val ch = child.costEstimate(ctx, stats)
@@ -1148,9 +1155,9 @@ case class LocalGroupBy(
 
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
-    "* LocalGroupBy(keys = " + keys.map(_.sql).mkString(", ") + ", group_filter = " + filter.map(_.sql).getOrElse("none") + ")" + childPretty(lvl, child)
+    "* LocalGroupBy(cost = " + _lastCostEstimate + ", keys = " + keys.map(_.sql).mkString(", ") + ", group_filter = " + filter.map(_.sql).getOrElse("none") + ")" + childPretty(lvl, child)
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     val ch = child.costEstimate(ctx, stats)
 
     // TODO: this is a bit of a hack
@@ -1242,12 +1249,12 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
   extends PlanNode {
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) = {
-    "* LocalGroupFilter(filter = " + filter.sql + ")" +
+    "* LocalGroupFilter(cost = " + _lastCostEstimate + ", filter = " + filter.sql + ")" +
       childPretty(lvl, child) +
       subqueries.map(c => childPretty(lvl, c)).mkString("")
   }
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     val ch = child.costEstimate(ctx, stats)
     // assume that the group keys are always available, for now
     assert(ch.equivStmt.groupBy.isDefined)
@@ -1290,9 +1297,9 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
 
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
-    "* LocalOrderBy(keys = " + sortKeys.map(_._1.toString).toSeq + ")" + childPretty(lvl, child)
+    "* LocalOrderBy(cost = " + _lastCostEstimate + ", keys = " + sortKeys.map(_._1.toString).toSeq + ")" + childPretty(lvl, child)
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     // do stuff
 
     child.costEstimate(ctx, stats)
@@ -1314,9 +1321,9 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
 case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
-    "* LocalLimit(limit = " + limit + ")" + childPretty(lvl, child)
+    "* LocalLimit(cost = " + _lastCostEstimate + ", limit = " + limit + ")" + childPretty(lvl, child)
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     val ch = child.costEstimate(ctx, stats)
     // TODO: currently assuming everything must be completely materialized
     // before the limit. this isn't strictly true, but is true in the case
@@ -1349,9 +1356,9 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
     }
   }
   def pretty0(lvl: Int) =
-    "* LocalDecrypt(positions = " + positions + ")" + childPretty(lvl, child)
+    "* LocalDecrypt(cost = " + _lastCostEstimate + ", positions = " + positions + ")" + childPretty(lvl, child)
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     val ch = child.costEstimate(ctx, stats)
     val td = child.tupleDesc
     def costPos(p: Int): Double = {
@@ -1401,9 +1408,9 @@ case class LocalEncrypt(
     }
   }
   def pretty0(lvl: Int) =
-    "* LocalEncrypt(positions = " + positions + ")" + childPretty(lvl, child)
+    "* LocalEncrypt(cost = " + _lastCostEstimate + ", positions = " + positions + ")" + childPretty(lvl, child)
 
-  def costEstimate(ctx: EstimateContext, stats: Statistics) = {
+  def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     val ch = child.costEstimate(ctx, stats)
     val td = child.tupleDesc
     def costPos(p: (Int, OnionType)): Double = {
