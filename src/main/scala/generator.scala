@@ -166,6 +166,17 @@ trait Generator extends Traversals
     }.asInstanceOf[SelectStmt], buf.toSeq)
   }
 
+  private def hasOuterReferences(stmt: SelectStmt): Boolean = {
+    var has = false
+    topDownTraversal(stmt) {
+      case fi @ FieldIdent(_, _, ColumnSymbol(_, _, ctx, _), _) =>
+        if (ctx.isParentOf(stmt.ctx)) has = true
+        !has
+      case _ => !has
+    }
+    has
+  }
+
   case class RewriteAnalysisContext(subrels: Map[String, PlanNode],
                                     homGroupPreferences: Map[String, Seq[Int]],
                                     groupKeys: Map[Symbol, (FieldIdent, OnionType)])
@@ -446,6 +457,7 @@ trait Generator extends Traversals
     val subselectNodes = new HashMap[String, (PlanNode, SelectStmt)]
 
     def addSubselectAndReturnPlaceholder(p: PlanNode, origSS: SelectStmt): SqlExpr = {
+      assert(!hasOuterReferences(origSS))
       val id = _subselectMaterializeNames.uniqueId() 
       subselectNodes += (id -> (p, origSS))
       NamedSubselectPlaceholder(id)
@@ -748,7 +760,8 @@ trait Generator extends Traversals
             case ieq: InequalityLike if curRewriteCtx.inClear =>
               onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
 
-              def handleOneSubselect(ss: Subselect, expr: SqlExpr) = {
+              // handles "ss op expr" (flip means expr op ss)
+              def handleOneSubselect(ss: Subselect, expr: SqlExpr, flip: Boolean) = {
                 assert(!expr.isInstanceOf[Subselect])
                 val onions = Seq(Onions.PLAIN, Onions.OPE)
                 onions.foldLeft(None : Option[SqlExpr]) {
@@ -760,9 +773,12 @@ trait Generator extends Traversals
                           ss.subquery, onionSet, EncProj(Seq(onion), true)) match {
                           case rs @ RemoteSql(q0, _, _, _) => 
                             mergeRemoteSql(rs)
-                            Some(ieq.copyWithChildren(expr, Subselect(q0)))
-                          // TODO: use named subselect
-                          case _                   => None
+                            if (flip) Some(ieq.copyWithChildren(expr, Subselect(q0)))
+                            else      Some(ieq.copyWithChildren(Subselect(q0), expr))
+                          case p =>
+                            val repr = addSubselectAndReturnPlaceholder(p, ss.subquery)
+                            if (flip) Some(ieq.copyWithChildren(expr, repr))
+                            else      Some(ieq.copyWithChildren(repr, expr))
                         }
                       }
                     }
@@ -791,8 +807,8 @@ trait Generator extends Traversals
                         case _ => bailOut
                       }
                   }
-                case (ss @ Subselect(_, _), rhs) => handleOneSubselect(ss, rhs)
-                case (lhs, ss @ Subselect(_, _)) => handleOneSubselect(ss, lhs)
+                case (ss @ Subselect(_, _), rhs) => handleOneSubselect(ss, rhs, false)
+                case (lhs, ss @ Subselect(_, _)) => handleOneSubselect(ss, lhs, true)
                 case (lhs, rhs) =>
                   CollectionUtils.optAnd2(
                     doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.PLAIN).withKey(rhs)),
@@ -1930,7 +1946,8 @@ trait Generator extends Traversals
               if (!canDoServer) ServerProj else ServerAll) match {
 
               case Left((expr, onion)) =>
-                //println("got left: " + expr.sql)
+                println("orig e: " + e.sql)
+                println("got left: " + expr.sql )
                 val stmtIdx = projectionInsert(e, a, ExprProj(expr, a), onion, false)
                 projPosMaps += Left((stmtIdx, onion))
               case Right((optExpr, comp)) =>

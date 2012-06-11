@@ -629,12 +629,12 @@ limit 100;
 select
   cntrycode,
   count(*) as numcust,
-  sum(c_acctbal) as totacctbal
+  sum(abal) as totacctbal
 from
   (
     select
       substring(c_phone from 1 for 2) as cntrycode,
-      c_acctbal
+      c_acctbal as abal
     from
       customer
     where
