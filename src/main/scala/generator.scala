@@ -2056,9 +2056,16 @@ trait Generator extends Traversals
               case Right((_, m)) => Some(m.values)
               case _             => None
             }.flatten ++ {
-              projPosMaps.flatMap {
-                case Left((p, o)) if !o.isPlain => Some(p)
-                case _                          => None
+              projPosMaps.zipWithIndex.flatMap {
+                case (Left((p, o)), idx) if !o.isPlain => 
+                  encContext match {
+                    case EncProj(onions, _) =>
+                      // optimization: if onion is already in the correct
+                      // form, no need to decrypt
+                      if (onions(idx) != o.onion) Some(p) else None
+                    case _ => Some(p)
+                  }
+                case _ => None
               }
             }
           ).toSet.toSeq.sorted
