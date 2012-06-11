@@ -125,6 +125,14 @@ object CollectionUtils {
       case (xs, (c0, i)) => if (c == c0) xs ++ Seq(i) else xs
     }
   }
+
+  def foreachWithAllButLastAction[A, B, C](xs: Seq[A])(f: A => B)(action: () => C): Unit = {
+    val s = xs.size
+    xs.zipWithIndex.foreach { case (elem, idx) =>
+      f(elem)
+      if ((idx + 1) != s) action()
+    }
+  }
 }
 
 object BitUtils {

@@ -731,6 +731,7 @@ case class RemoteSql(stmt: SelectStmt,
 
   def emitCPPHelpers(cg: CodeGenerator) = {
     subrelations.foreach(_._1.emitCPPHelpers(cg))
+    namedSubselects.foreach(_._2._1.emitCPPHelpers(cg))
       
     assert(_paramClassName eq null)
     assert(_paramStmt eq null)
@@ -862,17 +863,20 @@ case class RemoteSql(stmt: SelectStmt,
     cg.printStr(_paramStmt.sqlFromDialect(PostgresDialect)) 
     cg.print(", %s".format( projs.map(_.toCPP).mkString("{", ", ", "}") ))
     cg.print(", {")
-    subrelations.foreach(x => { 
-      x._1.emitCPP(cg)
-      cg.print(", ")
-    })
-    cg.print("}, util::map_from_pair_vec({") 
-    namedSubselects.foreach { case (name, (plan, _)) => 
-      cg.print("std::make_pair(%s, ".format(quoteDbl(name)))
-      plan.emitCPP(cg)
-      cg.print("), ")
-    }
-    cg.print("})")
+
+    CollectionUtils
+      .foreachWithAllButLastAction(subrelations)(_._1.emitCPP(cg))(() => cg.println(", "))
+
+    cg.print("}, util::map_from_pair_vec<std::string, physical_operator*>({") 
+
+    CollectionUtils.foreachWithAllButLastAction(namedSubselects.toSeq)({
+      case (name, (plan, _)) => 
+        cg.print("std::pair<std::string, physical_operator*>(%s, ".format(quoteDbl(name)))
+        plan.emitCPP(cg)
+        cg.print(")")
+    })(() => cg.println(", "))
+
+    cg.print("}))")
   }
 }
 
@@ -1043,6 +1047,7 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
     cg.print(", ")
     child.emitCPP(cg)
     cg.print(", {")
+
     subqueries.foreach(s => {s.emitCPP(cg); cg.print(", ")})
     cg.print("})")
   }
