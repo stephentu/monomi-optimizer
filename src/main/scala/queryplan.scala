@@ -776,8 +776,8 @@ case class RemoteSql(stmt: SelectStmt,
           // row_id (int64),
 
           // TODO: we need to compute these values instead of hardcoding
-          val plainSizeBits = 1256
-          val rowsPerAgg = 3
+          val plainSizeBits = 1024
+          val rowsPerAgg = 12
 
           val id = nextId()
           cg.blockBegin("{")
@@ -785,7 +785,7 @@ case class RemoteSql(stmt: SelectStmt,
             cg.println("static const size_t RowColPackCipherSize = RowColPackPlainSize * 2;")
             cg.println("auto pp = ctx.pp_cache->get_paillier_priv(RowColPackCipherSize / 2, RowColPackCipherSize / 8);")
             cg.println("auto pk = pp.pubkey();")
-            cg.println("m[%d] = db_elem(StringFromZZ(pk[0] * pk[0]));".format(id))
+            cg.println("m[%d] = (RowColPackCipherSize == 256) ? db_elem(ctx.crypto->cm->getPKInfo()) : db_elem(StringFromZZ(pk[0] * pk[0]));".format(id))
           cg.blockEnd("}")
 
           (Some(AggCall("agg_hash", Seq(QueryParamPlaceholder(id), StringLiteral("lineitem_enc/group_%d".format(gid)), IntLiteral(plainSizeBits * 2 / 8), IntLiteral(rowsPerAgg), f0))), true)
