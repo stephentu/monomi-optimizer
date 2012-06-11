@@ -790,10 +790,9 @@ case class RemoteSql(stmt: SelectStmt,
 
           (Some(AggCall("agg_hash", Seq(QueryParamPlaceholder(id), StringLiteral("lineitem_enc/group_%d".format(gid)), IntLiteral(plainSizeBits * 2 / 8), IntLiteral(rowsPerAgg), f0))), true)
 
-        case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), MetaFieldIdent(fi, _)), _) =>
+        case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), MetaFieldIdent(pos, tpe, _)), _) =>
           assert(e.isLiteral)
           assert(BitUtils.onlyOne(o.toInt))
-          assert(fi.symbol.isInstanceOf[ColumnSymbol])
 
           // constant fold the expr before encrypting it
           val e0 = e.evalLiteral.map(_.toAST).getOrElse(e)
@@ -802,12 +801,12 @@ case class RemoteSql(stmt: SelectStmt,
           val id = nextId()
           cg.println(
             "m[%d] = %s;".format(
-              id, e0.toCPPEncrypt(o.toInt, false, fi.symbol.asInstanceOf[ColumnSymbol])))
+              id, e0.toCPPEncrypt(o.toInt, false, pos, tpe)))
 
           (Some(QueryParamPlaceholder(id)), false)
 
         case FunctionCall("searchSWP", Seq(expr, pattern), _) =>
-          val FunctionCall("encrypt", Seq(p, _, MetaFieldIdent(fi, _)), _) = pattern
+          val FunctionCall("encrypt", Seq(p, _, MetaFieldIdent(pos, tpe, _)), _) = pattern
 
           // assert pattern is something we can handle...
           val p0 = p.asInstanceOf[StringLiteral].v
@@ -829,8 +828,7 @@ case class RemoteSql(stmt: SelectStmt,
           cg.blockBegin("{")
             
             cg.println(
-              "Binary key(ctx.crypto->cm->getKey(ctx.crypto->cm->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(
-                fi.symbol.asInstanceOf[ColumnSymbol].fieldPosition))
+              "Binary key(ctx.crypto->cm->getKey(ctx.crypto->cm->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(pos))
             cg.println(
               "Token t = CryptoManager::token(key, Binary(%s));".format(
                 quoteDbl(tokens.head.toLowerCase)))

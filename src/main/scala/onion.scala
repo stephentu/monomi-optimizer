@@ -275,7 +275,9 @@ class OnionSet {
 
   // relation is global table name
   def lookup(relation: String, expr: SqlExpr): Option[(String, Int)] = {
-    opts.get(mkKey(relation, expr))
+    val ret = opts.get(mkKey(relation, expr))
+    println("lookup(%s, %s) = (%s)".format(relation, expr.sql, ret.toString))
+    ret
   }
 
   def lookupPrecomputedByName(relation: String, name: String): Option[(SqlExpr, Int)] = {
@@ -347,9 +349,9 @@ class OnionSet {
   def isEmpty: Boolean = opts.isEmpty && packedHOMs.isEmpty
 
   def compactToString: String = {
-    val o = opts.flatMap { case (k, (s, v)) =>
+    val o = opts.flatMap { case (k @ (rname, expr), (s, v)) =>
       val x = v & (~Onions.DET)
-      if (x != 0) {
+      if (x != 0 || expr.isRight) {
         Some((k, (s, x)))
       } else { 
         None

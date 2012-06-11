@@ -189,11 +189,13 @@ trait Generator extends Traversals
     }
   }
 
-  private def encLiteral(e: SqlExpr, o: Int, keyConstraint: FieldIdent): SqlExpr = {
+  private def encLiteral(e: SqlExpr, o: Int, keyConstraint: (Int, DataType)): SqlExpr = {
     assert(BitUtils.onlyOne(o))
     assert(e.isLiteral)
-    // TODO: actual encryption
-    FunctionCall("encrypt", Seq(e, IntLiteral(o), MetaFieldIdent(keyConstraint)))
+    // acts as a marker for downstream phases
+    FunctionCall(
+      "encrypt", 
+      Seq(e, IntLiteral(o), MetaFieldIdent(keyConstraint._1, keyConstraint._2)))
   }
 
   // names are unique over a generator instance
@@ -285,7 +287,7 @@ trait Generator extends Traversals
       subrels: Map[String, PlanNode],
       groupKeys: Map[Symbol, (FieldIdent, OnionType)],
       aggContext: Boolean, 
-      keyConstraint: Option[FieldIdent]): Option[(SqlExpr, OnionType)] = {
+      keyConstraint: Option[(Int, DataType)]): Option[(SqlExpr, OnionType)] = {
       // need to check if we are constrained by group keys
       e match {
         case FieldIdent(_, _, sym, _) if aggContext =>
@@ -307,7 +309,7 @@ trait Generator extends Traversals
     def getSupportedExpr(
       e: SqlExpr, o: Int, 
       subrels: Map[String, PlanNode], 
-      keyConstraint: Option[FieldIdent]):
+      keyConstraint: Option[(Int, DataType)]):
       Option[(SqlExpr, OnionType)] = {
 
       e match {
@@ -350,6 +352,8 @@ trait Generator extends Traversals
               case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx, _), _)
                 if ctx.relations(relation).isInstanceOf[SubqueryRelation] => procSubqueryRef(e)
               case _ =>
+                println("e = " + e.sql)
+                println("t=(%s), x=(%s)".format(t, x.toString))
                 onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).map {
                   case (basename, o0) =>
                     val qual = if (r == t) encTblName(t) else r
@@ -568,7 +572,7 @@ trait Generator extends Traversals
                                  // expression (fields within aggs will be group_concat()-ed,
                                  // fields outside will be regularly projected). if false, then
                                  // the fields are never group_concat()-ed, regardless.
-      keyConstraint: Option[FieldIdent] = None // the field on the other side of a binary op
+      keyConstraint: Option[(Int, DataType)] = None // the field on the other side of a binary op
       ) {
 
       def this(onion: Int, aggContext: Boolean, respectStructure: Boolean) =
@@ -583,7 +587,15 @@ trait Generator extends Traversals
 
       def restrictTo(o: Int) = new RewriteContext(o, aggContext, respectStructure)
       def withKey(expr: SqlExpr): RewriteContext = expr match {
-        case fi : FieldIdent => copy(keyConstraint = Some(fi))
+
+        // this is the common case- where we are comparing to a given column
+        case FieldIdent(_, _, cs : ColumnSymbol, _) => 
+          copy(keyConstraint = Some((cs.fieldPosition, cs.tpe)))
+
+        // this is the case where we compare to a precomputed field
+        case e if e.getPrecomputableRelation.isDefined =>
+          copy(keyConstraint = Some((0 /* signifies pre-computation */, e.getType.tpe)))
+ 
         // TODO: subselects?
         case _ => this
       }
@@ -813,6 +825,10 @@ trait Generator extends Traversals
                 val t = s.map { x => 
                   doTransformServer(x, curRewriteCtx.restrictTo(o).withKey(e))
                 }
+                println("tryOnion: ")
+                println("  in=" + in.sql)
+                println("  e0=" + e0)
+                println("  t=" + t)
                 CollectionUtils.optSeq(Seq(e0) ++ t).map { s0 =>
                   replaceWith(In(s0.head._1, s0.tail.map(_._1), n))
                 }
@@ -925,7 +941,7 @@ trait Generator extends Traversals
               onionRetVal.set(OnionType.buildIndividual(curRewriteCtx.onions.head))
               curRewriteCtx.onions.head match {
                 case Onions.PLAIN => replaceWith(e.copyWithContext(null).asInstanceOf[SqlExpr])
-                case o            => 
+                case o            =>
                   curRewriteCtx.keyConstraint.map { 
                     k => replaceWith(encLiteral(e, o, k)) 
                   }.getOrElse(bailOut)
@@ -2249,7 +2265,9 @@ trait Generator extends Traversals
   // server side rewrite), such that pre-computation is minimal
   private def getPotentialCryptoOpts(e: SqlExpr, o: Int):
     Option[Seq[(SqlExpr, Int)]] = {
-    getPotentialCryptoOpts0(e, o)
+    val ret = getPotentialCryptoOpts0(e, o)
+    println("getPotentialCryptoOpts: e=(%s), ret=(%s)".format(e.toString, ret.toString))
+    ret
   }
 
   private def getPotentialCryptoOpts0(e: SqlExpr, constraints: Int):
@@ -2394,7 +2412,7 @@ trait Generator extends Traversals
   def generateCandidatePlans(stmts: Seq[SelectStmt]): Seq[CandidatePlans] = {
     val onionSets0 /* Seq[Seq[OnionSet]] */ = stmts.map(generateOnionSets)
 
-    //println(onionSets0)
+    println(onionSets0)
 
     // ------- create a global set of precomputed expressions -------- //
 
@@ -2567,8 +2585,9 @@ trait Generator extends Traversals
           val (time, res) = 
             timedRunMillis(
               CollectionUtils.uniqueInOrderWithKey(
-                cands.map(_._2).map {
-                  o => (stmt, generatePlanFromOnionSet(stmt, o), o)
+                cands.map(_._2).map { o => 
+                  println("  ...onion = " + o.compactToString) 
+                  (stmt, generatePlanFromOnionSet(stmt, o), o)
                 })(_._2))
           println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
           res
