@@ -3,7 +3,7 @@ package edu.mit.cryptdb
 import scala.collection.mutable.{
   ArrayBuffer, HashMap, HashSet, Seq => MSeq, Map => MMap }
 
-trait Generator extends Traversals 
+trait Generator extends Traversals
   with PlanTraversals with Transformers with PlanTransformers with Timer {
 
   private def topDownTraverseContext(start: Node, ctx: Context)(f: Node => Boolean) = {
@@ -28,7 +28,7 @@ trait Generator extends Traversals
 
   private def negate(f: Node => Boolean): Node => Boolean = (n: Node) => { !f(n) }
 
-  private def resolveAliases(e: SqlExpr): SqlExpr = e.resolveAliases 
+  private def resolveAliases(e: SqlExpr): SqlExpr = e.resolveAliases
 
   private def splitTopLevelConjunctions(e: SqlExpr): Seq[SqlExpr] = {
     def split(e: SqlExpr, buffer: ArrayBuffer[SqlExpr]): ArrayBuffer[SqlExpr] = {
@@ -205,7 +205,7 @@ trait Generator extends Traversals
     assert(e.isLiteral)
     // acts as a marker for downstream phases
     FunctionCall(
-      "encrypt", 
+      "encrypt",
       Seq(e, IntLiteral(o), MetaFieldIdent(keyConstraint._1, keyConstraint._2)))
   }
 
@@ -297,7 +297,7 @@ trait Generator extends Traversals
       e: SqlExpr, o: Int,
       subrels: Map[String, PlanNode],
       groupKeys: Map[Symbol, (FieldIdent, OnionType)],
-      aggContext: Boolean, 
+      aggContext: Boolean,
       keyConstraint: Option[(Int, DataType)]): Option[(SqlExpr, OnionType)] = {
       // need to check if we are constrained by group keys
       e match {
@@ -305,7 +305,7 @@ trait Generator extends Traversals
           groupKeys.get(sym) match {
             case Some((expr, o0)) if o0.isOneOf(o) => Some((expr, o0))
             case Some(_)                           => None // cannot support
-            case None                              => 
+            case None                              =>
               getSupportedExpr(e, o, subrels, keyConstraint)
           }
         case _ => getSupportedExpr(e, o, subrels, keyConstraint)
@@ -318,8 +318,8 @@ trait Generator extends Traversals
     //
     // handles literals properly
     def getSupportedExpr(
-      e: SqlExpr, o: Int, 
-      subrels: Map[String, PlanNode], 
+      e: SqlExpr, o: Int,
+      subrels: Map[String, PlanNode],
       keyConstraint: Option[(Int, DataType)]):
       Option[(SqlExpr, OnionType)] = {
 
@@ -328,8 +328,8 @@ trait Generator extends Traversals
           // easy case
           Onions.pickOne(o) match {
             case Onions.PLAIN => Some((e.copyWithContext(null).asInstanceOf[SqlExpr], PlainOnion))
-            case o0           => 
-              Some((encLiteral(e, o0, keyConstraint.get), 
+            case o0           =>
+              Some((encLiteral(e, o0, keyConstraint.get),
                     OnionType.buildIndividual(o0))) // TODO: encryption
           }
 
@@ -363,8 +363,8 @@ trait Generator extends Traversals
               case fi @ FieldIdent(_, _, ColumnSymbol(relation, name0, ctx, _), _)
                 if ctx.relations(relation).isInstanceOf[SubqueryRelation] => procSubqueryRef(e)
               case _ =>
-                println("e = " + e.sql)
-                println("t=(%s), x=(%s)".format(t, x.toString))
+                //println("e = " + e.sql)
+                //println("t=(%s), x=(%s)".format(t, x.toString))
                 onionSet.lookup(t, x).filter(y => (y._2 & o) != 0).map {
                   case (basename, o0) =>
                     val qual = if (r == t) encTblName(t) else r
@@ -458,7 +458,7 @@ trait Generator extends Traversals
 
     def addSubselectAndReturnPlaceholder(p: PlanNode, origSS: SelectStmt): SqlExpr = {
       assert(!hasOuterReferences(origSS))
-      val id = _subselectMaterializeNames.uniqueId() 
+      val id = _subselectMaterializeNames.uniqueId()
       subselectNodes += (id -> (p, origSS))
       NamedSubselectPlaceholder(id)
     }
@@ -565,13 +565,13 @@ trait Generator extends Traversals
 
     // these correspond 1 to 1 with the new projections in the encrypted
     // re-written query
-    // values are: 
-    //    (orig expr, 
-    //     optional orig proj name, 
-    //     projection, 
-    //     what onion it is projected in, 
+    // values are:
+    //    (orig expr,
+    //     optional orig proj name,
+    //     projection,
+    //     what onion it is projected in,
     //     vector ctx)
-    val finalProjs = 
+    val finalProjs =
       new ArrayBuffer[(SqlExpr, Option[String], SqlProj, OnionType, Boolean)]
 
     case class RewriteContext(
@@ -601,13 +601,13 @@ trait Generator extends Traversals
       def withKey(expr: SqlExpr): RewriteContext = expr match {
 
         // this is the common case- where we are comparing to a given column
-        case FieldIdent(_, _, cs : ColumnSymbol, _) => 
+        case FieldIdent(_, _, cs : ColumnSymbol, _) =>
           copy(keyConstraint = Some((cs.fieldPosition, cs.tpe)))
 
         // this is the case where we compare to a precomputed field
         case e if e.getPrecomputableRelation.isDefined =>
           copy(keyConstraint = Some((0 /* signifies pre-computation */, e.getType.tpe)))
- 
+
         // TODO: subselects?
         case _ => this
       }
@@ -692,7 +692,7 @@ trait Generator extends Traversals
                       e0.flatMap { case (expr, _) =>
                         generatePlanFromOnionSet0(
                           ss.subquery, onionSet, EncProj(Seq(onion), true)) match {
-                          case rs @ RemoteSql(q0, _, _, _) => 
+                          case rs @ RemoteSql(q0, _, _, _) =>
                             mergeRemoteSql(rs)
                             Some(eq.copyWithChildren(expr, Subselect(q0)))
                           // TODO: use named subselect
@@ -730,7 +730,7 @@ trait Generator extends Traversals
                               mergeRemoteSql(r1)
                               mergeRemoteSql(r2)
                               replaceWith(eq.copyWithChildren(Subselect(q0p), Subselect(q1p)))
-                            case _ => 
+                            case _ =>
                               // TODO: use named subselect
                               bailOut
                           }
@@ -771,7 +771,7 @@ trait Generator extends Traversals
                       e0.flatMap { case (expr, _) =>
                         generatePlanFromOnionSet0(
                           ss.subquery, onionSet, EncProj(Seq(onion), true)) match {
-                          case rs @ RemoteSql(q0, _, _, _) => 
+                          case rs @ RemoteSql(q0, _, _, _) =>
                             mergeRemoteSql(rs)
                             if (flip) Some(ieq.copyWithChildren(expr, Subselect(q0)))
                             else      Some(ieq.copyWithChildren(Subselect(q0), expr))
@@ -829,7 +829,7 @@ trait Generator extends Traversals
               CollectionUtils.optAnd2(
                 doTransformServer(lhs, curRewriteCtx.restrictTo(Onions.SWP)),
                 doTransformServer(rhs, curRewriteCtx.restrictTo(Onions.SWP).withKey(lhs))).map {
-                  case ((l0, _), (r0, _)) => 
+                  case ((l0, _), (r0, _)) =>
                     replaceWith(FunctionCall("searchSWP", Seq(l0, r0)))
                 }.getOrElse(bailOut)
 
@@ -838,13 +838,13 @@ trait Generator extends Traversals
               onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
               def tryOnion(o: Int) = {
                 val e0 = doTransformServer(e, curRewriteCtx.restrictTo(o))
-                val t = s.map { x => 
+                val t = s.map { x =>
                   doTransformServer(x, curRewriteCtx.restrictTo(o).withKey(e))
                 }
-                println("tryOnion: ")
-                println("  in=" + in.sql)
-                println("  e0=" + e0)
-                println("  t=" + t)
+                //println("tryOnion: ")
+                //println("  in=" + in.sql)
+                //println("  e0=" + e0)
+                //println("  t=" + t)
                 CollectionUtils.optSeq(Seq(e0) ++ t).map { s0 =>
                   replaceWith(In(s0.head._1, s0.tail.map(_._1), n))
                 }
@@ -874,7 +874,7 @@ trait Generator extends Traversals
             case ex @ Exists(ss, _) if curRewriteCtx.inClear =>
               onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
               generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveCardinality) match {
-                case rs @ RemoteSql(q, _, _, _) => 
+                case rs @ RemoteSql(q, _, _, _) =>
                   mergeRemoteSql(rs)
                   replaceWith(Exists(Subselect(q)))
                 case _                          => bailOut
@@ -958,8 +958,8 @@ trait Generator extends Traversals
               curRewriteCtx.onions.head match {
                 case Onions.PLAIN => replaceWith(e.copyWithContext(null).asInstanceOf[SqlExpr])
                 case o            =>
-                  curRewriteCtx.keyConstraint.map { 
-                    k => replaceWith(encLiteral(e, o, k)) 
+                  curRewriteCtx.keyConstraint.map {
+                    k => replaceWith(encLiteral(e, o, k))
                   }.getOrElse(bailOut)
               }
 
@@ -1519,7 +1519,7 @@ trait Generator extends Traversals
     //
     //   SELECT ...
     //   FROM ( <inner subquery> ) AS ident
-    //   WHERE ... 
+    //   WHERE ...
     //   GROUP BY ...
     //   ORDER BY ...
     //   LIMIT ...
@@ -1531,16 +1531,16 @@ trait Generator extends Traversals
 
     if (encContext == PreserveOriginal && /* we only do this for the outer most query */
         remoteMaterializeAdded) { /* necessary but not sufficient condition for this opt to be applicable */
-      // need to check if the query only had one relation, and that it was replaced with 
+      // need to check if the query only had one relation, and that it was replaced with
       // a remote materialize plan
       cur.relations.filter(_.size == 1).flatMap(_.head match {
-            case TableRelationAST(name0, _, _) => 
+            case TableRelationAST(name0, _, _) =>
               finalSubqueryRelationPlans.filter(_._1.name == name0).headOption
             case _ => None
       }) match {
         case Some((rm, origSS)) =>
           // now that we have the RM, unwrap it and make sure we are able to see
-          // all the subquery projections in the plaintext 
+          // all the subquery projections in the plaintext
 
           def unwrap(n: PlanNode): PlanNode = n match {
             case RemoteMaterialize(_, p) => unwrap(p)
@@ -1553,7 +1553,7 @@ trait Generator extends Traversals
           if (td.size == origSS.projections.size &&
               td.filter(_.onion != PlainOnion).isEmpty) {
             // TODO: not 100% sure this guarantees us that we have
-            // exactly the original query in the clear, but it seems to be 
+            // exactly the original query in the clear, but it seems to be
             // a reasonable check
 
             // now we just translate each of the operations as local ops, re-writting
@@ -1573,11 +1573,11 @@ trait Generator extends Traversals
             }
 
             // where clause
-            var res = 
+            var res =
               cur.filter.map(f => LocalFilter(rewritePre[SqlExpr](f), f, p, Seq.empty)).getOrElse(p)
 
             // group by clause
-            res = 
+            res =
               cur.groupBy.map(gb =>
                 LocalGroupBy(gb.keys.map(x => rewritePre[SqlExpr](x)), gb.keys,
                              gb.having.map(x => rewritePre[SqlExpr](x)), gb.having,
@@ -1593,10 +1593,10 @@ trait Generator extends Traversals
               trfms.map(Right(_)), origSS.copy(orderBy = None, limit = None), res)
 
             // order by
-            res = 
+            res =
               cur.orderBy.map { ob =>
                 LocalOrderBy(
-                  ob.keys.map { 
+                  ob.keys.map {
                     case (FieldIdent(_, _, ColumnSymbol(_, col, _, _), _), ot) =>
                       (origSS.ctx.lookupNamedProjectionIndex(col).get, ot)
 
@@ -1615,7 +1615,7 @@ trait Generator extends Traversals
         case _ =>
       }
     }
-        
+
     // --- filters --- //
     cur = cur
       .filter
@@ -1736,11 +1736,11 @@ trait Generator extends Traversals
                   e match {
                     case FieldIdent(_, _, sym, _) =>
                       groupKeys.get(sym).map { _ => t }.getOrElse {
-                        t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, o.getType.tpe.isStringType)), 
+                        t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, o.getType.tpe.isStringType)),
                                _4 = true)
                       }
                     case _ =>
-                      t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, o.getType.tpe.isStringType)), 
+                      t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, o.getType.tpe.isStringType)),
                              _4 = true)
                   }
                 case e => e
@@ -1866,10 +1866,10 @@ trait Generator extends Traversals
 
       val projectionCache = new HashMap[(SqlExpr, OnionType), (Int, Boolean)]
       def projectionInsert(
-          origExpr: SqlExpr, 
+          origExpr: SqlExpr,
           origProjName: Option[String],
-          p: SqlProj, 
-          o: OnionType, 
+          p: SqlProj,
+          o: OnionType,
           v: Boolean): Int = {
 
         assert(p.isInstanceOf[ExprProj])
@@ -1946,8 +1946,8 @@ trait Generator extends Traversals
               if (!canDoServer) ServerProj else ServerAll) match {
 
               case Left((expr, onion)) =>
-                println("orig e: " + e.sql)
-                println("got left: " + expr.sql )
+                //println("orig e: " + e.sql)
+                //println("got left: " + expr.sql )
                 val stmtIdx = projectionInsert(e, a, ExprProj(expr, a), onion, false)
                 projPosMaps += Left((stmtIdx, onion))
               case Right((optExpr, comp)) =>
@@ -1976,8 +1976,8 @@ trait Generator extends Traversals
 
     val tdesc =
       if (finalProjs.isEmpty) Seq(PosDesc(IntType(4), None, PlainOnion, false, false))
-      else finalProjs.map { 
-        case (e, _, p, o, v) => 
+      else finalProjs.map {
+        case (e, _, p, o, v) =>
           val tpe = e match {
             case FieldIdent(None, n, _, _) if n.startsWith(_hiddenNamePrefix) =>
               // for hidden names, use the projection expression
@@ -1986,13 +1986,13 @@ trait Generator extends Traversals
               println(n + ": " + r)
               r
             case _ => e.findCanonical.getType
-          } 
+          }
           if (tpe.tpe == UnknownType) {
             println("ERROR: UnknownType for expr: " + e)
             println("e.findCanonical: " + e.findCanonical)
             println("p: " + p)
           }
-          PosDesc(tpe.tpe, tpe.field.map(_.pos), o, tpe.field.map(_.partOfPK).getOrElse(false), v) 
+          PosDesc(tpe.tpe, tpe.field.map(_.pos), o, tpe.field.map(_.partOfPK).getOrElse(false), v)
       }.toSeq
 
     // --join filters
@@ -2000,9 +2000,9 @@ trait Generator extends Traversals
       verifyPlanNode(
         newLocalJoinFilters
           .zip(localJoinFilterPosMaps)
-          .foldLeft( 
-            RemoteSql(cur, tdesc, 
-                      finalSubqueryRelationPlans.toSeq, 
+          .foldLeft(
+            RemoteSql(cur, tdesc,
+                      finalSubqueryRelationPlans.toSeq,
                       subselectNodes.toMap) : PlanNode ) {
             case (acc, ((comp, rlnsToNull, reln), mapping)) =>
               if (rlnsToNull.isEmpty) {
@@ -2090,7 +2090,7 @@ trait Generator extends Traversals
               case _             => None
             }.flatten ++ {
               projPosMaps.zipWithIndex.flatMap {
-                case (Left((p, o)), idx) if !o.isPlain => 
+                case (Left((p, o)), idx) if !o.isPlain =>
                   encContext match {
                     case EncProj(onions, _) =>
                       // optimization: if onion is already in the correct
@@ -2283,7 +2283,7 @@ trait Generator extends Traversals
   private def getPotentialCryptoOpts(e: SqlExpr, o: Int):
     Option[Seq[(SqlExpr, Int)]] = {
     val ret = getPotentialCryptoOpts0(e, o)
-    println("getPotentialCryptoOpts: e=(%s), ret=(%s)".format(e.toString, ret.toString))
+    //println("getPotentialCryptoOpts: e=(%s), ret=(%s)".format(e.toString, ret.toString))
     ret
   }
 
@@ -2429,7 +2429,7 @@ trait Generator extends Traversals
   def generateCandidatePlans(stmts: Seq[SelectStmt]): Seq[CandidatePlans] = {
     val onionSets0 /* Seq[Seq[OnionSet]] */ = stmts.map(generateOnionSets)
 
-    println(onionSets0)
+    //println(onionSets0)
 
     // ------- create a global set of precomputed expressions -------- //
 
@@ -2599,11 +2599,11 @@ trait Generator extends Traversals
         case (((stmt, cands), im), idx) if im.isEmpty =>
 
           println("trying query %d with %d onions...".format(idx, cands.size))
-          val (time, res) = 
+          val (time, res) =
             timedRunMillis(
               CollectionUtils.uniqueInOrderWithKey(
-                cands.map(_._2).map { o => 
-                  println("  ...onion = " + o.compactToString) 
+                cands.map(_._2).map { o =>
+                  //println("  ...onion = " + o.compactToString)
                   (stmt, generatePlanFromOnionSet(stmt, o), o)
                 })(_._2))
           println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
@@ -2637,7 +2637,7 @@ trait Generator extends Traversals
             }
 
           println("trying query %d with %d onions...".format(idx, oSets.size))
-          val (time, res) = 
+          val (time, res) =
             timedRunMillis(
               CollectionUtils.uniqueInOrderWithKey(
                 oSets.map {
@@ -2659,7 +2659,7 @@ trait Generator extends Traversals
   @inline
   private def mkPowerSetOnionSet(os: Seq[OnionSet]): Seq[Seq[OnionSet]] = {
     println("powerset over %d elements...".format(os.size))
-    val (time, res) = timedRunMillis(CollectionUtils.powerSetMinusEmpty(os)) 
+    val (time, res) = timedRunMillis(CollectionUtils.powerSetMinusEmpty(os))
     println("  took %f ms".format(time))
     res
   }
@@ -2916,7 +2916,7 @@ trait Generator extends Traversals
               case Le(l, r, _)    => binopOp(l, r)
 
               // TODO: more opts?
-              case _              => 
+              case _              =>
             }
         }
       }
@@ -2927,7 +2927,7 @@ trait Generator extends Traversals
         if (clauses.size == 1) {
           procExprPrimitive(clauses.head, o)
         } else {
-          workingSet = 
+          workingSet =
             clauses.flatMap(c => traverseContext(c, ctx, Onions.PLAIN, workingSet.map(_.copy), selectFn))
         }
       }
