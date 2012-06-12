@@ -1983,7 +1983,7 @@ trait Generator extends Traversals
               // for hidden names, use the projection expression
               val ExprProj(e, _, _) = p
               val r = e.getType
-              println(n + ": " + r)
+              //println(n + ": " + r)
               r
             case _ => e.findCanonical.getType
           }

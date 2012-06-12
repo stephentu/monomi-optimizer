@@ -108,9 +108,9 @@ object CostConstants {
 }
 
 case class PosDesc(
-  origTpe: DataType, 
+  origTpe: DataType,
   origFieldPos: Option[Int],
-  onion: OnionType, 
+  onion: OnionType,
   partOfPK: Boolean,
   vectorCtx: Boolean) {
 
@@ -266,7 +266,7 @@ trait PgQueryPlanExtractor {
 
           // exclude temp tables from SSI costs
           // TODO: this is hacky
-          val ssiMapRhs = 
+          val ssiMapRhs =
             if (reln.startsWith(RemoteSql.globalUniqueNameGenerator.prefix)) {
               (Map.empty : Map[String, Int])
             } else Map(reln -> 1)
@@ -286,7 +286,7 @@ trait PgQueryPlanExtractor {
 
     // TODO: do a better job not leaking the stmt object
     val stmt = dbconn.getConn.createStatement
-    val r = 
+    val r =
       try {
         //println("sending query to psql:")
         //println(sql)
@@ -301,9 +301,9 @@ trait PgQueryPlanExtractor {
     val res = r.map { rs =>
       val planJson =
         // JSON parser is not thread safe
-        JSON.synchronized { 
+        JSON.synchronized {
           //println(rs.getString(1))
-          JSON.parseFull(rs.getString(1)) 
+          JSON.parseFull(rs.getString(1))
         }
       (for (L(l) <- planJson;
             M(m) = l.head;
@@ -336,7 +336,7 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
     // this is used to debug whether or not our sql statements sent
     // to the DB for cardinality estimation are valid or not
 
-    try { 
+    try {
       resolve(stmt, defns)
     } catch {
       case e =>
@@ -381,15 +381,35 @@ object FieldNameHelpers {
 object RemoteSql {
   // TODO: this is a hack- we should really cleanup the temp tables
   val globalUniqueNameGenerator = new ThreadSafeNameGenerator("_fresh")
+
+  private val _defnsCache =
+    new util.IdentityHashMap[DbConn, HashMap[String, Definitions]]
+
+  def makeIntTemporaryTable(nRows: Long, dbconn: DbConn): (Definitions, String) = {
+    val (created, tempTableName) =
+      dbconn.makeIntTemporaryTable(
+        nRows, RemoteSql.globalUniqueNameGenerator.uniqueId())
+
+    println("created=(%b), tempTableName=(%s)".format(created, tempTableName))
+
+    (synchronized {
+      _defnsCache
+        .getOrElseUpdate(dbconn, HashMap.empty)
+        .getOrElseUpdate(tempTableName, {
+          val schema = new PgDbConnSchema(dbconn.asInstanceOf[PgDbConn])
+          schema.loadSchema()
+        })
+    }, tempTableName)
+  }
 }
 
 case class RemoteSql(stmt: SelectStmt,
                      projs: Seq[PosDesc],
 
                      /* These stmts have side-effect of causing a temp table on the
-                      * server to be loaded */ 
+                      * server to be loaded */
                      subrelations: Seq[(RemoteMaterialize, SelectStmt)] = Seq.empty,
-                   
+
                      /* These stmts will be evaluated by the query to substitute values.
                       * these subselects do *not* accept a/dsf
                       rguments, so they can be safely
@@ -420,14 +440,14 @@ case class RemoteSql(stmt: SelectStmt,
         case _ => (None, true)
       }.asInstanceOf[N]
 
-    var reloadSchema = false
+    var useSchema: Option[Definitions] = None
     val reverseStmt = topDownTransformation(stmt) {
       case a @ AggCall("hom_agg", args, _) =>
         // need to assign a unique ID to this hom agg
         (Some(a.copy(args = args ++ Seq(StringLiteral(ctx.uniqueId())))), true)
 
       case s @ FunctionCall("searchSWP", args, _) =>
-        // need to assign a unique ID to this UDF 
+        // need to assign a unique ID to this UDF
         (Some(s.copy(args = args ++ Seq(NullLiteral(), StringLiteral(ctx.uniqueId())))), true)
 
       case FieldIdent(Some(qual), name, _, _) =>
@@ -460,33 +480,18 @@ case class RemoteSql(stmt: SelectStmt,
             }
         }
 
-      case In(e, Seq(NamedSubselectPlaceholder(name, _)), n, _) => 
+      case In(e, Seq(NamedSubselectPlaceholder(name, _)), n, _) =>
         val ch = namedSubselects(name)._1.costEstimate(ctx, stats)
         println("IN clause for namedSubselect=(%s) contains (%d) elements".format(name, ch.rows.toInt))
         if (ch.rows.toInt > 10000) {
           // if we have too many elements for the IN clause, then we just stash the
           // values into a temp table
-          val tempTableName = RemoteSql.globalUniqueNameGenerator.uniqueId()
-          val stmt = ctx.defns.dbconn.get.getConn.createStatement
-          stmt.executeUpdate("CREATE TEMPORARY TABLE %s ( col0 INTEGER )".format(tempTableName))
-          // only put 10000 because I don't think anymore values will 
-          // change the query plan meaningfully, but just waste time instead
-          val insertTime = 
-            timedRunMillisNoReturn(
-              stmt.executeUpdate("INSERT INTO %s VALUES %s".format(
-                tempTableName,
-                (1 to 10000).map(x => "(%d)".format(x * 2)).mkString(","))))
+          // TODO: don't always assume that value is a bunch of ints
+          val (schema, tempTableName) =
+            RemoteSql.makeIntTemporaryTable(10000, ctx.defns.dbconn.get)
 
-          println("insert time for temp table %s is %f ms".format(tempTableName, insertTime))
+          useSchema = Some(schema)
 
-          val analyzeTime = 
-            timedRunMillisNoReturn(
-              stmt.executeUpdate("ANALYZE %s".format(tempTableName)))
-
-          println("analyze time for temp table %s is %f ms".format(tempTableName, analyzeTime))
-
-          stmt.close()
-          reloadSchema = true
           (Some(In(e, Seq(Subselect(
             SelectStmt(
               Seq(ExprProj(FieldIdent(None, "col0"), None)),
@@ -526,13 +531,7 @@ case class RemoteSql(stmt: SelectStmt,
       case _ => (None, true)
     }.asInstanceOf[SelectStmt]
 
-    val reverseStmt0 = 
-      if (reloadSchema) {
-        val schema = new PgDbConnSchema(ctx.defns.dbconn.get.asInstanceOf[PgDbConn])
-        resolveCheck(reverseStmt, schema.loadSchema(), true)
-      } else {
-        resolveCheck(reverseStmt, ctx.defns, true)
-      }
+    val reverseStmt0 = resolveCheck(reverseStmt, useSchema.getOrElse(ctx.defns))
 
     // server query execution cost
     val (c, r, rr, m, ssi) =
@@ -713,14 +712,14 @@ case class RemoteSql(stmt: SelectStmt,
       }.toMap
     }
 
-    val ssiMerged = 
+    val ssiMerged =
       (srCosts.map(_.seqScanInfo) ++ nsCosts.map(_.seqScanInfo) ++ Seq(ssi))
         .foldLeft( Map.empty : Map[String, Int] )(mergePlus)
 
     Estimate(
       c + aggCost + addSeqScanCost +
         srCosts.map(_.cost).sum +
-        nsCosts.map(_.cost).sum + 
+        nsCosts.map(_.cost).sum +
         CostConstants.secToPGUnit(bytesToXfer / CostConstants.NetworkXferBytesPerSec) +
         CostConstants.secToPGUnit( 0.001 /* 1ms latency to contact server */ ),
       r, rr.getOrElse(1), reverseStmt0, ssiMerged)
@@ -732,12 +731,12 @@ case class RemoteSql(stmt: SelectStmt,
   def emitCPPHelpers(cg: CodeGenerator) = {
     subrelations.foreach(_._1.emitCPPHelpers(cg))
     namedSubselects.foreach(_._2._1.emitCPPHelpers(cg))
-      
+
     assert(_paramClassName eq null)
     assert(_paramStmt eq null)
 
     _paramClassName = "param_generator_%s".format(cg.uniqueId())
-    cg.println("class %s : public sql_param_generator {".format(_paramClassName)) 
+    cg.println("class %s : public sql_param_generator {".format(_paramClassName))
     cg.println("public:")
     cg.blockBegin("virtual param_map get_param_map(exec_context& ctx) {")
 
@@ -753,7 +752,7 @@ case class RemoteSql(stmt: SelectStmt,
       def subMarkers(q: String): String = q.replaceAll("\\$", "_")
 
       _paramStmt = topDownTransformation(stmt) {
-        case FieldIdent(qual, name, _, _) => 
+        case FieldIdent(qual, name, _, _) =>
           (Some(FieldIdent(qual.map(subMarkers), subMarkers(name))), false)
 
         case TableRelationAST(name, alias, _) =>
@@ -771,8 +770,8 @@ case class RemoteSql(stmt: SelectStmt,
 
           // public_key (bytea),
           // filename (varchar),
-          // agg_size (int64),      
-          // rows_per_agg (int64),      
+          // agg_size (int64),
+          // rows_per_agg (int64),
           // row_id (int64),
 
           // TODO: we need to compute these values instead of hardcoding
@@ -826,7 +825,7 @@ case class RemoteSql(stmt: SelectStmt,
 
           // generate code to encrypt the search token, and replace searchSWP w/ the params
           cg.blockBegin("{")
-            
+
             cg.println(
               "Binary key(ctx.crypto->cm->getKey(ctx.crypto->cm->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(pos))
             cg.println(
@@ -858,17 +857,17 @@ case class RemoteSql(stmt: SelectStmt,
     assert(_paramStmt ne null)
 
     cg.print("new remote_sql_op(new %s, ".format(_paramClassName))
-    cg.printStr(_paramStmt.sqlFromDialect(PostgresDialect)) 
+    cg.printStr(_paramStmt.sqlFromDialect(PostgresDialect))
     cg.print(", %s".format( projs.map(_.toCPP).mkString("{", ", ", "}") ))
     cg.print(", {")
 
     CollectionUtils
       .foreachWithAllButLastAction(subrelations)(_._1.emitCPP(cg))(() => cg.println(", "))
 
-    cg.print("}, util::map_from_pair_vec<std::string, physical_operator*>({") 
+    cg.print("}, util::map_from_pair_vec<std::string, physical_operator*>({")
 
     CollectionUtils.foreachWithAllButLastAction(namedSubselects.toSeq)({
-      case (name, (plan, _)) => 
+      case (name, (plan, _)) =>
         cg.print("std::pair<std::string, physical_operator*>(%s, ".format(quoteDbl(name)))
         plan.emitCPP(cg)
         cg.print(")")
@@ -961,7 +960,7 @@ case class LocalOuterJoinFilter(
     Estimate(ch.cost, r, rr.getOrElse(1), stmt, ch.seqScanInfo)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = 
+  def emitCPPHelpers(cg: CodeGenerator) =
     (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
 
   def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
@@ -1036,7 +1035,7 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
     Estimate(ch.cost + subCosts, r, rr.getOrElse(1L), stmt, ch.seqScanInfo)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = 
+  def emitCPPHelpers(cg: CodeGenerator) =
     (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
 
   def emitCPP(cg: CodeGenerator) = {
@@ -1053,9 +1052,9 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
 
 case class LocalTransform(
   /* (orig, opt orig proj name, translated) */
-  trfms: Seq[Either[Int, (SqlExpr, Option[String], SqlExpr)]], 
+  trfms: Seq[Either[Int, (SqlExpr, Option[String], SqlExpr)]],
 
-  /** 
+  /**
    * A query which represents what this node projects post transformation
    *
    * We need this because query structure is lost when we pick parts of it
@@ -1078,10 +1077,10 @@ case class LocalTransform(
       case Left(pos) => td(pos)
 
       // TODO: allow for transforms to not remove vector context
-      case Right((o, _, _)) => 
+      case Right((o, _, _)) =>
         val t = o.findCanonical.getType
         PosDesc(
-          t.tpe, t.field.map(_.pos), PlainOnion, 
+          t.tpe, t.field.map(_.pos), PlainOnion,
           t.field.map(_.partOfPK).getOrElse(false), false)
     }
   }
@@ -1093,23 +1092,23 @@ case class LocalTransform(
     // we assume these operations are cheap
     // TODO: this might not really be true - measure if it is
     val ch = child.costEstimate(ctx, stats)
-    
 
-    // we get hints from the plan generator about what our equivStmt 
+
+    // we get hints from the plan generator about what our equivStmt
     // should look like
     ch.copy(equivStmt = origStmt)
 
-    // this didn't really work below- the idea was to 
+    // this didn't really work below- the idea was to
     // project the inner child as a subquery- lots of little
     // corner cases make this hard to get right...
 
     //val newProjs = {
     //  val origProjs = ch.equivStmt.projections
     //  trfms.map {
-    //    case Left(i) => 
+    //    case Left(i) =>
     //      origProjs(i) match {
-    //        case ExprProj(_, Some(a), _) => 
-    //          ExprProj(FieldIdent(None, a), None) 
+    //        case ExprProj(_, Some(a), _) =>
+    //          ExprProj(FieldIdent(None, a), None)
     //        case StarProj(_) => throw new RuntimeException("unimpl")
     //        case e => e // TODO: not really right...
     //      }
@@ -1117,16 +1116,16 @@ case class LocalTransform(
     //  }
     //}
 
-    //val newStmt = 
+    //val newStmt =
     //  resolveCheck(
     //    SelectStmt(
-    //      newProjs, 
+    //      newProjs,
     //      Some(Seq(SubqueryRelationAST(ch.equivStmt, ctx.uniqueId()))),
-    //      None, 
-    //      None, 
-    //      None, 
+    //      None,
+    //      None,
+    //      None,
     //      None),
-    //    ctx.defns) 
+    //    ctx.defns)
 
     //ch.copy(equivStmt = newStmt)
   }
@@ -1145,15 +1144,15 @@ case class LocalTransform(
           System.err.println("ERROR: " + orig)
           System.err.println("ERROR: " + orig.findCanonical)
         }
-        cg.print("local_transform_op::trfm_desc(std::make_pair(%s, %s)), ".format( 
+        cg.print("local_transform_op::trfm_desc(std::make_pair(%s, %s)), ".format(
           PosDesc(
-            t.tpe, t.field.map(_.pos), PlainOnion, 
-            t.field.map(_.partOfPK).getOrElse(false), false).toCPP, 
+            t.tpe, t.field.map(_.pos), PlainOnion,
+            t.field.map(_.partOfPK).getOrElse(false), false).toCPP,
           texpr.toCPP
         ))
     }
     cg.print("}, ")
-    child.emitCPP(cg) 
+    child.emitCPP(cg)
     cg.print(")")
   }
 }
@@ -1177,7 +1176,7 @@ case class LocalGroupBy(
 
     // TODO: this is a bit of a hack
     val equivStmt =
-      if (ch.equivStmt.groupBy.isEmpty) ch.equivStmt 
+      if (ch.equivStmt.groupBy.isEmpty) ch.equivStmt
       else {
         SelectStmt(
           ch.equivStmt.projections.map {
@@ -1210,7 +1209,7 @@ case class LocalGroupBy(
         equivStmt.copy(
           // need to rewrite projections
 
-          // TODO: the rules for when to group_concat projects is kind of 
+          // TODO: the rules for when to group_concat projects is kind of
           // fragile now
           projections = equivStmt.projections.map {
             case e @ ExprProj(fi @ FieldIdent(qual, name, _, _), projName, _) =>
@@ -1223,7 +1222,7 @@ case class LocalGroupBy(
                 }.getOrElse(e.copy(expr = wrapWithGroupConcat(fi)))
               }
 
-            case e @ ExprProj(expr, projName, _) => 
+            case e @ ExprProj(expr, projName, _) =>
               if (projName.map(n => nameSet.contains(Right(n))).getOrElse(false)) {
                 e
               } else {
@@ -1232,7 +1231,7 @@ case class LocalGroupBy(
 
             // TODO: what do we do here?
             case e => e
-        
+
           },
           groupBy = Some(SqlGroupBy(origKeys, origFilter))),
         ctx.defns)
@@ -1242,11 +1241,11 @@ case class LocalGroupBy(
     Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = 
+  def emitCPPHelpers(cg: CodeGenerator) =
     (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
 
   def emitCPP(cg: CodeGenerator) = {
-    val pos = keys.map { 
+    val pos = keys.map {
       case TuplePosition(i, _) => i
       case e => throw new RuntimeException("TODO: unsupported: " + e)
     }
@@ -1258,7 +1257,7 @@ case class LocalGroupBy(
 }
 
 // this node is for when we have to remove the HAVING clause
-// from a group by, but we still keep the group by. 
+// from a group by, but we still keep the group by.
 case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
                             child: PlanNode, subqueries: Seq[PlanNode])
   extends PlanNode {
@@ -1289,7 +1288,7 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
     Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = 
+  def emitCPPHelpers(cg: CodeGenerator) =
     (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
 
   def emitCPP(cg: CodeGenerator) = {
@@ -1325,7 +1324,7 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
   def emitCPP(cg: CodeGenerator) = {
     cg.print(
       "new local_order_by(%s, ".format(
-        sortKeys.map { 
+        sortKeys.map {
           case (i, o) => "std::make_pair(%d, %b)".format(i, o == DESC)
         }.mkString("{", ", ", "}")))
     child.emitCPP(cg)

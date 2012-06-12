@@ -1,6 +1,6 @@
 package edu.mit.cryptdb
 
-import scala.collection.mutable.ArrayBuffer
+import scala.collection.mutable.{ ArrayBuffer, HashMap }
 
 import java.sql.{ Array => SqlArray, _ }
 import java.util.Properties
@@ -62,8 +62,41 @@ object Statistics {
 
 class Statistics(val stats: Map[String, TableStats], val dbconn: Option[DbConn])
 
-trait DbConn {
+trait DbConn extends Timer {
   def getConn: Connection
+
+  private val _tblCache = new HashMap[Long, String]
+
+  def makeIntTemporaryTable(nRows: Long, nameGenerator: => String): (Boolean, String) = {
+    synchronized {
+      var created = false
+      val x = _tblCache.getOrElseUpdate(nRows, {
+        val tempTableName = nameGenerator
+        val stmt = getConn.createStatement
+        stmt.executeUpdate("CREATE TEMPORARY TABLE %s ( col0 INTEGER )".format(tempTableName))
+
+        val insertTime =
+          timedRunMillisNoReturn(
+            stmt.executeUpdate("INSERT INTO %s VALUES %s".format(
+              tempTableName,
+              (1L to nRows).map(x => "(%d)".format(x * 2)).mkString(","))))
+
+        println("insert time for temp table %s is %f ms".format(tempTableName, insertTime))
+
+        val analyzeTime =
+          timedRunMillisNoReturn(
+            stmt.executeUpdate("ANALYZE %s".format(tempTableName)))
+
+        println("analyze time for temp table %s is %f ms".format(tempTableName, analyzeTime))
+
+        stmt.close()
+
+        created = true
+        tempTableName
+      })
+      (created, x)
+    }
+  }
 }
 
 class PgDbConn(val hostname: String, val port: Int, val db: String, val props: Properties) extends DbConn {
@@ -99,7 +132,7 @@ where table_catalog = ? and (table_schema = 'public' or table_schema like 'pg_te
     val tables = listTables()
 
     val ret = new Definitions(tables.map(name => {
-  
+
       val s1 = conn.prepareStatement("""
   select
       a.attname as column_name
@@ -110,7 +143,7 @@ where table_catalog = ? and (table_schema = 'public' or table_schema like 'pg_te
       pg_index ix,
       pg_attribute a
   where
-      tc.table_name = ? 
+      tc.table_name = ?
       and tc.constraint_type = 'PRIMARY KEY'
       and t.oid = ix.indrelid
       and i.oid = ix.indexrelid
@@ -118,7 +151,7 @@ where table_catalog = ? and (table_schema = 'public' or table_schema like 'pg_te
       and a.attnum = ANY(ix.indkey)
       and i.relname = tc.constraint_name
   """)
-    
+
       s1.setString(1, name)
       val r1 = s1.executeQuery
       val pkCols = r1.map(_.getString(1)).toSet
@@ -152,7 +185,7 @@ where table_catalog = ? and (table_schema = 'public' or table_schema like 'pg_te
       })
       s.close()
 
-      (name, columns.reverse) // TODO: not sure why the result set is coming in 
+      (name, columns.reverse) // TODO: not sure why the result set is coming in
                               // reverse order, but not really interested in
                               // debugging it now
     }).toMap, Some(_dbconn))
@@ -340,4 +373,4 @@ where schemaname = 'public' and tablename = ?
 }
 
 class PgSchema(hostname: String, port: Int, db: String, props: Properties)
-  extends PgDbConnSchema(new PgDbConn(hostname, port, db, props)) 
+  extends PgDbConnSchema(new PgDbConn(hostname, port, db, props))

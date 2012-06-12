@@ -276,7 +276,7 @@ class OnionSet {
   // relation is global table name
   def lookup(relation: String, expr: SqlExpr): Option[(String, Int)] = {
     val ret = opts.get(mkKey(relation, expr))
-    println("lookup(%s, %s) = (%s)".format(relation, expr.sql, ret.toString))
+    //println("lookup(%s, %s) = (%s)".format(relation, expr.sql, ret.toString))
     ret
   }
 
@@ -353,7 +353,7 @@ class OnionSet {
       val x = v & (~Onions.DET)
       if (x != 0 || expr.isRight) {
         Some((k, (s, x)))
-      } else { 
+      } else {
         None
       }
     }
