@@ -1731,16 +1731,24 @@ trait Generator extends Traversals
           case cc @ ClientComputation(_, _, p, sp, _) =>
             def procProjs(p: Seq[(SqlExpr, SqlProj, OnionType, Boolean)]) = {
               p.map {
-                case t @ (o, ep @ ExprProj(e, _, _), _, v) if !v =>
+                case t @ (origExpr, ep @ ExprProj(e, _, _), onion, v) if !v =>
                   def wrapWithGroupConcat(e: SqlExpr, h: Boolean) = GroupConcat(e, ",", h)
-                  e match {
+                  origExpr match {
                     case FieldIdent(_, _, sym, _) =>
-                      groupKeys.get(sym).map { _ => t }.getOrElse {
-                        t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, o.getType.tpe.isStringType)),
+                      assert(sym ne null)
+                      groupKeys.get(sym).filter { case (fi, o) =>
+                        // must test if what we are projecting is the same onion +
+                        // expr
+                        val eq = fi == e
+                        assert(!eq || (onion == o)) // same expr should => same onion
+                        eq
+                      }.map { _ => t }.getOrElse {
+                        t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, origExpr.getType.tpe.isStringType)),
                                _4 = true)
                       }
                     case _ =>
-                      t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, o.getType.tpe.isStringType)),
+                      // TODO: what if we group by on a precomputed expr?
+                      t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, origExpr.getType.tpe.isStringType)),
                              _4 = true)
                   }
                 case e => e
