@@ -27,15 +27,15 @@ class CodeGenerator(outputFile: File) extends PrettyPrinters {
     _didIndent = false
   }
 
-  def println(l: String): Unit = { 
-    printIndent() 
+  def println(l: String): Unit = {
+    printIndent()
     pw.println(l)
     _didIndent = false
   }
 
-  def print(l: String): Unit = { 
+  def print(l: String): Unit = {
     printIndent()
-    pw.print(l) 
+    pw.print(l)
   }
 
   def printStr(l: String): Unit = print(quoteDbl(l))
@@ -56,11 +56,11 @@ trait ProgramGenerator {
     baseFolder.mkdirs()
 
     def makeProgram() = {
-      val progFile = new File(baseFolder, "program.cc")
+      val progFile = new File(baseFolder, "program.cc.generated")
       val cg = new CodeGenerator(progFile)
       cg.println("// WARNING: This is an auto-generated file")
       cg.println("#include \"db_config.h\"")
-      
+
       cg.println("#include <cassert>")
       cg.println("#include <cstdlib>")
       cg.println("#include <iostream>")
@@ -86,7 +86,7 @@ trait ProgramGenerator {
 
           cg.println("op->open(ctx);")
           cg.blockBegin("while (op->has_more(ctx)) {")
-            
+
             cg.println("physical_operator::db_tuple_vec v;")
             cg.println("op->next(ctx, v);")
             cg.println("physical_operator::print_tuples(v);")
