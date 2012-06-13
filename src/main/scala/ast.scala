@@ -65,7 +65,7 @@ trait SqlExpr extends Node with Transformers {
   def evalLiteral: Option[DbElem] = None
 
   // returns an AST node which recursive folds as much as possible
-  def constantFold: SqlExpr = 
+  def constantFold: SqlExpr =
     evalLiteral.map(_.toAST.copyWithContext(ctx).asInstanceOf[SqlExpr]).getOrElse(this)
 
   // is the r-value of this expression a literal?
@@ -156,7 +156,7 @@ trait Binop extends SqlExpr {
       .getOrElse(x.copyWithContext(ctx).asInstanceOf[SqlExpr])
   }
 
-  override def getType = lhs.getType.commonBound(rhs.getType) 
+  override def getType = lhs.getType.commonBound(rhs.getType)
 
   val opStr: String
   def cppOpStr: String
@@ -172,7 +172,7 @@ trait Binop extends SqlExpr {
 }
 
 case class Or(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
-  override def getType = TypeInfo(BoolType, None) 
+  override def getType = TypeInfo(BoolType, None)
   val opStr = "or"
   val cppOpStr = "or_node"
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -180,7 +180,7 @@ case class Or(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
 }
 
 case class And(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
-  override def getType = TypeInfo(BoolType, None) 
+  override def getType = TypeInfo(BoolType, None)
   val opStr = "and"
   val cppOpStr = "and_node"
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -188,7 +188,7 @@ case class And(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Binop {
 }
 
 trait EqualityLike extends Binop {
-  override def getType = TypeInfo(BoolType, None) 
+  override def getType = TypeInfo(BoolType, None)
 }
 
 case class Eq(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends EqualityLike {
@@ -206,7 +206,7 @@ case class Neq(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Equality
 }
 
 trait InequalityLike extends Binop {
-  override def getType = TypeInfo(BoolType, None) 
+  override def getType = TypeInfo(BoolType, None)
 }
 
 case class Ge(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends InequalityLike {
@@ -235,8 +235,8 @@ case class Lt(lhs: SqlExpr, rhs: SqlExpr, ctx: Context = null) extends Inequalit
 }
 
 case class In(elem: SqlExpr, set: Seq[SqlExpr], negate: Boolean, ctx: Context = null) extends SqlExpr {
-  override def getType = TypeInfo(BoolType, None) 
-  def toCPP = 
+  override def getType = TypeInfo(BoolType, None)
+  def toCPP =
     "new in_node(%s, %s)".format(
         elem.toCPP, set.map(_.toCPP).mkString("{", ", ", "}"))
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -248,7 +248,7 @@ case class In(elem: SqlExpr, set: Seq[SqlExpr], negate: Boolean, ctx: Context = 
 }
 
 case class Like(lhs: SqlExpr, rhs: SqlExpr, negate: Boolean, ctx: Context = null) extends Binop {
-  override def getType = TypeInfo(BoolType, None) 
+  override def getType = TypeInfo(BoolType, None)
   val opStr = if (negate) "not like" else "like"
   def cppOpStr = throw new RuntimeException("not supported")
   override def toCPP = "new like_node(%s, %s, %b)".format(lhs.toCPP, rhs.toCPP, negate)
@@ -326,13 +326,13 @@ trait Unop extends SqlExpr {
 }
 
 case class Not(expr: SqlExpr, ctx: Context = null) extends Unop {
-  override def getType = TypeInfo(BoolType, None) 
+  override def getType = TypeInfo(BoolType, None)
   val opStr = "not"
   def toCPP = "new not_node(%s)".format(expr.toCPP)
   def copyWithContext(c: Context) = copy(ctx = c)
 }
 case class Exists(select: Subselect, ctx: Context = null) extends SqlExpr {
-  override def getType = TypeInfo(BoolType, None) 
+  override def getType = TypeInfo(BoolType, None)
   def toCPP = "new exists_node(%s)".format(select.toCPP)
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = Seq.empty
@@ -341,7 +341,7 @@ case class Exists(select: Subselect, ctx: Context = null) extends SqlExpr {
 
 case class FieldIdent(qualifier: Option[String], name: String, symbol: Symbol = null, ctx: Context = null) extends SqlExpr {
   override def getType = symbol match {
-    case null                                   => 
+    case null                                   =>
       // need to look it up in the context
       if (ctx ne null) TypeInfo(ctx.lookupColumn(qualifier, name, false).head.tpe, None)
       else super.getType
@@ -363,8 +363,11 @@ case class Subselect(subquery: SelectStmt, ctx: Context = null) extends SqlExpr 
   def sqlFromDialect(dialect: SqlDialect) = "(" + subquery.sqlFromDialect(dialect) + ")"
 }
 
-trait SqlAgg extends SqlExpr
+trait SqlAgg extends SqlExpr {
+  def arguments: Seq[SqlExpr]
+}
 case class CountStar(ctx: Context = null) extends SqlAgg {
+  def arguments = Seq.empty
   override def getType = TypeInfo(IntType(4), None)
   def toCPP = "new count_star_node"
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -372,6 +375,7 @@ case class CountStar(ctx: Context = null) extends SqlAgg {
   def sqlFromDialect(dialect: SqlDialect) = "count(*)"
 }
 case class CountExpr(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
+  def arguments = Seq(expr)
   override def getType = TypeInfo(IntType(4), None)
   def toCPP = "new count_expr_node(%s, %b)".format(expr.toCPP, distinct)
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -379,6 +383,7 @@ case class CountExpr(expr: SqlExpr, distinct: Boolean, ctx: Context = null) exte
   def sqlFromDialect(dialect: SqlDialect) = Seq(Some("count("), if (distinct) Some("distinct ") else None, Some(expr.sqlFromDialect(dialect)), Some(")")).flatten.mkString("")
 }
 case class Sum(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
+  def arguments = Seq(expr)
   override def getType = TypeInfo(expr.getType.tpe, None)
   def toCPP = "new sum_node(%s, %b)".format(expr.toCPP, distinct)
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -386,6 +391,7 @@ case class Sum(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends Sq
   def sqlFromDialect(dialect: SqlDialect) = Seq(Some("sum("), if (distinct) Some("distinct ") else None, Some(expr.sqlFromDialect(dialect)), Some(")")).flatten.mkString("")
 }
 case class Avg(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends SqlAgg {
+  def arguments = Seq(expr)
   override def getType = TypeInfo(DoubleType, None)
   def toCPP = "new avg_node(%s, %b)".format(expr.toCPP, distinct)
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -393,6 +399,7 @@ case class Avg(expr: SqlExpr, distinct: Boolean, ctx: Context = null) extends Sq
   def sqlFromDialect(dialect: SqlDialect) = Seq(Some("avg("), if (distinct) Some("distinct ") else None, Some(expr.sqlFromDialect(dialect)), Some(")")).flatten.mkString("")
 }
 case class Min(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
+  def arguments = Seq(expr)
   override def getType = expr.getType
   def toCPP = "new min_node(%s)".format(expr.toCPP)
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -400,6 +407,7 @@ case class Min(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
   def sqlFromDialect(dialect: SqlDialect) = "min(" + expr.sqlFromDialect(dialect) + ")"
 }
 case class Max(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
+  def arguments = Seq(expr)
   override def getType = expr.getType
   def toCPP = "new max_node(%s)".format(expr.toCPP)
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -407,6 +415,7 @@ case class Max(expr: SqlExpr, ctx: Context = null) extends SqlAgg {
   def sqlFromDialect(dialect: SqlDialect) = "max(" + expr.sqlFromDialect(dialect) + ")"
 }
 case class GroupConcat(expr: SqlExpr, sep: String, hexify: Boolean = false, ctx: Context = null) extends SqlAgg {
+  def arguments = Seq(expr)
   override def getType = TypeInfo(VariableLenString(), None)
   def toCPP = throw new RuntimeException("Should not happen")
   def copyWithContext(c: Context) = copy(ctx = c)
@@ -415,7 +424,7 @@ case class GroupConcat(expr: SqlExpr, sep: String, hexify: Boolean = false, ctx:
     case MySQLDialect =>
       Seq("group_concat(", Seq(expr.sqlFromDialect(dialect), quoteSingle(sep)).mkString(", "), ")").mkString("")
     case PostgresDialect =>
-      if (hexify) { 
+      if (hexify) {
         Seq("array_to_string(array_agg(encode(", expr.sqlFromDialect(dialect), ", 'hex')), ", quoteSingle(sep), ")").mkString("")
       } else {
         Seq("array_to_string(array_agg(", expr.sqlFromDialect(dialect), "), ", quoteSingle(sep), ")").mkString("")
@@ -423,12 +432,13 @@ case class GroupConcat(expr: SqlExpr, sep: String, hexify: Boolean = false, ctx:
   }
 }
 case class AggCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extends SqlAgg {
+  def arguments = args
   // incomplete list
   override def getType = name match {
     case "hom_agg" => TypeInfo(VariableLenString(), None)
-    case _         => super.getType 
+    case _         => super.getType
   }
-  def toCPP = "new agg_call_node(%s, %s)".format(quoteDbl(name), args.map(_.toCPP).mkString("{", ", ", "}")) 
+  def toCPP = "new agg_call_node(%s, %s)".format(quoteDbl(name), args.map(_.toCPP).mkString("{", ", ", "}"))
   def copyWithContext(c: Context) = copy(ctx = c)
   def gatherFields = args.flatMap(_.gatherFields)
   def sqlFromDialect(dialect: SqlDialect) = Seq(name, "(", args.map(_.sqlFromDialect(dialect)).mkString(", "), ")").mkString("")
@@ -443,7 +453,7 @@ trait SqlFunction extends SqlExpr {
 }
 
 case class FunctionCall(name: String, args: Seq[SqlExpr], ctx: Context = null) extends SqlFunction {
-  def toCPP = "new function_call_node(%s, %s)".format(quoteDbl(name), args.map(_.toCPP).mkString("{", ", ", "}")) 
+  def toCPP = "new function_call_node(%s, %s)".format(quoteDbl(name), args.map(_.toCPP).mkString("{", ", ", "}"))
   def copyWithContext(c: Context) = copy(ctx = c)
 }
 
@@ -558,7 +568,7 @@ case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
     assert(onion == Onions.DET || onion == Onions.OPE)
     val s = if (onion == Onions.DET) "det" else "ope"
     tpe match {
-      case IntType(1) => 
+      case IntType(1) =>
         "db_elem((int64_t)encrypt_u8_%s(ctx.crypto, %d, %d, %b))".format(s, v, fieldPos, join)
       case IntType(4) =>
         "db_elem((int64_t)encrypt_u32_%s(ctx.crypto, %d, %d, %b))".format(s, v, fieldPos, join)
@@ -571,7 +581,7 @@ case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
 
         "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, %d, %b), 16)))".format(v * 100, v.toString, fieldPos, join)
 
-      case t => 
+      case t =>
         throw new RuntimeException("invalid type for encryption: expected IntType, got: " + t)
     }
   }
@@ -590,7 +600,7 @@ case class FloatLiteral(v: Double, ctx: Context = null) extends LiteralExpr {
         // TODO: hack for TPC-H
         "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, %d, %b), 16)))".format((v * 100.0).toLong, v.toString, fieldPos, join)
 
-      case t => 
+      case t =>
         throw new RuntimeException("unsupported type for encrypting float literal: " + t)
     }
   }
@@ -614,7 +624,7 @@ case class StringLiteral(v: String, ctx: Context = null) extends LiteralExpr {
       case _: FixedLenString | _: VariableLenString =>
         "db_elem(encrypt_string_%s(ctx.crypto, %s, %d, %b))".format(
           s, quoteDbl(v), fieldPos, join)
-      case t => 
+      case t =>
         throw new RuntimeException("invalid type for encryption: expected some string type, got: " + t)
     }
   }
@@ -757,14 +767,14 @@ case class QueryParamPlaceholder(pos: Int, ctx: Context = null) extends SqlExpr 
   def sqlFromDialect(dialect: SqlDialect) = ":" + pos
 }
 
-// dummy placeholder in AST nodes. should be completely replaced 
+// dummy placeholder in AST nodes. should be completely replaced
 case class MetaFieldIdent(pos: Int, tpe: DataType, ctx: Context = null) extends SqlExpr {
   def this(cs: ColumnSymbol) = this(cs.fieldPosition, cs.tpe)
   override def getType = TypeInfo(tpe, None)
   def toCPP = throw new RuntimeException("Should not happen")
   def copyWithContext(c: Context) = copy(ctx = c)
-  def gatherFields = throw new RuntimeException("error") 
-  def sqlFromDialect(dialect: SqlDialect) = "<meta_field_ident>" 
+  def gatherFields = throw new RuntimeException("error")
+  def sqlFromDialect(dialect: SqlDialect) = "<meta_field_ident>"
 }
 
 case class SubqueryPosition(pos: Int, args: Seq[SqlExpr], ctx: Context = null) extends SqlExpr {
