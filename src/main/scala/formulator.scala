@@ -277,8 +277,10 @@ trait Formulator {
 
     // pre-computed columns
     pre.foreach { case (reln, cols) =>
+      println("relation " + reln + " precomputed expressions:")
       cols.foreach {
         case (name, os) =>
+          println("  %s: %s".format(name, globalOpts.precomputed(reln)(name)))
           Onions.toSeq(os).foreach { o =>
             assert(Onions.isSingleRowEncOnion(o))
             globalXAssignReg.getOrElseUpdate(reln, HashMap.empty).put((name, o), nextPos())
