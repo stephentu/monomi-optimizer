@@ -1648,10 +1648,42 @@ trait Generator extends Traversals
       cur.copy(groupBy = cur.groupBy.flatMap { gb =>
 
         // check if we can answer the keys
-        val serverKeys = gb.keys.map(k =>
-          getSupportedExpr(k, Onions.OPE, subqueryRelationPlans, None)
-            .orElse(getSupportedExpr(k, Onions.DET, subqueryRelationPlans, None))
-              .orElse(getSupportedExpr(k, Onions.PLAIN, subqueryRelationPlans, None)))
+        //
+        // currently, if we have an ORDER BY clause in the statement,
+        // we *must* use OPE before DET for correctness- this
+        // is because if a server side OPE is used and it happens to be on the group
+        // key, it will use the OPE version. if we want to do the follow on the server:
+        //
+        //   GROUP BY key1_DET
+        //   ORDER BY key1_OPE
+        //
+        // we will need to implement special logic. for now, we just use OPE.
+        // This leads to sub-optimal plan generation in general, but we seem
+        // to be able to get away with it for now in TPC-H, mostly because of the
+        // temporary solution below.
+        //
+        // TODO: Fix this
+        val serverKeys = gb.keys.map { k =>
+          if (cur.orderBy.filter { o =>
+                // check that all keys can be supported for server side order by
+                // is still conservative analysis
+                o.keys.foldLeft(true) { case (acc, f) =>
+                  acc && getSupportedExprConstraintAware(
+                    f._1, Onions.OPE, subqueryRelationPlans,
+                    Map.empty /* don't need it for this test */, true, None).isDefined
+                }
+              }.isDefined) {
+            getSupportedExpr(k, Onions.OPE, subqueryRelationPlans, None)
+              .orElse(getSupportedExpr(k, Onions.DET, subqueryRelationPlans, None))
+                .orElse(getSupportedExpr(k, Onions.PLAIN, subqueryRelationPlans, None))
+          } else {
+            // if there is no ORDER BY statement, then we have no need to use
+            // an OPE ever in the GROUP BY clause, unless we have a DET
+            getSupportedExpr(k, Onions.DET, subqueryRelationPlans, None)
+              .orElse(getSupportedExpr(k, Onions.OPE, subqueryRelationPlans, None))
+                .orElse(getSupportedExpr(k, Onions.PLAIN, subqueryRelationPlans, None))
+          }
+        }
 
         // TODO: we must check, that if this group by has a having clause,
         // and we pulled a clause out of the where clause, then we cannot run
