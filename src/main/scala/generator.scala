@@ -1157,31 +1157,38 @@ trait Generator extends Traversals
 
             //println("startingFields: " + startingFields.map(_._1.sql))
 
-            val fields = startingFields.flatMap {
-              case (f, aggContext) if !f.isLiteral =>
-                getSupportedExprConstraintAware(
-                  f, Onions.DET | Onions.OPE, analysis.subrels,
-                  analysis.groupKeys, aggContext, None)
-                .map(x => Seq((f, x, aggContext)))
-                .getOrElse {
-                  // break up into fields
-                  val primFields = f.gatherFields
-                  primFields.map { case (fi, innerAggContext) =>
-                    val x = getSupportedExprConstraintAware(
-                      fi, Onions.DET | Onions.OPE, analysis.subrels,
-                      analysis.groupKeys, aggContext || innerAggContext, None)
-                    .getOrElse {
-                      println("could not find DET/OPE enc for expr: " + fi)
-                      println("orig: " + f.sql)
-                      println("subrels: " + analysis.subrels)
-                      throw new RuntimeException("should not happen")
+            def proc(e: SqlExpr, aggContext: Boolean): Seq[(SqlExpr, (SqlExpr, OnionType), Boolean)] = {
+              if (e.isLiteral) return Seq.empty
+              getSupportedExprConstraintAware(
+                e, Onions.DET | Onions.OPE, analysis.subrels,
+                analysis.groupKeys, aggContext, None).map(x => Seq((e, x, aggContext)))
+              .getOrElse {
+                e match {
+                  // we really want some sort of getChildren() method on AST which
+                  // understands projections. gatherFields() would have been ideal for this,
+                  // except gatherFields() doesn't allow us to access pre-computed expressions.
+                  // Thus, we put in a placeholder hack for now
+                  // TODO: fix
+                  case b: Binop => proc(b.lhs, aggContext) ++ proc(b.rhs, aggContext)
+                  case _ =>
+                    val primFields = e.gatherFields
+                    primFields.map { case (fi, innerAggContext) =>
+                      val x = getSupportedExprConstraintAware(
+                        fi, Onions.DET | Onions.OPE, analysis.subrels,
+                        analysis.groupKeys, aggContext || innerAggContext, None)
+                      .getOrElse {
+                        println("could not find DET/OPE enc for expr: " + fi)
+                        println("orig: " + e.sql)
+                        println("subrels: " + analysis.subrels)
+                        throw new RuntimeException("should not happen")
+                      }
+                      (fi, x, aggContext || innerAggContext)
                     }
-                    (fi, x, aggContext || innerAggContext)
-                  }
                 }
-              case _ => Seq.empty
+              }
             }
 
+            val fields = startingFields.flatMap { case (e, a) => proc(e, a) }
             fields.map {
               case (f, (ft, o), aggContext) =>
                 if (aggContext && curRewriteCtx.respectStructure) {
