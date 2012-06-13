@@ -1145,26 +1145,48 @@ trait Generator extends Traversals
           }
 
           def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, OnionType, Boolean)] = {
-            val fields = resolveAliases(e).gatherFields
-            def translateField(fi: FieldIdent, aggContext: Boolean) = {
-              getSupportedExprConstraintAware(
-                fi, Onions.DET | Onions.OPE, analysis.subrels,
-                analysis.groupKeys, aggContext, None)
-              .getOrElse {
-                println("could not find DET/OPE enc for expr: " + fi)
-                println("orig: " + e.sql)
-                println("subrels: " + analysis.subrels)
-                throw new RuntimeException("should not happen")
+            //println("mkProjections called on e=(%s)".format(e.sql))
+
+            val startingFields =
+              resolveAliases(e) match {
+                case agg : SqlAgg =>
+                  // TODO: a hack for now
+                  agg.arguments.map(x => (x, true))
+                case expr => Seq((expr, false))
               }
+
+            //println("startingFields: " + startingFields.map(_._1.sql))
+
+            val fields = startingFields.flatMap {
+              case (f, aggContext) if !f.isLiteral =>
+                getSupportedExprConstraintAware(
+                  f, Onions.DET | Onions.OPE, analysis.subrels,
+                  analysis.groupKeys, aggContext, None)
+                .map(x => Seq((f, x, aggContext)))
+                .getOrElse {
+                  // break up into fields
+                  val primFields = f.gatherFields
+                  primFields.map { case (fi, innerAggContext) =>
+                    val x = getSupportedExprConstraintAware(
+                      fi, Onions.DET | Onions.OPE, analysis.subrels,
+                      analysis.groupKeys, aggContext || innerAggContext, None)
+                    .getOrElse {
+                      println("could not find DET/OPE enc for expr: " + fi)
+                      println("orig: " + f.sql)
+                      println("subrels: " + analysis.subrels)
+                      throw new RuntimeException("should not happen")
+                    }
+                    (fi, x, aggContext || innerAggContext)
+                  }
+                }
+              case _ => Seq.empty
             }
 
             fields.map {
-              case (f, inAggCtx) =>
-                if (inAggCtx && curRewriteCtx.respectStructure) {
-                  val (ft, o) = translateField(f, true)
+              case (f, (ft, o), aggContext) =>
+                if (aggContext && curRewriteCtx.respectStructure) {
                   (f, ExprProj(GroupConcat(ft, ",", f.getType.tpe.isStringType), None), o, true)
                 } else {
-                  val (ft, o) = translateField(f, false)
                   (f, ExprProj(ft, None), o, false)
                 }
             }
@@ -1271,6 +1293,8 @@ trait Generator extends Traversals
         // build an encryption vector for this subquery
         val encVec = collection.mutable.Seq.fill(subq.subquery.ctx.projections.size)(0)
 
+        // TODO: this is somewhat a duplicate of the traverseContext() found in
+        // generateOnionSets(). We should unify them somehow
         def traverseContext(
           start: Node,
           ctx: Context,
@@ -1279,7 +1303,7 @@ trait Generator extends Traversals
 
           if (start.ctx != ctx) return
 
-          def add(exprs: Seq[(SqlExpr, Int)]): Boolean = {
+          def add(exprs: Seq[(SqlExpr, Int)]) = {
             // look for references to elements from this subquery
             exprs.foreach {
               case (e, o) if o != Onions.DET =>
@@ -1307,7 +1331,6 @@ trait Generator extends Traversals
                 }
               case _ =>
             }
-            true
           }
 
           def procExprPrimitive(e: SqlExpr, o: Int) = {
@@ -1316,22 +1339,49 @@ trait Generator extends Traversals
               getPotentialCryptoOpts(r, Onions.ALL).foreach(add)
             }
 
-            getPotentialCryptoOpts(e, o) match {
-              case Some(exprs) => add(exprs)
-              case None =>
-                e match {
-                  case Subselect(ss, _)                 => selectFn(ss)
-                  case Exists(Subselect(ss, _), _)      => selectFn(ss)
+            def proc(e: SqlExpr, o: Int) = {
+              getPotentialCryptoOpts(e, o) match {
+                case Some(exprs) => add(exprs)
+                  // TODO: should we still traverse for subselects (as we do below)?
 
-                  // one-level deep binop optimizations
-                  case Plus(l, r, _)                    => binopOp(l, r)
-                  case Minus(l, r, _)                   => binopOp(l, r)
-                  case Mult(l, r, _)                    => binopOp(l, r)
-                  case Div(l, r, _)                     => binopOp(l, r)
+                case None =>
 
-                  case _                                =>
-                }
+                  // traverse for subselects
+                  topDownTraversal(e) {
+                    case Subselect(ss, _) =>
+                      selectFn(ss)
+                      false // we'll recurse in the invocation to selectFn()
+                    case _ => true
+                  }
+
+                  e match {
+
+                    // one-level deep binop optimizations
+                    // TODO: why do we need this?
+                    case Plus(l, r, _)  => binopOp(l, r)
+                    case Minus(l, r, _) => binopOp(l, r)
+                    case Mult(l, r, _)  => binopOp(l, r)
+                    case Div(l, r, _)   => binopOp(l, r)
+
+                    case Gt(l, r, _)    => binopOp(l, r)
+                    case Ge(l, r, _)    => binopOp(l, r)
+                    case Lt(l, r, _)    => binopOp(l, r)
+                    case Le(l, r, _)    => binopOp(l, r)
+
+                    case agg: SqlAgg =>
+                      agg.arguments.foreach { e =>
+                        // consider a pre-computation
+                        getPotentialCryptoOpts(e, Onions.DET).foreach(add)
+                      }
+
+                    // TODO: more opts?
+                    case _              =>
+                  }
+              }
             }
+
+            proc(e, o)
+            if ((o & Onions.HOM_AGG) != 0) proc(e, (o & ~Onions.HOM_AGG))
           }
 
           def procExpr(e: SqlExpr, o: Int) = {
@@ -2323,7 +2373,7 @@ trait Generator extends Traversals
   private def getPotentialCryptoOpts(e: SqlExpr, o: Int):
     Option[Seq[(SqlExpr, Int)]] = {
     val ret = getPotentialCryptoOpts0(e, o)
-    //println("getPotentialCryptoOpts: e=(%s), ret=(%s)".format(e.toString, ret.toString))
+    //println("getPotentialCryptoOpts0: e=(%s), ret=(%s)".format(e.toString, ret.toString))
     ret
   }
 
@@ -2394,7 +2444,7 @@ trait Generator extends Traversals
       case Max(expr, _) if test(Onions.OPE) =>
         getPotentialCryptoOpts0(expr, Onions.OPE)
 
-      case s @ Sum(expr, _, _) if test(Onions.HOM_AGG) =>
+      case Sum(expr, _, _) if test(Onions.HOM_AGG) =>
         getPotentialCryptoOpts0(expr, Onions.HOM_ROW_DESC)
 
       case Avg(expr, _, _) if test(Onions.HOM_AGG) =>
@@ -2906,7 +2956,7 @@ trait Generator extends Traversals
       var workingSet : Seq[OnionSet] = bootstrap
       val subselectSets = new ArrayBuffer[OnionSet]
 
-      def add(exprs: Seq[(SqlExpr, Int)]): Boolean = {
+      def add(exprs: Seq[(SqlExpr, Int)]) = {
         val e0 = exprs.map { case (e, o) => findOnionableExpr(e).map(e0 => (e0, o)) }.flatten
         if (e0.size == exprs.size) {
           e0.foreach {
@@ -2917,8 +2967,7 @@ trait Generator extends Traversals
                 workingSet.foreach(_.add(t, e, o))
               }
           }
-          true
-        } else false
+        }
       }
 
       def procExprPrimitive(e: SqlExpr, o: Int) = {
@@ -2927,38 +2976,49 @@ trait Generator extends Traversals
           getPotentialCryptoOpts(r, Onions.ALL).foreach(add)
         }
 
-        getPotentialCryptoOpts(e, o) match {
-          case Some(exprs) => add(exprs)
-            // TODO: should we still traverse for subselects (as we do below)?
+        def proc(e: SqlExpr, o: Int) = {
+          getPotentialCryptoOpts(e, o) match {
+            case Some(exprs) => add(exprs)
+              // TODO: should we still traverse for subselects (as we do below)?
 
-          case None =>
+            case None =>
 
-            // traverse for subselects
-            topDownTraversal(e) {
-              case Subselect(ss, _) =>
-                subselectSets ++= selectFn(ss, Seq(new OnionSet))
-                false // we'll recurse in the invocation to selectFn()
-              case _ => true
-            }
+              // traverse for subselects
+              topDownTraversal(e) {
+                case Subselect(ss, _) =>
+                  subselectSets ++= selectFn(ss, Seq(new OnionSet))
+                  false // we'll recurse in the invocation to selectFn()
+                case _ => true
+              }
 
-            e match {
+              e match {
 
-              // one-level deep binop optimizations
-              // TODO: why do we need this?
-              case Plus(l, r, _)  => binopOp(l, r)
-              case Minus(l, r, _) => binopOp(l, r)
-              case Mult(l, r, _)  => binopOp(l, r)
-              case Div(l, r, _)   => binopOp(l, r)
+                // one-level deep binop optimizations
+                // TODO: why do we need this?
+                case Plus(l, r, _)  => binopOp(l, r)
+                case Minus(l, r, _) => binopOp(l, r)
+                case Mult(l, r, _)  => binopOp(l, r)
+                case Div(l, r, _)   => binopOp(l, r)
 
-              case Gt(l, r, _)    => binopOp(l, r)
-              case Ge(l, r, _)    => binopOp(l, r)
-              case Lt(l, r, _)    => binopOp(l, r)
-              case Le(l, r, _)    => binopOp(l, r)
+                case Gt(l, r, _)    => binopOp(l, r)
+                case Ge(l, r, _)    => binopOp(l, r)
+                case Lt(l, r, _)    => binopOp(l, r)
+                case Le(l, r, _)    => binopOp(l, r)
 
-              // TODO: more opts?
-              case _              =>
-            }
+                case agg: SqlAgg =>
+                  agg.arguments.foreach { e =>
+                    // consider a pre-computation
+                    getPotentialCryptoOpts(e, Onions.DET).foreach(add)
+                  }
+
+                // TODO: more opts?
+                case _              =>
+              }
+          }
         }
+
+        proc(e, o)
+        if ((o & Onions.HOM_AGG) != 0) proc(e, (o & ~Onions.HOM_AGG))
       }
 
       def procExpr(e: SqlExpr, o: Int) = {
@@ -3037,7 +3097,15 @@ trait Generator extends Traversals
 
       //println("-----")
 
-      (s0 ++ s1.getOrElse(Seq.empty) ++ s2.getOrElse(Seq.empty) ++
+      // for each onion set with a hom group, return the orig onion set +
+      // one w/o the hom group
+      def toggleHomGroups(s: Seq[OnionSet]): Seq[OnionSet] = {
+        s.flatMap { os =>
+          if (!os.getHomGroups.isEmpty) Seq(os, os.withoutGroups) else Seq(os)
+        }
+      }
+
+      (toggleHomGroups(s0) ++ s1.getOrElse(Seq.empty) ++ s2.getOrElse(Seq.empty) ++
       s3.getOrElse(Seq.empty) ++ s4.getOrElse(Seq.empty)).filterNot(_.isEmpty)
     }
 
