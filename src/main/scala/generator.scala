@@ -1169,7 +1169,8 @@ trait Generator extends Traversals
                   // except gatherFields() doesn't allow us to access pre-computed expressions.
                   // Thus, we put in a placeholder hack for now
                   // TODO: fix
-                  case b: Binop => proc(b.lhs, aggContext) ++ proc(b.rhs, aggContext)
+                  case b: Binop    => proc(b.lhs, aggContext) ++ proc(b.rhs, aggContext)
+                  case agg: SqlAgg => agg.arguments.flatMap(x => proc(x, true))
                   case _ =>
                     val primFields = e.gatherFields
                     primFields.map { case (fi, innerAggContext) =>
@@ -1340,10 +1341,10 @@ trait Generator extends Traversals
             }
           }
 
-          def procExprPrimitive(e: SqlExpr, o: Int) = {
+          def procExprPrimitive(e: SqlExpr, o: Int): Unit = {
             def binopOp(l: SqlExpr, r: SqlExpr) = {
-              getPotentialCryptoOpts(l, Onions.ALL).foreach(add)
-              getPotentialCryptoOpts(r, Onions.ALL).foreach(add)
+              procExprPrimitive(l, Onions.ALL)
+              procExprPrimitive(r, Onions.ALL)
             }
 
             def proc(e: SqlExpr, o: Int) = {
@@ -2977,10 +2978,10 @@ trait Generator extends Traversals
         }
       }
 
-      def procExprPrimitive(e: SqlExpr, o: Int) = {
+      def procExprPrimitive(e: SqlExpr, o: Int): Unit = {
         def binopOp(l: SqlExpr, r: SqlExpr) = {
-          getPotentialCryptoOpts(l, Onions.ALL).foreach(add)
-          getPotentialCryptoOpts(r, Onions.ALL).foreach(add)
+          procExprPrimitive(l, Onions.ALL)
+          procExprPrimitive(r, Onions.ALL)
         }
 
         def proc(e: SqlExpr, o: Int) = {
