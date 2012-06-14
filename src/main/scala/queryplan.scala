@@ -1280,6 +1280,26 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
 
   def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     val ch = child.costEstimate(ctx, stats)
+
+    // need to charge the subqueries
+    val oneShot = collection.mutable.Seq.fill(subqueries.size)(false)
+    topDownTraversal(filter) {
+      case SubqueryPosition(p, args, _) =>
+        if (args.isEmpty) oneShot(p) = true; false
+      case ExistsSubqueryPosition(p, args, _) =>
+        if (args.isEmpty) oneShot(p) = true; false
+      case _ => true
+    }
+
+    val subCosts = subqueries.map(_.costEstimate(ctx, stats)).zipWithIndex.map {
+      case (costPerInvocation, idx) =>
+        if (oneShot(idx)) {
+          costPerInvocation.cost
+        } else {
+          costPerInvocation.cost * ch.rows
+        }
+    }.sum
+
     // assume that the group keys are always available, for now
     assert(ch.equivStmt.groupBy.isDefined)
     val stmt =
@@ -1295,7 +1315,8 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
     val (_, r, Some(rr), _, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
     // TODO: how do we cost filters?
-    Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
+    // TODO: merge SSI from the subqueries also
+    Estimate(ch.cost + subCosts, r, rr, stmt, ch.seqScanInfo)
   }
 
   def emitCPPHelpers(cg: CodeGenerator) =
