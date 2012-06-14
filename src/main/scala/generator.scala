@@ -6,6 +6,8 @@ import scala.collection.mutable.{
 trait Generator extends Traversals
   with PlanTraversals with Transformers with PlanTransformers with Timer {
 
+  val config: OptimizerConfiguration
+
   private def topDownTraverseContext(start: Node, ctx: Context)(f: Node => Boolean) = {
     topDownTraversal(start) {
       case e if e.ctx == ctx => f(e)
@@ -2970,7 +2972,7 @@ trait Generator extends Traversals
           e0.foreach {
             case ((_, t, e), o) =>
               if (o == Onions.HOM_ROW_DESC) {
-                workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
+                if (config.allowHomAggs) workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
               } else {
                 workingSet.foreach(_.add(t, e, o))
               }
