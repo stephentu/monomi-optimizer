@@ -923,29 +923,38 @@ trait Generator extends Traversals
                 tryPlain.getOrElse(bailOut)
               } else { bailOut }
 
+            // TODO: the other kind of case expression
+
             case CaseWhenExpr(cases, default, _) =>
+              assert(!cases.isEmpty)
+              val commonKey = cases.head.expr
               def tryWith(o: Int): Option[SqlExpr] = {
-                def processCaseExprCase(c: CaseExprCase) = {
+                def processCaseExprCase(c: CaseExprCase, first: Boolean) = {
+                  def withKey(x: RewriteContext) = if (first) x else x.withKey(commonKey)
                   val CaseExprCase(cond, expr, _) = c
                   doTransformServer(cond, curRewriteCtx.restrictTo(Onions.PLAIN)).flatMap {
                     case (c0, _) =>
-                      doTransformServer(expr, curRewriteCtx.restrictTo(o)).map {
+                      doTransformServer(expr, withKey(curRewriteCtx.restrictTo(o))).map {
                         case (e0, _) => CaseExprCase(c0, e0)
                       }
                   }
                 }
-                CollectionUtils.optSeq(cases.map(processCaseExprCase)).flatMap { cases0 =>
-                  default match {
-                    case Some(d) =>
-                      doTransformServer(d, curRewriteCtx.restrictTo(o)).map {
-                        case (d0, _) =>
-                          onionRetVal.set(OnionType.buildIndividual(o))
-                          CaseWhenExpr(cases0, Some(d0))
-                      }
-                    case None =>
-                      onionRetVal.set(OnionType.buildIndividual(o))
-                      Some(CaseWhenExpr(cases0, None))
-                  }
+                CollectionUtils.optSeq(
+                  cases.zipWithIndex.map { case (c, idx) =>
+                    processCaseExprCase(c, idx == 0)
+                  }).flatMap { cases0 =>
+                    default match {
+                      case Some(d) =>
+                        doTransformServer(
+                          d, curRewriteCtx.restrictTo(o).withKey(commonKey)).map {
+                            case (d0, _) =>
+                              onionRetVal.set(OnionType.buildIndividual(o))
+                              CaseWhenExpr(cases0, Some(d0))
+                          }
+                      case None =>
+                        onionRetVal.set(OnionType.buildIndividual(o))
+                        Some(CaseWhenExpr(cases0, None))
+                    }
                 }
               }
 
@@ -1147,21 +1156,12 @@ trait Generator extends Traversals
           def mkProjections(e: SqlExpr): Seq[(SqlExpr, SqlProj, OnionType, Boolean)] = {
             //println("mkProjections called on e=(%s)".format(e.sql))
 
-            val startingFields =
-              resolveAliases(e) match {
-                case agg : SqlAgg =>
-                  // TODO: a hack for now
-                  agg.arguments.map(x => (x, true))
-                case expr => Seq((expr, false))
-              }
-
-            //println("startingFields: " + startingFields.map(_._1.sql))
-
+            val startingFields = Seq((resolveAliases(e), false))
             def proc(e: SqlExpr, aggContext: Boolean): Seq[(SqlExpr, (SqlExpr, OnionType), Boolean)] = {
               if (e.isLiteral) return Seq.empty
-              getSupportedExprConstraintAware(
-                e, Onions.DET | Onions.OPE, analysis.subrels,
-                analysis.groupKeys, aggContext, None).map(x => Seq((e, x, aggContext)))
+              doTransformServer(
+                e, RewriteContext(Seq(Onions.DET, Onions.OPE), !aggContext, false))
+              .map(x => Seq((e, x, aggContext)))
               .getOrElse {
                 e match {
                   // we really want some sort of getChildren() method on AST which

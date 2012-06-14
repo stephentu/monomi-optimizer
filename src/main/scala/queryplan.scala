@@ -200,8 +200,18 @@ trait PgQueryPlanExtractor {
         case (acc, est) => mergePlus(acc, est._2._6)
       }
 
-      val tpe = node("Node Type")
+      // see if it has a hom_agg aggregate
+      // TODO: this is quite rigid.. we should REALLY be using our
+      // SQL parser to parse this expr, except it doesn't support the
+      // postgres extension ::cast syntax...
+      val HomAggRegex = "hom_agg\\(.*, '[a-zA-Z_]+'::character varying, \\d+, '([a-zA-Z0-9_]+)'::character varying\\)".r
 
+      // see if we have searchswp udf
+      // once again, this is fragile, use SQL parser in future
+      val SearchSWPRegex =
+        "searchswp\\([a-zA-Z0-9_.]+, '[^']*'::character varying, NULL::character varying, '([a-zA-Z0-9_]+)'::character varying\\)".r
+
+      val tpe = node("Node Type")
       tpe match {
         case "Aggregate" =>
           // must have outer child
@@ -212,18 +222,17 @@ trait PgQueryPlanExtractor {
           val (rOuter, rrOuter) =
             outerChildren.head match { case (_, r, rr, _, _, _) => (r, rr) }
 
-          // see if it has a hom_agg aggregate
-          // TODO: this is quite rigid.. we should REALLY be using our
-          // SQL parser to parse this expr, except it doesn't support the
-          // postgres extension ::cast syntax...
-          val HomAggRegex = "hom_agg\\(.*, '[a-zA-Z_]+'::character varying, \\d+, '([a-zA-Z0-9_]+)'::character varying\\)".r
           val aggs =
             (for (L(fields) <- node.get("Output").toList;
                   S(expr)   <- fields) yield {
               expr match {
                 case HomAggRegex(id) =>
-                  Some((id, UserAggDesc(rOuter, rrOuter, selMapFold)))
-                case _ => None
+                  Seq((id, UserAggDesc(rOuter, rrOuter, selMapFold)))
+                case _ =>
+                  SearchSWPRegex.findAllIn(expr).matchData.map { m =>
+                    val id = m.group(1)
+                    ((id, UserAggDesc(rOuter, rrOuter, selMapFold)))
+                  }
               }
             }).flatten.toMap
 
@@ -244,11 +253,6 @@ trait PgQueryPlanExtractor {
           assert(innerOuterChildren.isEmpty) // seq scans don't have children?
 
           val S(reln) = node("Relation Name")
-
-          // see if we have searchswp udf
-          // once again, this is fragile, use SQL parser in future
-          val SearchSWPRegex =
-            "searchswp\\([a-zA-Z0-9_.]+, '[^']*'::character varying, NULL::character varying, '([a-zA-Z0-9_]+)'::character varying\\)".r
 
           val filterName = if (tpe == "Seq Scan") "Filter" else "Index Cond"
 
@@ -1085,8 +1089,14 @@ case class LocalTransform(
     }
   }
 
-  def pretty0(lvl: Int) =
-    "* LocalTransform(cost = " + _lastCostEstimate + ", transformation = " + trfms + ")" + childPretty(lvl, child)
+  def pretty0(lvl: Int) = {
+    val trfmObjs = trfms.map {
+      case Left(p) => Left(p)
+      case Right((o, _, e)) => Right((o.sql, e.sql))
+    }
+    "* LocalTransform(cost = " + _lastCostEstimate +
+      ", transformation = " + trfmObjs + ")" + childPretty(lvl, child)
+  }
 
   def costEstimateImpl(ctx: EstimateContext, stats: Statistics) = {
     // we assume these operations are cheap
