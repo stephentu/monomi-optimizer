@@ -577,9 +577,12 @@ case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
 
       case DecimalType(15, 2) =>
         // TODO: hack for TPC-H
-        assert(onion == Onions.OPE) // laziness
-
-        "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, %d, %b), 16)))".format(v * 100, v.toString, fieldPos, join)
+        if (onion == Onions.DET) {
+          "db_elem((int64_t)encrypt_decimal_15_2_det(ctx.crypto, %d /*%s*/, %d, %b))".format(
+            v * 100, v.toString, fieldPos, join)
+        } else {
+          "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, %d, %b), 16)))".format(v * 100, v.toString, fieldPos, join)
+        }
 
       case t =>
         throw new RuntimeException("invalid type for encryption: expected IntType, got: " + t)
