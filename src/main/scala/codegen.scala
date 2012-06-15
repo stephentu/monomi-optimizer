@@ -52,6 +52,98 @@ class CodeGenerator(outputFile: File) extends PrettyPrinters {
 
 trait ProgramGenerator {
 
+  def generatePlainBenchmark(baseFolder: File, stmts: Seq[SelectStmt]): Unit = {
+    baseFolder.mkdirs()
+
+    def makeProgram() = {
+      val progFile = new File(baseFolder, "program.cc.generated")
+      val cg = new CodeGenerator(progFile)
+
+      cg.println("// WARNING: This is an auto-generated file")
+      cg.println("#include \"db_config.h\"")
+
+      cg.println("#include <cassert>")
+      cg.println("#include <cstdlib>")
+      cg.println("#include <iostream>")
+
+      cg.println("#include <edb/ConnectNew.hh>")
+      cg.println("#include <util/util.hh>")
+
+      stmts.zipWithIndex.foreach { case (stmt, idx) =>
+        assert(!stmt.projections.isEmpty)
+        cg.blockBegin("static void query_%d(ConnectNew& conn) {".format(idx))
+          cg.println("DBResultNew* dbres;")
+          cg.print("conn.execute(")
+          cg.printStr(stmt.sqlFromDialect(PostgresDialect))
+          cg.println(", dbres);")
+          cg.println("ResType res = dbres->unpack();")
+          cg.println("assert(res.ok);")
+          cg.blockBegin("for (auto &row : res.rows) {")
+            (0 until stmt.projections.size).foreach { c =>
+              cg.println("std::cout << row[%d].data;".format(c))
+              if ((c + 1) == stmt.projections.size) {
+                cg.println("std::cout << std::endl;")
+              } else {
+                cg.println("std::cout << \"|\";")
+              }
+            }
+          cg.blockEnd("}")
+          cg.println("std::cout << \"(\" << res.rows.size() << \" rows)\" << std::endl;")
+        cg.blockEnd("}")
+      }
+
+      cg.blockBegin("int main(int argc, char **argv) {")
+
+        cg.blockBegin("if (argc != 2) {")
+          cg.println("std::cerr << \"[Usage]: \" << argv[0] << \" [query num]\" << std::endl;")
+          cg.println("return 1;")
+        cg.blockEnd("}")
+
+        cg.println("int q = atoi(argv[1]);")
+        cg.println("PGConnect pg(DB_HOSTNAME, DB_USERNAME, DB_PASSWORD, DB_DATABASE, DB_PORT);")
+
+        cg.blockBegin("switch (q) {")
+          (0 until stmts.size).foreach { i =>
+            cg.println("case %d: query_%d(pg); break;".format(i, i))
+          }
+          cg.println("default: assert(false);")
+        cg.blockEnd("}")
+
+        cg.println("return 0;")
+
+      cg.blockEnd("}")
+    }
+
+    def makeConfig() = {
+      val configFile = new File(baseFolder, "db_config.h.sample")
+      val cg = new CodeGenerator(configFile)
+      cg.println("// copy this file to db_config.h, filling in the appropriate values")
+      cg.println("#define DB_HOSTNAME \"localhost\"")
+      cg.println("#define DB_USERNAME \"user\"")
+      cg.println("#define DB_PASSWORD \"pass\"")
+      cg.println("#define DB_DATABASE \"db\"")
+      cg.println("#define DB_PORT     5432")
+    }
+
+    def makeMakefile() = {
+      val makefile = new File(baseFolder, "Makefrag.sample")
+      val cg = new CodeGenerator(makefile)
+      val dirname = baseFolder.getName
+      val dirnameCaps = dirname.toUpperCase
+
+      cg.println("OBJDIRS += " + dirname)
+      cg.println(dirnameCaps + "PROGS := program")
+      cg.println(dirnameCaps + "PROGOBJS := $(patsubst %,$(OBJDIR)/" + dirname + "/%,$(" + dirnameCaps + "PROGS))")
+      cg.println("all: $(" + dirnameCaps + "PROGOBJS)")
+      cg.println("$(" + dirnameCaps + "PROGOBJS): %: %.o $(OBJDIR)/libcryptdb.so $(OBJDIR)/libedbutil.so")
+      cg.println("\t$(CXX) $< -o $@ -ledbparser  $(LDFLAGS) -ledbutil -lcryptdb -lmysqlclient -ltbb -lgmp -lpq")
+    }
+
+    makeProgram()
+    makeConfig()
+    makeMakefile()
+  }
+
   def generate(baseFolder: File, plans: Seq[PlanNode]): Unit = {
     baseFolder.mkdirs()
 
@@ -142,13 +234,16 @@ trait ProgramGenerator {
     }
 
     def makeMakefile() = {
-      val makefile = new File(baseFolder, "Makefrag")
+      val makefile = new File(baseFolder, "Makefrag.sample")
       val cg = new CodeGenerator(makefile)
-      cg.println("OBJDIRS += generated")
-      cg.println("GENERATEDPROGS := program")
-      cg.println("GENERATEDPROGOBJS := $(patsubst %,$(OBJDIR)/generated/%,$(GENERATEDPROGS))")
-      cg.println("all: $(GENERATEDPROGOBJS)")
-      cg.println("$(GENERATEDPROGOBJS): %: %.o $(OBJDIR)/libedbparser.so  $(OBJDIR)/libedbutil.so $(OBJDIR)/libexecution.so")
+      val dirname = baseFolder.getName
+      val dirnameCaps = dirname.toUpperCase
+
+      cg.println("OBJDIRS += " + dirname)
+      cg.println(dirnameCaps + "PROGS := program")
+      cg.println(dirnameCaps + "PROGOBJS := $(patsubst %,$(OBJDIR)/" + dirname + "/%,$(" + dirnameCaps + "PROGS))")
+      cg.println("all: $(" + dirnameCaps + "PROGOBJS)")
+      cg.println("$(" + dirnameCaps + "PROGOBJS): %: %.o $(OBJDIR)/libcryptdb.so $(OBJDIR)/libedbparser.so $(OBJDIR)/libedbutil.so $(OBJDIR)/libexecution.so")
       cg.println("\t$(CXX) $< -o $@ -ledbparser  $(LDFLAGS) -ledbutil -lcryptdb -ledbcrypto -ledbcrypto2 -lexecution -lmysqlclient -ltbb -lgmp -lpq")
     }
 
