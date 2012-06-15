@@ -448,9 +448,34 @@ order by
   p_size;
 """
 
+//  val q17 = """
+//select
+//  sum(l_extendedprice) / 7.0 as avg_yearly
+//from
+//  lineitem,
+//  part
+//where
+//  p_partkey = l_partkey
+//  and p_brand = 'Brand#45'
+//  and p_container = 'LG BOX'
+//  and l_quantity < (
+//    select
+//      0.2 * avg(l_quantity)
+//    from
+//      lineitem
+//    where
+//      l_partkey = p_partkey
+//  );
+//"""
+
+// proposed rewrite- it's missing:
+//   group_concat(l_quantity)
+//   group_concat(l_extendedprice)
+//
+// but forms the basis for a reasonable comparison
   val q17 = """
 select
-  sum(l_extendedprice) / 7.0 as avg_yearly
+  l_partkey, 0.2 * avg(l_quantity)
 from
   lineitem,
   part
@@ -458,14 +483,7 @@ where
   p_partkey = l_partkey
   and p_brand = 'Brand#45'
   and p_container = 'LG BOX'
-  and l_quantity < (
-    select
-      0.2 * avg(l_quantity)
-    from
-      lineitem
-    where
-      l_partkey = p_partkey
-  );
+group by l_partkey;
 """
 
   val q18 = """
