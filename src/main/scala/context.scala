@@ -11,11 +11,11 @@ abstract trait Symbol {
 // note that this column is not necessarily projected in this context
 case class ColumnSymbol(relation: String, column: String, ctx: Context, tpe: DataType) extends Symbol {
   assert(tpe != UnknownType)
-  def fieldPosition: Int = 
+  def fieldPosition: Int =
     ctx.lookupPosition(relation, column).getOrElse {
       0  // precomputed values go here- we assume field pos of 0
     }
-  def partOfPK: Boolean = 
+  def partOfPK: Boolean =
     ctx.lookupPartOfPK(relation, column).getOrElse {
       false  // precomputed values go here- we assume they are not part of pkey
     }
@@ -30,7 +30,7 @@ abstract trait ProjectionType
 case class NamedProjection(name: String, expr: SqlExpr, pos: Int) extends ProjectionType
 case object WildcardProjection extends ProjectionType
 
-class Context(val parent: Either[Definitions, Context]) {
+class Context(val parent: Either[(Definitions, Statistics), Context]) {
   val relations = new HashMap[String, Relation]
   val projections = new ArrayBuffer[ProjectionType]
 
@@ -101,12 +101,13 @@ class Context(val parent: Either[Definitions, Context]) {
     }.headOption
   }
 
-  val defns = lookupDefns()
+  val (defns, stats) = lookupInfo()
 
-  private def lookupDefns(): Definitions = parent match {
-    case Left(d) => d
-    case Right(p) => p.lookupDefns()
-  }
+  private def lookupInfo(): (Definitions, Statistics) =
+    parent match {
+      case Left((d, s)) => (d, s)
+      case Right(p)     => p.lookupInfo()
+    }
 
   // finds an column by name
   def lookupColumn(qual: Option[String], name: String, inProjScope: Boolean): Seq[Symbol] =

@@ -1766,7 +1766,62 @@ trait Generator extends Traversals
                   Some(expr)
                 case Right((optExpr, comp)) =>
                   newLocalGroupByHaving += comp
-                  optExpr.map(_._1)
+                  optExpr.map(_._1).orElse {
+                    if (config.sumFilterOpt) {
+                      def procSumOpt(fi: FieldIdent, const: SqlExpr, eq: Boolean):
+                        Option[SqlExpr] = {
+                        println("procSumOpt(fi=(%s), const=(%s))".format(fi.sql, const.sql))
+                        assert(const.isLiteral)
+                        const.evalLiteral.flatMap { dbElem =>
+                          val v = dbElem match {
+                            case IntElem(v)    => Some(v.toDouble)
+                            case DoubleElem(v) => Some(v)
+                            case _             => None
+                          }
+                          println("const v=" + v)
+                          v.flatMap { k =>
+                            Option(fi.symbol).flatMap { x => x match {
+                              case ColumnSymbol(reln, col, ctx, _) =>
+                                println("column symbol found")
+                                ctx.stats.stats.get(reln).flatMap(_.column_stats.get(col).flatMap { cs =>
+                                  val largestValue =
+                                    ctx.defns.lookup(reln, col).get.tpe match {
+                                      case IntType(i) if i <= 4 =>
+                                        cs.most_common_vals.map { s =>
+                                          s.asInstanceOf[Seq[Int]].max.toDouble
+                                        }
+                                      case IntType(_) =>
+                                        cs.most_common_vals.map { s =>
+                                          s.asInstanceOf[Seq[Long]].max.toDouble
+                                        }
+                                      case _: DecimalType =>
+                                        cs.most_common_vals.map { s =>
+                                          s.asInstanceOf[Seq[Double]].max
+                                        }
+                                      case _ => None
+                                    }
+                                  largestValue.map { v =>
+                                    Ge(CountStar(), IntLiteral(math.ceil(k / v).toLong))
+                                  }
+                                })
+                              case _ => None
+                            }}
+                          }
+                        }
+                      }
+                      x match {
+                        case Gt(Sum(fi: FieldIdent, false, _), const, _)
+                          if const.isLiteral => procSumOpt(fi, const, false)
+                        case Lt(const, Sum(fi: FieldIdent, false, _), _)
+                          if const.isLiteral => procSumOpt(fi, const, false)
+                        case Ge(Sum(fi: FieldIdent, false, _), const, _)
+                          if const.isLiteral => procSumOpt(fi, const, true)
+                        case Le(const, Sum(fi: FieldIdent, false, _), _)
+                          if const.isLiteral => procSumOpt(fi, const, true)
+                        case _ => None
+                      }
+                    } else None
+                  }
               }
             }
 

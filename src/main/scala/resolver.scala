@@ -3,15 +3,20 @@ package edu.mit.cryptdb
 trait Resolver extends Transformers with Traversals with FunctionUtils {
   case class ResolutionException(msg: String) extends RuntimeException(msg)
 
-  def resolve(stmt: SelectStmt, schema: Definitions): SelectStmt = {
+  def resolve(stmt: SelectStmt,
+              schema: Definitions,
+              stats: Statistics = Statistics.empty): SelectStmt = {
+
     // init contexts
     val n1 = topDownTransformationWithParent(stmt)((parent: Option[Node], child: Node) => child match {
       case s: SelectStmt =>
         parent match {
           case _: SubqueryRelationAST =>
-            (Some(s.copyWithContext(new Context(Left(schema)))), true)
+            (Some(s.copyWithContext(
+              new Context(Left((schema, stats))))), true)
           case _ =>
-            (Some(s.copyWithContext(new Context(parent.map(c => Right(c.ctx)).getOrElse(Left(schema))))), true)
+            (Some(s.copyWithContext(
+              new Context(parent.map(c => Right(c.ctx)).getOrElse(Left((schema, stats)))))), true)
         }
       case e =>
         (Some(e.copyWithContext(parent.map(_.ctx).getOrElse(throw new RuntimeException("should have ctx")))), true)
