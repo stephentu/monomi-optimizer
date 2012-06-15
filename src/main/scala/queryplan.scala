@@ -445,97 +445,105 @@ case class RemoteSql(stmt: SelectStmt,
       }.asInstanceOf[N]
 
     var useSchema: Option[Definitions] = None
-    val reverseStmt = topDownTransformation(stmt) {
-      case a @ AggCall("hom_agg", args, _) =>
-        // need to assign a unique ID to this hom agg
-        (Some(a.copy(args = args ++ Seq(StringLiteral(ctx.uniqueId())))), true)
 
-      case s @ FunctionCall("searchSWP", args, _) =>
-        // need to assign a unique ID to this UDF
-        (Some(s.copy(args = args ++ Seq(NullLiteral(), StringLiteral(ctx.uniqueId())))), true)
+    def proc[N <: Node](n: Node): N = {
+      topDownTransformation(n) {
+        case a @ AggCall("hom_agg", args, _) =>
+          // need to assign a unique ID to this hom agg
+          (Some(a.copy(args = args ++ Seq(StringLiteral(ctx.uniqueId())))), true)
 
-      case FieldIdent(Some(qual), name, _, _) =>
-        // check precomputed first
-        val qual0 = basename(qual)
-        val name0 = basename(name)
-        ctx.globalOpts.precomputed.get(qual0).flatMap(_.get(name0))
-          .map(x => (Some(rewriteWithQual(x, qual0)), false))
-          .getOrElse {
-            // rowids are rewritten to 0
-            if (ctx.homGroups.contains(qual0) && name0 == "row_id") {
-              ((Some(IntLiteral(0)), false))
-            } else if (qual != qual0 || name != name0) {
-              ((Some(FieldIdent(Some(qual0), name0)), false))
-            } else ((None, false))
+        case s @ FunctionCall("searchSWP", args, _) =>
+          // need to assign a unique ID to this UDF
+          (Some(s.copy(args = args ++ Seq(NullLiteral(), StringLiteral(ctx.uniqueId())))), true)
+
+        case FieldIdent(Some(qual), name, _, _) =>
+          // check precomputed first
+          val qual0 = basename(qual)
+          val name0 = basename(name)
+          ctx.globalOpts.precomputed.get(qual0).flatMap(_.get(name0))
+            .map(x => (Some(rewriteWithQual(x, qual0)), false))
+            .getOrElse {
+              // rowids are rewritten to 0
+              if (ctx.homGroups.contains(qual0) && name0 == "row_id") {
+                ((Some(IntLiteral(0)), false))
+              } else if (qual != qual0 || name != name0) {
+                ((Some(FieldIdent(Some(qual0), name0)), false))
+              } else ((None, false))
+            }
+
+        case TableRelationAST(name, alias, _) =>
+          val SRegex = "subrelation\\$(\\d+)".r
+          name match {
+            case SRegex(srpos) =>
+              // need to replace with SubqueryRelationAST
+              (Some(SubqueryRelationAST(subrelations(srpos.toInt)._2, alias.get)), false)
+            case _ =>
+              val name0 = basename(name)
+              if (ctx.defns.tableExists(name0)) {
+                (Some(TableRelationAST(name0, alias)), false)
+              } else {
+                (None, false)
+              }
           }
 
-      case TableRelationAST(name, alias, _) =>
-        val SRegex = "subrelation\\$(\\d+)".r
-        name match {
-          case SRegex(srpos) =>
-            // need to replace with SubqueryRelationAST
-            (Some(SubqueryRelationAST(subrelations(srpos.toInt)._2, alias.get)), false)
-          case _ =>
-            val name0 = basename(name)
-            if (ctx.defns.tableExists(name0)) {
-              (Some(TableRelationAST(name0, alias)), false)
-            } else {
-              (None, false)
-            }
-        }
+        case In(e, Seq(NamedSubselectPlaceholder(name, _)), n, _) =>
+          val ch = namedSubselects(name)._1.costEstimate(ctx, stats)
+          println("IN clause for namedSubselect=(%s) contains (%d) elements".format(name, ch.rows.toInt))
+          if (ch.rows.toInt > 10000) {
+            // if we have too many elements for the IN clause, then we just stash the
+            // values into a temp table
+            // TODO: don't always assume that value is a bunch of ints
+            val (schema, tempTableName) =
+              RemoteSql.makeIntTemporaryTable(10000, ctx.defns.dbconn.get)
 
-      case In(e, Seq(NamedSubselectPlaceholder(name, _)), n, _) =>
-        val ch = namedSubselects(name)._1.costEstimate(ctx, stats)
-        println("IN clause for namedSubselect=(%s) contains (%d) elements".format(name, ch.rows.toInt))
-        if (ch.rows.toInt > 10000) {
-          // if we have too many elements for the IN clause, then we just stash the
-          // values into a temp table
-          // TODO: don't always assume that value is a bunch of ints
-          val (schema, tempTableName) =
-            RemoteSql.makeIntTemporaryTable(10000, ctx.defns.dbconn.get)
+            useSchema = Some(schema)
 
-          useSchema = Some(schema)
+            (Some(In(e, Seq(Subselect(
+              SelectStmt(
+                Seq(ExprProj(FieldIdent(None, "col0"), None)),
+                Some(Seq(TableRelationAST(tempTableName, None))),
+                None,
+                None,
+                None,
+                None))), false)), true)
+          } else {
+            (Some(In(e, (1 to ch.rows.toInt).map(x => IntLiteral(x * 2)).toSeq, n)), true)
+          }
 
-          (Some(In(e, Seq(Subselect(
-            SelectStmt(
-              Seq(ExprProj(FieldIdent(None, "col0"), None)),
-              Some(Seq(TableRelationAST(tempTableName, None))),
-              None,
-              None,
-              None,
-              None))), false)), true)
-        } else {
-          (Some(In(e, (1 to ch.rows.toInt).map(x => IntLiteral(x * 2)).toSeq, n)), true)
-        }
+        case NamedSubselectPlaceholder(name, _) =>
+          // TODO: we should generate something smarter than this
+          // - at least the # should be a reasonable number for what it is
+          // - replacing
+          // TODO: we should also generate the right TYPE of literal placeholder
+          (Some(IntLiteral(12345)), false)
 
-      case NamedSubselectPlaceholder(name, _) =>
-        // TODO: we should generate something smarter than this
-        // - at least the # should be a reasonable number for what it is
-        // - replacing
-        // TODO: we should also generate the right TYPE of literal placeholder
-        (Some(IntLiteral(12345)), false)
+        case FunctionCall("encrypt", Seq(e, _, _), _) =>
+          (Some(e), false)
 
-      case FunctionCall("encrypt", Seq(e, _, _), _) =>
-        (Some(e), false)
+        case _: BoundDependentFieldPlaceholder =>
+          // TODO: we should generate something smarter than this
+          // - at least the # should be a reasonable number for what it is
+          // - replacing
+          // TODO: we should also generate the right TYPE of literal placeholder
+          (Some(IntLiteral(12345)), false)
 
-      case _: BoundDependentFieldPlaceholder =>
-        // TODO: we should generate something smarter than this
-        // - at least the # should be a reasonable number for what it is
-        // - replacing
-        // TODO: we should also generate the right TYPE of literal placeholder
-        (Some(IntLiteral(12345)), false)
+        case FunctionCall("hom_row_desc_lit", Seq(e), _) =>
+          (Some(e), false)
 
-      case FunctionCall("hom_row_desc_lit", Seq(e), _) =>
-        (Some(e), false)
+        case gc : GroupConcat =>
+          // don't pass hexify to the plain text query
+          (Some(gc.copy(hexify = false)), true)
 
-      case gc : GroupConcat =>
-        // don't pass hexify to the plain text query
-        (Some(gc.copy(hexify = false)), true)
+        case AggCall("agg_ident", Seq(e), _) =>
+          // no need to pass agg_ident
+          (Some(proc[SqlExpr](e)), true)
 
-      case _ => (None, true)
-    }.asInstanceOf[SelectStmt]
+        case _ => (None, true)
+      }.asInstanceOf[N]
+    }
 
-    val reverseStmt0 = resolveCheck(reverseStmt, useSchema.getOrElse(ctx.defns))
+    val reverseStmt0 =
+      resolveCheck(proc[SelectStmt](stmt), useSchema.getOrElse(ctx.defns))
 
     // server query execution cost
     val (c, r, rr, m, ssi) =

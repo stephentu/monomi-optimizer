@@ -302,15 +302,41 @@ trait Generator extends Traversals
       aggContext: Boolean,
       keyConstraint: Option[(Int, DataType)]): Option[(SqlExpr, OnionType)] = {
       // need to check if we are constrained by group keys
-      e match {
-        case FieldIdent(_, _, sym, _) if aggContext =>
-          groupKeys.get(sym) match {
-            case Some((expr, o0)) if o0.isOneOf(o) => Some((expr, o0))
-            case Some(_)                           => None // cannot support
-            case None                              =>
-              getSupportedExpr(e, o, subrels, keyConstraint)
-          }
-        case _ => getSupportedExpr(e, o, subrels, keyConstraint)
+
+      val ret = getSupportedExpr(e, o, subrels, keyConstraint)
+      ret.map { case (expr, onion) =>
+        (e match {
+          case FieldIdent(_, _, sym, _) if aggContext =>
+            groupKeys.get(sym).map { case (_, onion0) =>
+              if (onion != onion0) {
+                // consider:
+                //
+                //   select col0_det
+                //   from ...
+                //   where ...
+                //   group by col0_ope
+                //
+                // this is technically disallowed by postgres, because col0_det
+                // does not appear in the group keys. however, we will *always*
+                // want to do this if we have a DET column available, since
+                // it's cheaper to decrypt DET than OPE. to get around this, we
+                // use the following hack:
+                //
+                //   select agg_ident(col0_det)
+                //   from ...
+                //   where ...
+                //   group by col0_ope
+                //
+                // where agg_ident() is a UDF which simply keeps the first value it
+                // sees and uses that as the return value
+
+                AggCall("agg_ident", Seq(expr))
+              } else {
+                expr
+              }
+            }.getOrElse(expr)
+          case _ => expr
+        }, onion)
       }
     }
 
@@ -1770,7 +1796,6 @@ trait Generator extends Traversals
                     if (config.sumFilterOpt) {
                       def procSumOpt(fi: FieldIdent, const: SqlExpr, eq: Boolean):
                         Option[SqlExpr] = {
-                        println("procSumOpt(fi=(%s), const=(%s))".format(fi.sql, const.sql))
                         assert(const.isLiteral)
                         const.evalLiteral.flatMap { dbElem =>
                           val v = dbElem match {
@@ -1778,11 +1803,9 @@ trait Generator extends Traversals
                             case DoubleElem(v) => Some(v)
                             case _             => None
                           }
-                          println("const v=" + v)
                           v.flatMap { k =>
                             Option(fi.symbol).flatMap { x => x match {
                               case ColumnSymbol(reln, col, ctx, _) =>
-                                println("column symbol found")
                                 ctx.stats.stats.get(reln).flatMap(_.column_stats.get(col).flatMap { cs =>
                                   val largestValue =
                                     ctx.defns.lookup(reln, col).get.tpe match {
