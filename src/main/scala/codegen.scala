@@ -89,6 +89,7 @@ trait ProgramGenerator {
             }
           cg.blockEnd("}")
           cg.println("std::cout << \"(\" << res.rows.size() << \" rows)\" << std::endl;")
+          cg.println("delete dbres;")
         cg.blockEnd("}")
       }
 
