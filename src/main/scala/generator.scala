@@ -1637,10 +1637,19 @@ trait Generator extends Traversals
           val p = unwrap(rm)
           val td = p.tupleDesc
           if (td.size == origSS.projections.size &&
-              td.filter(_.onion != PlainOnion).isEmpty) {
+              td.filterNot(_.onion.isOneOf(Onions.PLAIN | Onions.DET | Onions.OPE)).isEmpty) {
             // TODO: not 100% sure this guarantees us that we have
             // exactly the original query in the clear, but it seems to be
             // a reasonable check
+
+            // do any necessary decryptions
+            var res = {
+              val dv = td.zipWithIndex.flatMap {
+                case (x, idx) if x != PlainOnion => Some(idx)
+                case (_, idx) => None
+              }
+              if (dv.isEmpty) p else LocalDecrypt(dv, p)
+            }
 
             // now we just translate each of the operations as local ops, re-writting
             // all references to the subquery in terms of tuple positions
@@ -1659,7 +1668,7 @@ trait Generator extends Traversals
             }
 
             // where clause
-            var res =
+            res =
               cur.filter.map(f => LocalFilter(rewritePre[SqlExpr](f), f, p, Seq.empty)).getOrElse(p)
 
             // group by clause
@@ -2625,8 +2634,12 @@ trait Generator extends Traversals
 
     val perms /* Seq[ Seq[Seq[(Set[String], OnionSet)]] ] */ =
       onionSets.map { os /* Seq[OnionSet] */ =>
-        CollectionUtils.powerSetMinusEmpty(
-          os.map(x => (x.groupsForRelations.toSet, x.withoutGroups)))
+        if (config.greedyOnionSelection) {
+          Seq(os.map(x => (x.groupsForRelations.toSet, x.withoutGroups)))
+        } else {
+          CollectionUtils.powerSetMinusEmpty(
+            os.map(x => (x.groupsForRelations.toSet, x.withoutGroups)))
+        }
       }
 
     // the candidates don't have groups in them, but have
@@ -3004,7 +3017,12 @@ trait Generator extends Traversals
     //  println()
     //}
 
-    val perms = mkPowerSetOnionSet(o)
+    val perms =
+      if (config.greedyOnionSelection) {
+        Seq(o) // consider only merging *all* onions
+      } else {
+        mkPowerSetOnionSet(o)
+      }
 
     // merge all perms, then unique
     val candidates = CollectionUtils.uniqueInOrder(perms.map(p => OnionSet.mergeSeq(p)))
@@ -3049,10 +3067,14 @@ trait Generator extends Traversals
         if (e0.size == exprs.size) {
           e0.foreach {
             case ((_, t, e), o) =>
-              if (o == Onions.HOM_ROW_DESC) {
-                if (config.allowHomAggs) workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
-              } else {
-                workingSet.foreach(_.add(t, e, o))
+              // check if would require precomputation
+              val requiresPrecomputation = !e.isInstanceOf[FieldIdent]
+              if (config.rowLevelPrecomputation || !requiresPrecomputation) {
+                if (o == Onions.HOM_ROW_DESC) {
+                  if (config.allowHomAggs) workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
+                } else {
+                  workingSet.foreach(_.add(t, e, o))
+                }
               }
           }
         }
