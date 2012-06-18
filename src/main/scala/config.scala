@@ -14,7 +14,7 @@ trait DefaultOptimizerConfiguration {
     OptimizerConfiguration(
       true, /* Allow use of hom aggregates */
       true, /* Allow row-level precomputation */
-      true, /* Allow column-store-ish hom aggs (with packing) */
+      true, /* Allow column-store-ish hom aggs (with col/row level packing) */
       true, /* Allow sum(x) > const optimizations */
       false /* Non-greedy, ie use cost-based model to select onion set */
     )

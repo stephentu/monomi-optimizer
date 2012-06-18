@@ -1221,7 +1221,11 @@ trait Generator extends Traversals
             fields.map {
               case (f, (ft, o), aggContext) =>
                 if (aggContext && curRewriteCtx.respectStructure) {
-                  (f, ExprProj(GroupConcat(ft, ",", f.getType.tpe.isStringType), None), o, true)
+                  if (f.getType.tpe == DecimalType(15, 2)) {
+                    (f, ExprProj(AggCall("group_serializer", Seq(ft)), None), o, true)
+                  } else {
+                    (f, ExprProj(GroupConcat(ft, ",", f.getType.tpe.isStringType), None), o, true)
+                  }
                 } else {
                   (f, ExprProj(ft, None), o, false)
                 }
@@ -1645,7 +1649,7 @@ trait Generator extends Traversals
             // do any necessary decryptions
             var res = {
               val dv = td.zipWithIndex.flatMap {
-                case (x, idx) if x != PlainOnion => Some(idx)
+                case (x, idx) if x.onion != PlainOnion => Some(idx)
                 case (_, idx) => None
               }
               if (dv.isEmpty) p else LocalDecrypt(dv, p)
@@ -1669,7 +1673,7 @@ trait Generator extends Traversals
 
             // where clause
             res =
-              cur.filter.map(f => LocalFilter(rewritePre[SqlExpr](f), f, p, Seq.empty)).getOrElse(p)
+              cur.filter.map(f => LocalFilter(rewritePre[SqlExpr](f), f, res, Seq.empty)).getOrElse(res)
 
             // group by clause
             res =
@@ -1911,7 +1915,13 @@ trait Generator extends Traversals
             def procProjs(p: Seq[(SqlExpr, SqlProj, OnionType, Boolean)]) = {
               p.map {
                 case t @ (origExpr, ep @ ExprProj(e, _, _), onion, v) if !v =>
-                  def wrapWithGroupConcat(e: SqlExpr, h: Boolean) = GroupConcat(e, ",", h)
+                  def wrapWithGroupConcat(e: SqlExpr, tpe: DataType) = {
+                    if (tpe == DecimalType(15, 2)) {
+                      AggCall("group_serializer", Seq(e))
+                    } else {
+                      GroupConcat(e, ",", tpe.isStringType)
+                    }
+                  }
                   origExpr match {
                     case FieldIdent(_, _, sym, _) =>
                       assert(sym ne null)
@@ -1922,12 +1932,12 @@ trait Generator extends Traversals
                         assert(!eq || (onion == o)) // same expr should => same onion
                         eq
                       }.map { _ => t }.getOrElse {
-                        t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, origExpr.getType.tpe.isStringType)),
+                        t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, origExpr.getType.tpe)),
                                _4 = true)
                       }
                     case _ =>
                       // TODO: what if we group by on a precomputed expr?
-                      t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, origExpr.getType.tpe.isStringType)),
+                      t.copy(_2 = ep.copy(expr = wrapWithGroupConcat(e, origExpr.getType.tpe)),
                              _4 = true)
                   }
                 case e => e
@@ -2740,41 +2750,45 @@ trait Generator extends Traversals
     val globalExprSplits /* Map[String, Set[ Set[Set[Int]] ]] */ =
       globalExprIndex.map { case (k, v) =>
         assert(v.values.size == v.values.toSet.size)
-        val exprs = v.values.toSet
-        val allNonDupGroupings = CollectionUtils.allPossibleGroupings(exprs)
+        if (config.columnarHomAgg) {
+          val exprs = v.values.toSet
+          val allNonDupGroupings = CollectionUtils.allPossibleGroupings(exprs)
 
-        val relnReverseIdx = queryReverseIndex(k)
+          val relnReverseIdx = queryReverseIndex(k)
 
-        // ret contains the query id (if Some(_))
-        def groupForOnlyOneQuery(s: Set[Int]): Option[Int] = {
-          val interest = s.flatMap(relnReverseIdx)
-          assert(!interest.isEmpty)
-          if (interest.size == 1) Some(interest.head) else None
+          // ret contains the query id (if Some(_))
+          def groupForOnlyOneQuery(s: Set[Int]): Option[Int] = {
+            val interest = s.flatMap(relnReverseIdx)
+            assert(!interest.isEmpty)
+            if (interest.size == 1) Some(interest.head) else None
+          }
+
+          def allInterestedQueries(s: Set[Int]): Set[Int] = {
+            s.flatMap(relnReverseIdx)
+          }
+
+          // give each query its own copy of the split
+          // (unique amongst shared sets)
+          val optimalSplits = perQueryInterestMap.flatMap { m => m.get(k) }.toSet
+
+          // greedy merging for each group
+          (k, allNonDupGroupings.map { grouping /* Set[Set[Int]] */ =>
+            val gseq = grouping.toIndexedSeq
+            val gmap = gseq.zipWithIndex.flatMap { case (g, i) =>
+              groupForOnlyOneQuery(g).map(q => (q, i))
+            }.groupBy(x => x._1).map { case (k, v) => (k, v.map(_._2))}.toMap
+
+            //println("gseq: " + gseq)
+            //println("gseq interest: " + gseq.map(allInterestedQueries))
+            //println("gmap: " + gmap)
+
+            val ungrouped = (0 until gseq.size).toSet -- gmap.values.flatten.toSet
+
+            ungrouped.map(gseq(_)).toSet ++ gmap.values.map(ii => ii.flatMap(gseq(_)).toSet).toSet
+          } ++ Set(optimalSplits))
+        } else {
+          (k, Set(v.values.map(Set(_)).toSet))
         }
-
-        def allInterestedQueries(s: Set[Int]): Set[Int] = {
-          s.flatMap(relnReverseIdx)
-        }
-
-        // give each query its own copy of the split
-        // (unique amongst shared sets)
-        val optimalSplits = perQueryInterestMap.flatMap { m => m.get(k) }.toSet
-
-        // greedy merging for each group
-        (k, allNonDupGroupings.map { grouping /* Set[Set[Int]] */ =>
-          val gseq = grouping.toIndexedSeq
-          val gmap = gseq.zipWithIndex.flatMap { case (g, i) =>
-            groupForOnlyOneQuery(g).map(q => (q, i))
-          }.groupBy(x => x._1).map { case (k, v) => (k, v.map(_._2))}.toMap
-
-          //println("gseq: " + gseq)
-          //println("gseq interest: " + gseq.map(allInterestedQueries))
-          //println("gmap: " + gmap)
-
-          val ungrouped = (0 until gseq.size).toSet -- gmap.values.flatten.toSet
-
-          ungrouped.map(gseq(_)).toSet ++ gmap.values.map(ii => ii.flatMap(gseq(_)).toSet).toSet
-        } ++ Set(optimalSplits))
       }
 
     //println("globalExprSplits:")

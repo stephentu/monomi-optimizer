@@ -534,6 +534,9 @@ case class RemoteSql(stmt: SelectStmt,
           // don't pass hexify to the plain text query
           (Some(gc.copy(hexify = false)), true)
 
+        case AggCall("group_serializer", Seq(e), _) =>
+          (Some(GroupConcat(e, ",")), true)
+
         case AggCall("agg_ident", Seq(e), _) =>
           // no need to pass agg_ident
           (Some(proc[SqlExpr](e)), true)
@@ -1051,14 +1054,14 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
     (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
 
   def emitCPP(cg: CodeGenerator) = {
-    cg.print("new local_filter_op(")
-    cg.print(expr.constantFold.toCPP)
-    cg.print(", ")
-    child.emitCPP(cg)
-    cg.print(", {")
-
-    subqueries.foreach(s => {s.emitCPP(cg); cg.print(", ")})
-    cg.print("})")
+    cg.blockBegin("new local_filter_op(")
+      cg.print(expr.constantFold.toCPP)
+      cg.println(",")
+      child.emitCPP(cg)
+      cg.blockBegin(",{")
+        subqueries.foreach(s => {s.emitCPP(cg); cg.println(",")})
+      cg.blockEnd("}")
+    cg.blockEnd(")")
   }
 }
 
@@ -1151,27 +1154,27 @@ case class LocalTransform(
   def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
 
   def emitCPP(cg: CodeGenerator) = {
-    cg.print("new local_transform_op(")
-    cg.print("{")
-    trfms.foreach {
-      case Left(i) =>
-        cg.print("local_transform_op::trfm_desc(%d), ".format(i))
-      case Right((orig, _, texpr)) =>
-        val t = orig.findCanonical.getType
-        if (t.tpe == UnknownType) {
-          System.err.println("ERROR: " + orig)
-          System.err.println("ERROR: " + orig.findCanonical)
-        }
-        cg.print("local_transform_op::trfm_desc(std::make_pair(%s, %s)), ".format(
-          PosDesc(
-            t.tpe, t.field.map(_.pos), PlainOnion,
-            t.field.map(_.partOfPK).getOrElse(false), false).toCPP,
-          texpr.toCPP
-        ))
-    }
-    cg.print("}, ")
-    child.emitCPP(cg)
-    cg.print(")")
+    cg.blockBegin("new local_transform_op(")
+      cg.print("{")
+      trfms.foreach {
+        case Left(i) =>
+          cg.print("local_transform_op::trfm_desc(%d), ".format(i))
+        case Right((orig, _, texpr)) =>
+          val t = orig.findCanonical.getType
+          if (t.tpe == UnknownType) {
+            System.err.println("ERROR: " + orig)
+            System.err.println("ERROR: " + orig.findCanonical)
+          }
+          cg.print("local_transform_op::trfm_desc(std::make_pair(%s, %s)), ".format(
+            PosDesc(
+              t.tpe, t.field.map(_.pos), PlainOnion,
+              t.field.map(_.partOfPK).getOrElse(false), false).toCPP,
+            texpr.toCPP
+          ))
+      }
+      cg.println("},")
+      child.emitCPP(cg)
+    cg.blockEnd(")")
   }
 }
 
@@ -1267,10 +1270,10 @@ case class LocalGroupBy(
       case TuplePosition(i, _) => i
       case e => throw new RuntimeException("TODO: unsupported: " + e)
     }
-    cg.print("new local_group_by(%s, ".format(
-      pos.map(_.toString).mkString("{", ", ", "}")))
-    child.emitCPP(cg)
-    cg.print(")")
+    cg.blockBegin("new local_group_by(")
+      cg.println("%s,".format(pos.map(_.toString).mkString("{", ", ", "}")))
+      child.emitCPP(cg)
+    cg.blockEnd(")")
   }
 }
 
@@ -1331,13 +1334,14 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
     (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
 
   def emitCPP(cg: CodeGenerator) = {
-    cg.print("new local_group_filter(")
-    cg.print(filter.toCPP)
-    cg.print(", ")
-    child.emitCPP(cg)
-    cg.print(", {")
-    subqueries.foreach(s => {s.emitCPP(cg); cg.print(", ")})
-    cg.print("})")
+    cg.blockBegin("new local_group_filter(")
+      cg.print(filter.toCPP)
+      cg.println(",")
+      child.emitCPP(cg)
+      cg.blockBegin(", {")
+        subqueries.foreach(s => {s.emitCPP(cg); cg.println(",")})
+      cg.blockEnd("}")
+    cg.blockEnd(")")
   }
 }
 
@@ -1361,13 +1365,13 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
   def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
 
   def emitCPP(cg: CodeGenerator) = {
-    cg.print(
-      "new local_order_by(%s, ".format(
-        sortKeys.map {
-          case (i, o) => "std::make_pair(%d, %b)".format(i, o == DESC)
-        }.mkString("{", ", ", "}")))
-    child.emitCPP(cg)
-    cg.print(")")
+    cg.blockBegin("new local_order_by(")
+      cg.println("%s,".format(
+          sortKeys.map {
+            case (i, o) => "std::make_pair(%d, %b)".format(i, o == DESC)
+          }.mkString("{", ", ", "}")))
+      child.emitCPP(cg)
+    cg.blockEnd(")")
   }
 }
 
@@ -1388,9 +1392,9 @@ case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
   def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
 
   def emitCPP(cg: CodeGenerator) = {
-    cg.print("new local_limit(%d, ".format(limit))
-    child.emitCPP(cg)
-    cg.print(")")
+    cg.blockBegin("new local_limit(%d, ".format(limit))
+      child.emitCPP(cg)
+    cg.blockEnd(")")
   }
 }
 
@@ -1435,11 +1439,11 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
   def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
 
   def emitCPP(cg: CodeGenerator) = {
-    cg.print(
-      "new local_decrypt_op(%s, ".format(
-        positions.map(_.toString).mkString("{", ", ", "}")))
-    child.emitCPP(cg)
-    cg.print(")")
+    cg.blockBegin("new local_decrypt_op(")
+      cg.println("%s,".format(
+          positions.map(_.toString).mkString("{", ", ", "}")))
+      child.emitCPP(cg)
+    cg.blockEnd(")")
   }
 }
 
