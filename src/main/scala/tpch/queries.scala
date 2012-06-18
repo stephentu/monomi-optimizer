@@ -683,6 +683,35 @@ order by
   cntrycode;
 """
 
+  val q22Inner = """
+    select
+      substring(c_phone from 1 for 2) as cntrycode,
+      c_acctbal as abal
+    from
+      customer
+    where
+      substring(c_phone from 1 for 2) in
+        ('41', '26', '36', '27', '38', '37', '22')
+      and c_acctbal > (
+        select
+          avg(c_acctbal)
+        from
+          customer
+        where
+          c_acctbal > 0.00
+          and substring(c_phone from 1 for 2) in
+            ('41', '26', '36', '27', '38', '37', '22')
+      )
+      and not exists (
+        select
+          *
+        from
+          orders
+        where
+          o_custkey = c_custkey
+      )
+"""
+
   val AllQueries = Seq(Queries.q1, Queries.q2, Queries.q3, Queries.q4, Queries.q5, Queries.q6, Queries.q7, Queries.q8, Queries.q9, Queries.q10, Queries.q11, Queries.q12, Queries.q13, Queries.q14, /*Queries.q15,*/ Queries.q16, Queries.q17, Queries.q18, Queries.q19, Queries.q20, Queries.q21, Queries.q22)
 
 
