@@ -1638,6 +1638,24 @@ trait Generator extends Traversals
             case p                       => p
           }
 
+          def origSqlProj(p: PlanNode, idx: Int): Option[(SqlProj, Int)] = {
+            p match {
+              case RemoteSql(stmt, _, _, _) =>
+                Some((stmt.projections(idx), idx))
+              case LocalTransform(trfms, _, child) =>
+                trfms(idx).left.toOption.flatMap(idx0 => origSqlProj(child, idx0))
+              // TODO: more cases?
+              case e => e.underlying.flatMap(c => origSqlProj(c, idx))
+            }
+          }
+
+          def underlyingRemoteSql(p: PlanNode): RemoteSql = {
+            p match {
+              case rs: RemoteSql => rs
+              case e => underlyingRemoteSql(e.underlying.get)
+            }
+          }
+
           val p = unwrap(rm)
           val td = p.tupleDesc
           if (td.size == origSS.projections.size &&
@@ -1653,6 +1671,64 @@ trait Generator extends Traversals
                 case (_, idx) => None
               }
               if (dv.isEmpty) p else LocalDecrypt(dv, p)
+            }
+
+            // if all our group by keys are directly in the projection, heuristically
+            // push the group by clause *into* the server. we detect this by
+            // following the tuple-descs back and seeing if we hit a remote sql
+            // node w/o encountering a local transformation
+
+            if (config.groupByPushDown) {
+              cur.groupBy.foreach { gb =>
+                if (gb.having.isEmpty) {
+                  // only enable push-down if underlying query is easy to reason able
+                  val underlyingRS = underlyingRemoteSql(p)
+                  if (underlyingRS.stmt.groupBy.isEmpty &&
+                      underlyingRS.stmt.orderBy.isEmpty &&
+                      underlyingRS.stmt.limit.isEmpty) {
+                    CollectionUtils.optSeq(
+                      gb.keys.map { k =>
+                        rewritePre[SqlExpr](k) match {
+                          case TuplePosition(idx, _) => origSqlProj(p, idx)
+                          case _ => None
+                        }
+                      }).foreach { keyExprs =>
+                        val rtd = underlyingRS.projs
+                        val noWrapPos = keyExprs.map(_._2).toSet
+                        val newProjs = underlyingRS.stmt.projections.zip(rtd).zipWithIndex.map {
+                          case ((proj, posDesc), idx) if !noWrapPos.contains(idx) =>
+                            assert(!posDesc.vectorCtx) // TODO: not sure if really valid
+                            // need to group_concat
+                            proj match {
+                              case ExprProj(e, alias, _) =>
+                                ExprProj(GroupConcat(e, ",", posDesc.origTpe.isStringType), alias)
+                              case _ => throw new RuntimeException("unhandled")
+                            }
+                          case ((proj, _), _) => proj
+                        }
+
+                        val newRemoteSql =
+                          underlyingRS.copy(
+                            stmt = underlyingRS.stmt.copy(
+                              projections = newProjs,
+                              groupBy =
+                                Some(SqlGroupBy(keyExprs.map(_._1).map(_.asInstanceOf[ExprProj].expr), None))),
+                            projs = rtd.zipWithIndex.map { case (pd, idx) =>
+                              if (!noWrapPos.contains(idx)) pd.copy(vectorCtx = true) else pd
+                            })
+
+                        // TODO: this is too imperative
+
+                        res = topDownTransformation(p) {
+                          case r if r eq underlyingRS => (Some(newRemoteSql), false)
+                          case _ => (None, true)
+                        }
+
+                        cur = cur.copy(groupBy = None)
+                    }
+                  }
+                }
+              }
             }
 
             // now we just translate each of the operations as local ops, re-writting

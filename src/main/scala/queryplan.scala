@@ -326,6 +326,8 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
 
   def tupleDesc: Seq[PosDesc]
 
+  def underlying: Option[PlanNode]
+
   protected def costEstimateImpl(ctx: EstimateContext, stats: Statistics): Estimate
   protected var _lastCostEstimate : Option[Estimate] = None
 
@@ -421,6 +423,8 @@ case class RemoteSql(stmt: SelectStmt,
                      namedSubselects: Map[String, (PlanNode, SelectStmt)] = Map.empty)
 
   extends PlanNode with Transformers with PrettyPrinters with Timer {
+
+  def underlying = None
 
   assert(stmt.projections.size == projs.size)
   def tupleDesc = projs
@@ -893,6 +897,8 @@ case class RemoteSql(stmt: SelectStmt,
 }
 
 case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
+  def underlying = Some(child)
+
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
     "* RemoteMaterialize(cost = " + _lastCostEstimate + ", name = " + name + ")" + childPretty(lvl, child)
@@ -926,6 +932,8 @@ case class LocalOuterJoinFilter(
     def checkBounds(i: Int) = assert(i >= 0 && i < td.size)
     posToNull.foreach(checkBounds)
   }
+
+  def underlying = Some(child)
 
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) = {
@@ -983,6 +991,7 @@ case class LocalOuterJoinFilter(
 
 case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
                        child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
+  def underlying = Some(child)
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) = {
     "* LocalFilter(cost = " + _lastCostEstimate + ", filter = " + expr.sql + ")" +
@@ -1086,6 +1095,8 @@ case class LocalTransform(
 
   assert(!trfms.isEmpty)
 
+  def underlying = Some(child)
+
   def tupleDesc = {
     val td = child.tupleDesc
     trfms.map {
@@ -1188,6 +1199,8 @@ case class LocalGroupBy(
     assert(filter.isDefined == origFilter.isDefined)
   }
 
+  def underlying = Some(child)
+
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
     "* LocalGroupBy(cost = " + _lastCostEstimate + ", keys = " + keys.map(_.sql).mkString(", ") + ", group_filter = " + filter.map(_.sql).getOrElse("none") + ")" + childPretty(lvl, child)
@@ -1282,6 +1295,7 @@ case class LocalGroupBy(
 case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
                             child: PlanNode, subqueries: Seq[PlanNode])
   extends PlanNode {
+  def underlying = Some(child)
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) = {
     "* LocalGroupFilter(cost = " + _lastCostEstimate + ", filter = " + filter.sql + ")" +
@@ -1352,6 +1366,7 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
     sortKeys.foreach { case (idx, _) => assert(!td(idx).vectorCtx) }
   }
 
+  def underlying = Some(child)
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
     "* LocalOrderBy(cost = " + _lastCostEstimate + ", keys = " + sortKeys.map(_._1.toString).toSeq + ")" + childPretty(lvl, child)
@@ -1376,6 +1391,7 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
 }
 
 case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
+  def underlying = Some(child)
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) =
     "* LocalLimit(cost = " + _lastCostEstimate + ", limit = " + limit + ")" + childPretty(lvl, child)
@@ -1399,6 +1415,7 @@ case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
 }
 
 case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
+  def underlying = Some(child)
   def tupleDesc = {
     val td = child.tupleDesc
     assert(positions.filter(p => td(p).onion.isPlain).isEmpty)
@@ -1451,6 +1468,7 @@ case class LocalEncrypt(
   /* (tuple pos to enc, onion to enc) */
   positions: Seq[(Int, OnionType)],
   child: PlanNode) extends PlanNode {
+  def underlying = Some(child)
   def tupleDesc = {
     val td = child.tupleDesc
     assert(positions.filter { case (p, _) => !td(p).onion.isPlain || td(p).vectorCtx }.isEmpty)
