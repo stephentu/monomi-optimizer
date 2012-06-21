@@ -2826,7 +2826,8 @@ trait Generator extends Traversals
     val globalExprSplits /* Map[String, Set[ Set[Set[Int]] ]] */ =
       globalExprIndex.map { case (k, v) =>
         assert(v.values.size == v.values.toSet.size)
-        if (config.columnarHomAgg) {
+        if (config.homAggConfig == HTRegWithColPacking ||
+            config.homAggConfig == HTColumar) {
           val exprs = v.values.toSet
           val allNonDupGroupings = CollectionUtils.allPossibleGroupings(exprs)
 
@@ -3161,7 +3162,9 @@ trait Generator extends Traversals
               val requiresPrecomputation = !e.isInstanceOf[FieldIdent]
               if (config.rowLevelPrecomputation || !requiresPrecomputation) {
                 if (o == Onions.HOM_ROW_DESC) {
-                  if (config.allowHomAggs) workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
+                  if (config.homAggConfig != HTNone) {
+                    workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
+                  }
                 } else {
                   workingSet.foreach(_.add(t, e, o))
                 }
