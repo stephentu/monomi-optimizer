@@ -112,7 +112,7 @@ trait Generator extends Traversals
   }
 
   def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode =
-    generatePlanFromOnionSet0(stmt, onionSet, PreserveOriginal)
+    generatePlanFromOnionSet0(stmt, onionSet, PreserveOriginal, new GenPlanContext)
 
   abstract trait EncContext {
     def needsProjections: Boolean = true
@@ -214,10 +214,13 @@ trait Generator extends Traversals
   // names are unique over a generator instance
 
   private val _subselectMaterializeNamePrefix = "_subselect$"
-  private val _subselectMaterializeNames = new NameGenerator(_subselectMaterializeNamePrefix)
 
   private val _hiddenNamePrefix = "_hidden$"
   private val _hiddenNames = new NameGenerator(_hiddenNamePrefix)
+
+  private class GenPlanContext {
+    val _subselectMaterializeNames = new NameGenerator(_subselectMaterializeNamePrefix)
+  }
 
   // if encContext is PreserveOriginal, then the plan node generated faithfully
   // recreates the original statement- that is, the result set has the same
@@ -232,7 +235,8 @@ trait Generator extends Traversals
   // projection (this is asserted)- and plan node is written so it returns the
   // projections encrypted with the onion given by the onions sequence
   private def generatePlanFromOnionSet0(
-    stmt: SelectStmt, onionSet: OnionSet, encContext: EncContext): PlanNode = {
+    stmt: SelectStmt, onionSet: OnionSet,
+    encContext: EncContext, genPlanContext: GenPlanContext): PlanNode = {
 
     //println("generatePlanFromOnionSet0()")
     //println("stmt: " + stmt.sql)
@@ -486,7 +490,7 @@ trait Generator extends Traversals
 
     def addSubselectAndReturnPlaceholder(p: PlanNode, origSS: SelectStmt): SqlExpr = {
       assert(!hasOuterReferences(origSS))
-      val id = _subselectMaterializeNames.uniqueId()
+      val id = genPlanContext._subselectMaterializeNames.uniqueId()
       subselectNodes += (id -> (p, origSS))
       NamedSubselectPlaceholder(id)
     }
@@ -719,7 +723,8 @@ trait Generator extends Traversals
                       val e0 = doTransformServer(expr, curRewriteCtx.restrictTo(onion))
                       e0.flatMap { case (expr, _) =>
                         generatePlanFromOnionSet0(
-                          ss.subquery, onionSet, EncProj(Seq(onion), true)) match {
+                          ss.subquery, onionSet,
+                          EncProj(Seq(onion), true), genPlanContext) match {
                           case rs @ RemoteSql(q0, _, _, _) =>
                             mergeRemoteSql(rs)
                             Some(eq.copyWithChildren(expr, Subselect(q0)))
@@ -734,8 +739,8 @@ trait Generator extends Traversals
               (eq.lhs, eq.rhs) match {
                 case (ss0 @ Subselect(q0, _), ss1 @ Subselect(q1, _)) =>
                   def mkSeq(o: Int) = {
-                    Seq(generatePlanFromOnionSet0(q0, onionSet, EncProj(Seq(o), true)),
-                        generatePlanFromOnionSet0(q1, onionSet, EncProj(Seq(o), true)))
+                    Seq(generatePlanFromOnionSet0(q0, onionSet, EncProj(Seq(o), true), genPlanContext),
+                        generatePlanFromOnionSet0(q1, onionSet, EncProj(Seq(o), true), genPlanContext))
                   }
                   val spPLAINs = mkSeq(Onions.PLAIN)
                   val spDETs   = mkSeq(Onions.DET)
@@ -798,7 +803,8 @@ trait Generator extends Traversals
                       val e0 = doTransformServer(expr, curRewriteCtx.restrictTo(onion))
                       e0.flatMap { case (expr, _) =>
                         generatePlanFromOnionSet0(
-                          ss.subquery, onionSet, EncProj(Seq(onion), true)) match {
+                          ss.subquery, onionSet,
+                          EncProj(Seq(onion), true), genPlanContext) match {
                           case rs @ RemoteSql(q0, _, _, _) =>
                             mergeRemoteSql(rs)
                             if (flip) Some(ieq.copyWithChildren(expr, Subselect(q0)))
@@ -816,8 +822,8 @@ trait Generator extends Traversals
               (ieq.lhs, ieq.rhs) match {
                 case (ss0 @ Subselect(q0, _), ss1 @ Subselect(q1, _)) =>
                   def mkSeq(o: Int) = {
-                    Seq(generatePlanFromOnionSet0(q0, onionSet, EncProj(Seq(o), true)),
-                        generatePlanFromOnionSet0(q1, onionSet, EncProj(Seq(o), true)))
+                    Seq(generatePlanFromOnionSet0(q0, onionSet, EncProj(Seq(o), true), genPlanContext),
+                        generatePlanFromOnionSet0(q1, onionSet, EncProj(Seq(o), true), genPlanContext))
                   }
                   val spPLAINs = mkSeq(Onions.PLAIN)
                   val spOPEs   = mkSeq(Onions.OPE)
@@ -886,7 +892,8 @@ trait Generator extends Traversals
                       doTransformServer(e, curRewriteCtx.restrictTo(Onions.OPE)).map(x => (x, Onions.OPE)))
                     .map {
                       case ((e0, _), o) =>
-                        val p = generatePlanFromOnionSet0(ss, onionSet, EncProj(Seq(o), true))
+                        val p =
+                          generatePlanFromOnionSet0(ss, onionSet, EncProj(Seq(o), true), genPlanContext)
                         replaceWith(In(e0, Seq(addSubselectAndReturnPlaceholder(p, ss)), n))
                     }.getOrElse(bailOut)
 
@@ -901,7 +908,7 @@ trait Generator extends Traversals
 
             case ex @ Exists(ss, _) if curRewriteCtx.inClear =>
               onionRetVal.set(OnionType.buildIndividual(Onions.PLAIN))
-              generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveCardinality) match {
+              generatePlanFromOnionSet0(ss.subquery, onionSet, PreserveCardinality, genPlanContext) match {
                 case rs @ RemoteSql(q, _, _, _) =>
                   mergeRemoteSql(rs)
                   replaceWith(Exists(Subselect(q)))
@@ -1021,12 +1028,12 @@ trait Generator extends Traversals
           topDownTraversalWithParent(e) {
             case (Some(_: Exists), s @ Subselect(ss, _)) =>
               val (ss0, m) = rewriteOuterReferences(ss)
-              val p = generatePlanFromOnionSet0(ss0, onionSet, PreserveCardinality)
+              val p = generatePlanFromOnionSet0(ss0, onionSet, PreserveCardinality, genPlanContext)
               subselects += ((s, p, m))
               false
             case (_, s @ Subselect(ss, _)) =>
               val (ss0, m) = rewriteOuterReferences(ss)
-              val p = generatePlanFromOnionSet0(ss0, onionSet, PreserveOriginal)
+              val p = generatePlanFromOnionSet0(ss0, onionSet, PreserveOriginal, genPlanContext)
               subselects += ((s, p, m))
               false
             case _ => true
@@ -1490,7 +1497,8 @@ trait Generator extends Traversals
                    }
                  }
              }.toSeq,
-             true)),
+             true),
+            genPlanContext),
           subq.subquery))
       }.toMap
 
