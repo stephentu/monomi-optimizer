@@ -1,6 +1,7 @@
 package edu.mit.cryptdb
 
 import java.sql._
+import java.io._
 import scala.collection.mutable.{ ArrayBuffer, HashSet }
 
 object Conversions {
@@ -121,7 +122,7 @@ object CollectionUtils {
   }
 
   def allIndicesOf(s: String, c: Char): Seq[Int] = {
-    s.zipWithIndex.foldLeft( Seq.empty : Seq[Int] ) { 
+    s.zipWithIndex.foldLeft( Seq.empty : Seq[Int] ) {
       case (xs, (c0, i)) => if (c == c0) xs ++ Seq(i) else xs
     }
   }
@@ -157,5 +158,22 @@ trait Timer {
   def timedRunMillisNoReturn[A](f: => A): Double = {
     val (t, _) = timedRunMillis(f)
     t
+  }
+}
+
+object ProcUtils {
+  // TODO: there's definitely a more "idiomatic" way to do this
+  // in Scala!
+  def execCommandWithResults(cmd: String): Seq[String] = {
+    val p = Runtime.getRuntime.exec(cmd)
+    val br = new BufferedReader(new InputStreamReader(p.getInputStream))
+    var line = br.readLine()
+    val ret = new ArrayBuffer[String]
+    while (line ne null) {
+      ret += line
+      line = br.readLine()
+    }
+    br.close()
+    ret
   }
 }
