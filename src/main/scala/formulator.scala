@@ -494,6 +494,137 @@ trait Formulator extends SpaceEstimator {
   val SpaceConstraintScaleFactor = 100000000.0 // scales bytes by this amount
   val ObjectiveFunctionScaleFactor = 1000000.0 // scales cost by this amount
 
+  protected def outputDebugSolnInfo(
+    defns: Definitions,
+    stats: Statistics,
+    simpleSoln: Seq[PlanNode],
+    optSoln: Seq[(PlanNode, EstimateContext)]): Unit = {
+
+    optSoln.map(_._1).zip(simpleSoln).zipWithIndex.foreach {
+      case ((a, b), idx) if a != b =>
+        println("Query %d differs in choice between opt and simple solution".format(idx))
+      case _ =>
+    }
+
+    val origSpace = plaintextSpaceEstimate(defns, stats)
+    val encSpace = encryptedSpaceEstimate(defns, stats, optSoln.map(_._2))
+
+    println("origSpace=(%f MB), encSpace=(%f MB), overhead=(%f)".format(
+      origSpace.toDouble / (1 << 20).toDouble,
+      encSpace.toDouble / (1 << 20).toDouble,
+      encSpace.toDouble / origSpace.toDouble))
+  }
+
+  // greedly handle space constraints
+  def optimizeGreedy(
+    defns: Definitions,
+    stats: Statistics,
+    queries0: Seq[ Seq[(PlanNode, EstimateContext, Estimate)] ]): Seq[PlanNode] = {
+
+    val globalOpts = queries0.head.head._2.globalOpts
+
+    val queries = queries0.map(_.sortBy(_._3.cost))
+    val origSpace = plaintextSpaceEstimate(defns, stats)
+    val budgetSpace = SpaceFactor * origSpace
+    val simpleSoln = queries.map(_.head._1)
+
+    // code reuse is good
+    val progInstance = formulateIntegerProgram(defns, stats, queries)
+
+    // the globalXAssignReg and globalXAssignHom maps contain the only knobs we can
+    // flip on/off. set all the knobs on at first
+    val knobSizes = new HashMap[Int, Long]
+    progInstance.globalXAssignReg.foreach { case (reln, m) =>
+      val nRowsTable = stats.stats(reln).row_count
+      m.foreach { case ((name, onion), pos) =>
+        // lookup as a table column. if not found, then assume
+        // it's a precomputed value
+        assert(Onions.isSingleRowEncOnion(onion))
+        defns.lookup(reln, name) match {
+          case Some(TableColumn(_, tpe, _)) =>
+            knobSizes(pos) = nRowsTable * encColSize(tpe.size, onion)
+          case None =>
+            knobSizes(pos) = nRowsTable * encColSize(4, onion)
+        }
+      }
+    }
+    progInstance.globalXAssignHom.foreach { case (reln, m) =>
+      val nRowsTable = stats.stats(reln).row_count
+      m.foreach { case (gid, pos) =>
+        knobSizes(pos) = homAggSize(globalOpts, reln, gid, nRowsTable)
+      }
+    }
+
+    val knobState = new HashSet[Int]
+    progInstance.globalXAssignReg.foreach { case (_, m) => knobState ++= m.values }
+    progInstance.globalXAssignHom.foreach { case (_, m) => knobState ++= m.values }
+
+    // set the initial solution to be the cheapest
+    val tester = queries.map(_.map(x => (x._1, x._2)))
+
+    var solnSoFar = tester.map(_.head)
+
+    while (true) {
+      val encSpace = encryptedSpaceEstimate(defns, stats, solnSoFar.map(_._2))
+      if (encSpace <= budgetSpace) {
+        // done
+        outputDebugSolnInfo(defns, stats, simpleSoln, solnSoFar)
+        return solnSoFar.map(_._1)
+      }
+
+      // find the largest onion, turn it off, and then greedily pick the best solution
+
+      // TODO: currently impl is dumb, does linear scan to find the cheapest of the
+      // remaining knobs.
+
+      if (knobState.isEmpty) {
+        throw new RuntimeException("Infeasible")
+      }
+
+      val (largestKnob, _) =
+        knobState.toSeq.map(x => (x, knobSizes(x))) max Ordering[Long].on[(_,Long)](_._2)
+
+      println("turning off optimization: x%d".format(largestKnob))
+
+      knobState -= largestKnob
+
+      def doesPlanQualify(ectx: EstimateContext): Boolean = {
+        (ectx.requiredOnions.toSeq ++ ectx.precomputed.toSeq).foreach { case (reln, cols) =>
+          val gTable = progInstance.globalXAssignReg.getOrElse(reln, Map.empty)
+          cols.foreach { case (name, onions) =>
+            Onions.toSeq(onions).foreach { o =>
+              gTable.get((name, o)).foreach { id =>
+                if (!knobState.contains(id)) return false
+              }
+            }
+          }
+        }
+        ectx.homGroups.foreach { case (reln, gids) =>
+          val gTable = progInstance.globalXAssignHom(reln)
+          gids.foreach { gid =>
+            if (!knobState.contains(gTable(gid))) return false
+          }
+        }
+        true
+      }
+
+      // now compute a new solution, based on this new knobset
+      // assumes plans is sorted in order of cost
+      def bestPlanForQuery(plans: Seq[(PlanNode, EstimateContext)]):
+        Option[(PlanNode, EstimateContext)] = {
+        plans.foldLeft( None : Option[(PlanNode, EstimateContext)] ) { case (acc, (p, ectx)) =>
+          acc.orElse(if (doesPlanQualify(ectx)) Some((p, ectx)) else None)
+        }
+      }
+
+      val newSoln = tester.map(x => bestPlanForQuery(x).getOrElse(throw new RuntimeException("Infeasible")))
+      solnSoFar = newSoln
+    }
+
+    // not reached
+    throw new RuntimeException("not reached")
+  }
+
   def optimize(
     defns: Definitions,
     stats: Statistics,
@@ -501,10 +632,10 @@ trait Formulator extends SpaceEstimator {
 
     val queries = queries0.map(_.sortBy(_._3.cost))
 
-    if (queries.filter(_.size > 1).isEmpty) {
-      // simple case
-      return queries.map(_.head._1)
-    }
+    //if (queries.filter(_.size > 1).isEmpty) {
+    //  // simple case
+    //  return queries.map(_.head._1)
+    //}
 
     // use linear program for now
     val progInstance = formulateIntegerProgram(defns, stats, queries)
@@ -574,19 +705,7 @@ trait Formulator extends SpaceEstimator {
       (0 until soln.size).filter(soln(_)).map(x => "x%d".format(x)).mkString("[", ", ", "]")
     println("xEnabled: " + xEnabled)
 
-    optSoln.map(_._1).zip(simpleSoln).zipWithIndex.foreach {
-      case ((a, b), idx) if a != b =>
-        println("Query %d differs in choice between opt and simple solution".format(idx))
-      case _ =>
-    }
-
-    val origSpace = plaintextSpaceEstimate(defns, stats)
-    val encSpace = encryptedSpaceEstimate(defns, stats, optSoln.map(_._2))
-
-    println("origSpace=(%f MB), encSpace=(%f MB), overhead=(%f)".format(
-      origSpace.toDouble / (1 << 20).toDouble,
-      encSpace.toDouble / (1 << 20).toDouble,
-      encSpace.toDouble / origSpace.toDouble))
+    outputDebugSolnInfo(defns, stats, simpleSoln, optSoln)
 
     optSoln.map(_._1).toSeq
   }
