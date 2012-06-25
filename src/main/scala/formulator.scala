@@ -69,7 +69,7 @@ import math_defns._
 case class BILPInstance(
   c: ImmVector[Double],
   ieq_constraint: Option[ (ImmMatrix[Double], ImmVector[Double]) ],
-  eq_constraint: Option[ (ImmMatrix[Double], ImmVector[Double]) ]) {
+  eq_constraint: Option[ (ImmMatrix[Double], ImmVector[Double]) ]) extends Timer {
 
   private val n = c.size
 
@@ -246,7 +246,12 @@ case class BILPInstance(
     val glpsol_prog =
       Option(System.getenv("GLPSOL_PROGRAM")).filterNot(_.isEmpty).getOrElse("glpsol")
 
-    val output = ProcUtils.execCommandWithResults("%s --lp %s --output /dev/stdout".format(glpsol_prog, tmpFile.getPath))
+    val (execTimeMillis, output) =
+      timedRunMillis(
+        ProcUtils.execCommandWithResults(
+          "%s --lp %s --output /dev/stdout %s".format(glpsol_prog, tmpFile.getPath, GLPKOpts)))
+
+    println("Solved LP using GLPK in %f ms".format(execTimeMillis))
 
     val objtext = output.filter(_.startsWith("Objective:"))
     assert(objtext.size == 1)
@@ -271,6 +276,8 @@ case class BILPInstance(
     assert(values.size == n)
     Some( (obj, Vector( values : _* )) )
   }
+
+  protected val GLPKOpts = "--cuts --pcost"
 
   protected val UseGLPK = true
 
