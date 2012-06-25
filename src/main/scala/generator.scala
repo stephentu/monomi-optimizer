@@ -2973,6 +2973,16 @@ trait Generator extends Traversals
     val precomputed = new HashMap[String, HashMap[String, Int]]
     val homGroups = new HashMap[String, HashSet[Int]]
 
+    def mapLocalGidToGlobalGid(
+      reln: String, localGid: Int): Int = {
+      val Some(gexprs) = origOS.lookupPackedHOMById(reln, localGid)
+
+      // map local group expr set to global group id
+      val ggidx = globalOpts.homGroups(reln).indexWhere(_ == gexprs)
+      assert(ggidx != -1) // must be valid
+      ggidx
+    }
+
     val pnew = topDownTransformation(rewrittenPlan) {
       case r @ RemoteSql(stmt, _, _, _) =>
         val s = topDownTransformation(stmt) {
@@ -3008,11 +3018,7 @@ trait Generator extends Traversals
             // need to replace this local group id with a global group id
             // (the group id is local to the onion set used to generate the plan)
 
-            val Some(gexprs) = origOS.lookupPackedHOMById(tbl, grp.toInt)
-
-            // map local group expr set to global group id
-            val ggidx = globalOpts.homGroups(tbl).indexWhere(_ == gexprs)
-            assert(ggidx != -1) // must be valid
+            val ggidx = mapLocalGidToGlobalGid(tbl, grp.toInt)
 
             homGroups.getOrElseUpdate(tbl, new HashSet[Int]) += ggidx
 
@@ -3021,7 +3027,16 @@ trait Generator extends Traversals
           case _ => (None, true)
         }.asInstanceOf[SelectStmt]
 
-        (Some(r.copy(stmt = s)), true)
+        val newProjs = r.projs.map { pd =>
+          pd.onion match {
+            case HomGroupOnion(reln, localGid) =>
+              val globalGid = mapLocalGidToGlobalGid(reln, localGid)
+              pd.copy(onion = HomGroupOnion(reln, globalGid))
+            case _ => pd
+          }
+        }
+
+        (Some(r.copy(stmt = s, projs = newProjs)), true)
       case _ => keepGoing
     }
 

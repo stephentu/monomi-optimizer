@@ -1,7 +1,7 @@
 package edu.mit.cryptdb
 
 import java.io.{ File, PrintWriter }
-import scala.collection.mutable.{ ArrayBuffer, HashMap, Seq => MutSeq }
+import scala.collection.mutable.{ ArrayBuffer, HashSet, HashMap, Seq => MutSeq }
 
 // these are the onions which a plan cost has to
 // be concerned about (b/c it does seq scans over these relations),
@@ -82,6 +82,55 @@ case class BILPInstance(
   ieq_constraint.foreach { case (a, b) => validateConstraint(a, b) }
   eq_constraint.foreach  { case (a, b) => validateConstraint(a, b) }
 
+  def toCPLEXInput: String = {
+    val buf = new StringBuilder
+
+    buf.append("Minimize\n")
+
+    def vecToString(v: ImmVector[Double]): String = {
+      v.zipWithIndex.flatMap { case (d, idx) =>
+        if (d != 0.0) {
+          val s = if (d > 0.0) "+" else "-"
+          Seq("%s %f x%d".format(s, math.abs(d), idx))
+        }
+        else Seq.empty
+      }.mkString(" ")
+    }
+
+    buf.append("R0: " + vecToString(c) + "\n")
+
+    buf.append("Subject To\n")
+
+    ieq_constraint.foreach { case (mat, vec) =>
+      val (n, _) = dimensions(mat)
+      (0 until n).foreach { r =>
+        buf.append("R%d: ".format(r+1) + vecToString(mat(r)) + " <= " + vec(r) + "\n")
+      }
+    }
+
+    eq_constraint.foreach { case (mat, vec) =>
+      val (n, _) = dimensions(mat)
+      val offset = ieq_constraint.map(x => dimensions(x._1)._1).getOrElse(0)
+      (0 until n).foreach { r =>
+        buf.append("R%d: ".format(r+1+offset) + vecToString(mat(r)) + " = " + vec(r) + "\n")
+      }
+    }
+
+    buf.append("Bounds\n")
+    (0 until n).foreach { r =>
+      buf.append("0 <= x%d <= 1\n".format(r))
+    }
+
+    buf.append("Generals\n")
+    (0 until n).foreach { r =>
+      buf.append("x%d\n".format(r))
+    }
+
+    buf.append("end\n")
+
+    buf.toString
+  }
+
   def toLPSolveInput: String = {
     val buf = new StringBuilder
 
@@ -157,7 +206,7 @@ case class BILPInstance(
     buf.toString
   }
 
-  def solve(): Option[ImmVector[Boolean]] = {
+  private def solveUsingLPSolve(): Option[(Double, ImmVector[Boolean])] = {
     // using lp_solve in java is a PITA.
     // just shell out for now.
     // TODO: this is so hacky
@@ -174,12 +223,63 @@ case class BILPInstance(
 
     val output = ProcUtils.execCommandWithResults("%s %s".format(lp_solve_prog, tmpFile.getPath))
 
+    val objtext = output.filter(_.startsWith("Value of objective function:"))
+    assert(objtext.size == 1)
+    val obj = objtext.head.split(":")(1).toDouble
+
     val vtext = output.filter(_.startsWith("x"))
     assert(vtext.size == n)
 
     // lp_solve seems to give the variables back in sorted order,
     // so this is ok...
-    Some( Vector( vtext.map(_.split("\\s+")(1) == "1") : _* ) )
+    Some( (obj, Vector( vtext.map(_.split("\\s+")(1) == "1") : _* )) )
+  }
+
+  private def solveUsingGLPK(): Option[(Double, ImmVector[Boolean])] = {
+    val tmpFile = File.createTempFile("cdbopt", "lp")
+    val code = toCPLEXInput
+
+    val writer = new PrintWriter(tmpFile)
+    writer.print(code)
+    writer.flush
+
+    val glpsol_prog =
+      Option(System.getenv("GLPSOL_PROGRAM")).filterNot(_.isEmpty).getOrElse("glpsol")
+
+    val output = ProcUtils.execCommandWithResults("%s --lp %s --output /dev/stdout".format(glpsol_prog, tmpFile.getPath))
+
+    val objtext = output.filter(_.startsWith("Objective:"))
+    assert(objtext.size == 1)
+    val obj = objtext.head.split("\\s+")(3).toDouble
+
+    val VarRegex = "x\\d+".r
+
+    val values = output.flatMap { l =>
+      // hacky for now...
+      val toks = l.trim.split("\\s+")
+
+      if (toks.size >= 2) {
+        toks(1) match {
+          case VarRegex() =>
+            assert(toks(2) == "*")
+            Seq(toks(3) == "1")
+          case _ => Seq.empty
+        }
+      } else Seq.empty
+    }
+
+    assert(values.size == n)
+    Some( (obj, Vector( values : _* )) )
+  }
+
+  protected val UseGLPK = true
+
+  def solve(): Option[(Double, ImmVector[Boolean])] = {
+    if (UseGLPK) {
+      solveUsingGLPK()
+    } else {
+      solveUsingLPSolve()
+    }
   }
 }
 
@@ -259,7 +359,7 @@ case class BIQPInstance(
     buf.toString
   }
 
-  def solve(): Option[ImmVector[Boolean]] = {
+  def solve(): Option[(Double, ImmVector[Boolean])] = {
     throw new RuntimeException("UNIMPL")
   }
 
@@ -268,9 +368,124 @@ case class BIQPInstance(
     BILPInstance(c, ieq_constraint, eq_constraint)
 }
 
-trait Formulator {
+/** estimates in bytes */
+trait SpaceEstimator {
+
+  def plaintextSpaceEstimate(
+    defns: Definitions,
+    stats: Statistics): Long = {
+    defns.defns.foldLeft(0L) { case (sizeSoFar, (tbl, cols)) =>
+      val nRowsTable = stats.stats(tbl).row_count
+      cols.foldLeft(sizeSoFar) {
+        case (acc, TableColumn(_, tpe, _)) =>
+          val regColSize = tpe.size
+          acc + regColSize * nRowsTable
+      }
+    }
+  }
+
+  def encryptedSpaceEstimate(
+    defns: Definitions,
+    stats: Statistics,
+    plans: Seq[EstimateContext]): Long = {
+
+    // assumes queries is not empty
+    val globalOpts = plans.head.globalOpts
+
+    val usedReg = new HashMap[String, HashMap[String, Int]]
+    val usedPre = new HashMap[String, HashMap[String, Int]]
+    val usedHom = new HashMap[String, HashSet[Int]]
+
+    plans.foreach { ectx =>
+      mergeInto(usedReg, ectx.requiredOnions)
+      mergeInto(usedPre, ectx.precomputed)
+      ectx.homGroups.foreach { case (reln, gids) =>
+        usedHom.getOrElseUpdate(reln, HashSet.empty) ++= gids
+      }
+    }
+
+    var sum = 0L
+
+    defns.defns.foreach { case (tbl, cols) =>
+      val nRowsTable = stats.stats(tbl).row_count
+      cols.foreach {
+        case TableColumn(name, tpe, _) =>
+          usedReg.get(tbl).flatMap(_.get(name)) match {
+            case Some(onions) =>
+              Onions.toSeq(onions).foreach { onion =>
+                sum += nRowsTable * encColSize(tpe.size, onion)
+              }
+            case None =>
+              // exists in DET
+              sum += nRowsTable * tpe.size
+          }
+      }
+    }
+
+    usedPre.foreach { case (tbl, m) =>
+      val nRowsTable = stats.stats(tbl).row_count
+      m.values.foreach { onions =>
+        Onions.toSeq(onions).foreach { o =>
+          sum += nRowsTable * encColSize(4, o)
+        }
+      }
+    }
+
+    usedHom.foreach { case (tbl, gids) =>
+      val nRowsTable = stats.stats(tbl).row_count
+      gids.foreach { gid =>
+        sum += homAggSize(globalOpts, tbl, gid, nRowsTable)
+      }
+    }
+
+    sum
+  }
+
+  protected def encColSize(regColSize: Int, o: Int): Long = {
+    o match {
+      case Onions.DET => regColSize
+      case Onions.OPE => regColSize * 2
+      case Onions.SWP => regColSize * 3 // estimate only
+      case _ => throw new RuntimeException("Unhandled onion: " + o);
+    }
+  }
+
+  protected def homAggSize(
+    globalOpts: GlobalOpts, reln: String, gid: Int, nRows: Long): Long = {
+    val nExprs = globalOpts.homGroups(reln)(gid).size
+
+    val nRowsPerHomAgg = math.ceil(12.0 / nExprs.toDouble).toLong
+    val nAggs = math.ceil(nRows.toDouble / nRowsPerHomAgg.toDouble).toLong
+
+    val nBitsPerAgg = 83 // TODO: this is hardcoded in our system in various places
+
+    val bytesPerAgg =
+      math.max(
+        nExprs.toDouble * nRowsPerHomAgg.toDouble * nBitsPerAgg.toDouble * 2.0 / 8.0,
+        256.0).toLong
+
+    println(
+      "homGroup(%s,%d): nExprs = %d, nRowsPerHomAgg = %d, bytesPerAgg = %d, nAggs=%d, totalSize=%s".format(
+      reln, gid, nExprs, nRowsPerHomAgg, bytesPerAgg, nAggs, (nAggs * bytesPerAgg).toString))
+
+    nAggs * bytesPerAgg
+  }
+
+  protected def mergeInto(dest: HashMap[String, HashMap[String, Int]],
+                src: Map[String, Map[String, Int]]) = {
+    src.foreach { case (k, v) =>
+      val m = dest.getOrElseUpdate(k, new HashMap[String, Int])
+      v.foreach { case (k, v) => m.put(k, m.getOrElse(k, 0) | v) }
+    }
+  }
+}
+
+trait Formulator extends SpaceEstimator {
 
   val SpaceFactor = 10.0 // default
+
+  val SpaceConstraintScaleFactor = 100000000.0 // scales bytes by this amount
+  val ObjectiveFunctionScaleFactor = 1000000.0 // scales cost by this amount
 
   def optimize(
     defns: Definitions,
@@ -285,15 +500,49 @@ trait Formulator {
     }
 
     // use linear program for now
-    val bilp = formulateIntegerProgram(defns, stats, queries).reduceToBILP
-    val soln = bilp.solve().getOrElse(throw new RuntimeException("No solution brah!"))
+    val progInstance = formulateIntegerProgram(defns, stats, queries)
 
-    val optSoln = new ArrayBuffer[PlanNode]
+    val bilp = progInstance.prog.reduceToBILP
+    val (obj, soln) = bilp.solve().getOrElse(throw new RuntimeException("No solution brah!"))
+
+    val optSoln = new ArrayBuffer[(PlanNode, EstimateContext)]
     queries.foldLeft(0) { case (base, plans) =>
       val interest = soln.slice(base, base + plans.size)
       val cands = interest.zipWithIndex.filter(_._1)
       assert(cands.size == 1) // assert exactly one solution
-      optSoln += plans(cands.head._2)._1
+      val solnIdx = cands.head._2
+      val (p, ectx, _) = plans(solnIdx)
+      optSoln += ((p, ectx))
+
+      // sanity check that the required x variables have been set
+      (ectx.requiredOnions ++ ectx.precomputed).foreach { case (reln, cols) =>
+        val m = progInstance.globalXAssignReg.get(reln).getOrElse(Map.empty)
+        cols.foreach { case (name, onions) =>
+          Onions.toSeq(onions).foreach { o =>
+            m.get((name, o)).foreach { pos =>
+              if (!soln(pos)) {
+                println(
+                  "ERROR: solution does not contain required x-variable id=(%d), opt=(%s, %s, %s)".format(
+                    pos, reln, name, Onions.str(o)))
+              }
+            }
+          }
+        }
+      }
+
+      ectx.homGroups.foreach { case (reln, gids) =>
+        val m = progInstance.globalXAssignHom.get(reln).getOrElse(Map.empty)
+        gids.foreach { gid =>
+          m.get(gid).foreach { pos =>
+            if (!soln(pos)) {
+              println(
+                "ERROR: solution does not contain required x-variable id=(%d), homGroup=(%s, %s)".format(
+                  pos, reln, gid))
+            }
+          }
+        }
+      }
+
       (base + plans.size)
     }
 
@@ -302,13 +551,23 @@ trait Formulator {
     assert(optSoln.size == simpleSoln.size) // sanity
 
     // useful debugging reporting
-    optSoln.zip(simpleSoln).zipWithIndex.foreach {
-      case ((a, b), idx) if a ne b =>
+    println("LP objective function value: " + obj)
+
+    optSoln.map(_._1).zip(simpleSoln).zipWithIndex.foreach {
+      case ((a, b), idx) if a != b =>
         println("Query %d differs in choice between opt and simple solution".format(idx))
       case _ =>
     }
 
-    optSoln.toSeq
+    val origSpace = plaintextSpaceEstimate(defns, stats)
+    val encSpace = encryptedSpaceEstimate(defns, stats, optSoln.map(_._2))
+
+    println("origSpace=(%f MB), encSpace=(%f MB), overhead=(%f)".format(
+      origSpace.toDouble / (1 << 20).toDouble,
+      encSpace.toDouble / (1 << 20).toDouble,
+      encSpace.toDouble / origSpace.toDouble))
+
+    optSoln.map(_._1).toSeq
   }
 
   private def toImm(hm: HashMap[String, HashMap[String, Int]]):
@@ -368,12 +627,17 @@ trait Formulator {
       pre.map { case (k, v) => (k, v.toMap) }.toMap)
   }
 
+  case class ProgramInstance(
+    prog: BIQPInstance,
+    globalXAssignReg: Map[String, Map[(String, Int), Int]],
+    globalXAssignHom: Map[String, Map[Int, Int]])
+
   // give as input:
   // seq ( seq( (rewritten plan, est ctx, cost estimate for plan) ) )
   def formulateIntegerProgram(
     defns: Definitions,
     stats: Statistics,
-    queries: Seq[ Seq[(PlanNode, EstimateContext, Estimate)] ]): BIQPInstance = {
+    queries: Seq[ Seq[(PlanNode, EstimateContext, Estimate)] ]): ProgramInstance = {
 
     // assumes queries is not empty
     val globalOpts = queries.head.head._2.globalOpts
@@ -383,14 +647,6 @@ trait Formulator {
 
     queries.zipWithIndex.foreach { case (qplans, qidx) =>
       qplans.zipWithIndex.foreach { case ((_, ctx, _), pidx) =>
-        def mergeInto(dest: HashMap[String, HashMap[String, Int]],
-                      src: Map[String, Map[String, Int]]) = {
-          src.foreach { case (k, v) =>
-            val m = dest.getOrElseUpdate(k, new HashMap[String, Int])
-            v.foreach { case (k, v) => m.put(k, m.getOrElse(k, 0) | v) }
-          }
-        }
-
         //println("q%d_p%d requiredOnions:".format(qidx, pidx) + ctx.requiredOnions)
 
         mergeInto(reg, ctx.requiredOnions)
@@ -605,15 +861,6 @@ trait Formulator {
     // the constraint can be expressed as Ax <= b, where b is the constant
     // which says don't exceed this space
 
-    def encColSize(regColSize: Int, o: Int): Long = {
-      o match {
-        case Onions.DET => regColSize
-        case Onions.OPE => regColSize * 2
-        case Onions.SWP => regColSize * 3 // estimate only
-        case _ => throw new RuntimeException("Unhandled onion: " + o);
-      }
-    }
-
     // regular
     defns.defns.foreach { case (tbl, cols) =>
       val nRowsTable = stats.stats(tbl).row_count
@@ -660,26 +907,19 @@ trait Formulator {
     // hom agg
     globalXAssignHom.foreach { case (tbl, grps) =>
       val nRowsTable = stats.stats(tbl).row_count
-      grps.foreach { case (gid, idx) =>
-        val nExprs = globalOpts.homGroups(tbl)(gid).size
-
-        val nRowsPerHomAgg = math.ceil(12.0 / nExprs.toDouble).toInt
-        val nAggs = math.ceil(nRowsTable.toDouble / nRowsPerHomAgg.toDouble).toInt
-
-        val nBitsPerAgg = 83 // TODO: this is hardcoded in our system in various places
-
-        val bytesPerAgg =
-          math.max(
-            nExprs.toDouble * nRowsPerHomAgg.toDouble * nBitsPerAgg.toDouble * 2.0 / 8.0,
-            256.0).toInt
-
-        println("nExprs = %d, bytesPerAgg = %d, nAggs=%d".format(nExprs, bytesPerAgg, nAggs))
-
-        A_arg(0)(idx) = nAggs * bytesPerAgg
+      println("table: " + tbl)
+      grps.toSeq.sortBy(_._1).foreach { case (gid, idx) =>
+        A_arg(0)(idx) = homAggSize(globalOpts, tbl, gid, nRowsTable).toDouble
       }
     }
 
     println("x vector assignments")
+
+    queries.zipWithIndex.foldLeft(0) { case (acc, (plans, idx)) =>
+      // inclusive
+      println("q%d: x%d-x%d".format(idx, acc, acc + plans.size - 1))
+      acc + plans.size
+    }
 
     globalXAssignReg.flatMap { case (reln, m) =>
       m.map { case ((col, onion), idx) =>
@@ -697,9 +937,28 @@ trait Formulator {
       println("%d: %s:%d".format(idx, reln, gid))
     }
 
-    BIQPInstance(toImmMatrix(Q_arg), toImmVector(c_arg),
-                 Some((toImmMatrix(A_arg), toImmVector(b_arg))),
-                 Some((toImmMatrix(Aeq_arg), toImmVector(beq_arg))))
+    // Do not allow any objective value to exceed 5 orders of magnitude of the
+    // smallest value, by capping values larger
+    val smallest = c_arg.filterNot(_ == 0.0).min
+    val maxLimit = smallest * 100000.0
+    var nCapped = 0
+    val c_arg_capped = c_arg.map { x => if (x > maxLimit) { nCapped +=1;  maxLimit } else x }
+
+    if (nCapped > 0) {
+      println("WARNING: had to cap %d values to %f".format(nCapped, maxLimit))
+    }
+
+    // apply scaling
+    val c_arg_scaled = c_arg_capped.map(_ / ObjectiveFunctionScaleFactor)
+    A_arg(0) = A_arg(0).map(_ / SpaceConstraintScaleFactor)
+    b_arg(0) = b_arg(0) / SpaceConstraintScaleFactor
+
+    ProgramInstance(
+      BIQPInstance(toImmMatrix(Q_arg), toImmVector(c_arg_scaled),
+                   Some((toImmMatrix(A_arg), toImmVector(b_arg))),
+                   Some((toImmMatrix(Aeq_arg), toImmVector(beq_arg)))),
+      globalXAssignReg.map { case (k, v) => (k, v.toSeq.toMap) }.toMap,
+      globalXAssignHom.map { case (k, v) => (k, v.toSeq.toMap) }.toMap)
   }
 
 }

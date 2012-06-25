@@ -1438,6 +1438,7 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
     def costPos(p: Int): Double = {
       td(p) match {
         case PosDesc(_, _, HomGroupOnion(tbl, grp), _, _) =>
+          // (tbl, grp) is a GLOBAL id here
           val c = CostConstants.secToPGUnit(CostConstants.DecryptCostMap(Onions.HOM))
           c * ch.rows.toDouble // for now assume that each agg group needs to do 1 decryption
 
