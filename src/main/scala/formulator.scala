@@ -464,9 +464,9 @@ trait SpaceEstimator {
         nExprs.toDouble * nRowsPerHomAgg.toDouble * nBitsPerAgg.toDouble * 2.0 / 8.0,
         256.0).toLong
 
-    println(
-      "homGroup(%s,%d): nExprs = %d, nRowsPerHomAgg = %d, bytesPerAgg = %d, nAggs=%d, totalSize=%s".format(
-      reln, gid, nExprs, nRowsPerHomAgg, bytesPerAgg, nAggs, (nAggs * bytesPerAgg).toString))
+    //println(
+    //  "homGroup(%s,%d): nExprs = %d, nRowsPerHomAgg = %d, bytesPerAgg = %d, nAggs=%d, totalSize=%s".format(
+    //  reln, gid, nExprs, nRowsPerHomAgg, bytesPerAgg, nAggs, (nAggs * bytesPerAgg).toString))
 
     nAggs * bytesPerAgg
   }
@@ -515,7 +515,7 @@ trait Formulator extends SpaceEstimator {
       optSoln += ((p, ectx))
 
       // sanity check that the required x variables have been set
-      (ectx.requiredOnions ++ ectx.precomputed).foreach { case (reln, cols) =>
+      (ectx.requiredOnions.toSeq ++ ectx.precomputed.toSeq).foreach { case (reln, cols) =>
         val m = progInstance.globalXAssignReg.get(reln).getOrElse(Map.empty)
         cols.foreach { case (name, onions) =>
           Onions.toSeq(onions).foreach { o =>
@@ -552,6 +552,20 @@ trait Formulator extends SpaceEstimator {
 
     // useful debugging reporting
     println("LP objective function value: " + obj)
+
+    // check storage constraint
+    bilp.ieq_constraint.foreach { case (mat, vec) =>
+      val Ax = mat(0).zip(soln).foldLeft(0.0) { case (acc, (elem, b)) =>
+        if (b) (acc + elem) else acc
+      }
+      println("Ax_storage=%f, bx_storage=%f".format(Ax, vec(0)))
+    }
+
+    // flags enabled (excluding queries)
+    val offset = queries.foldLeft(0) { case (acc, x) => acc + x.size }
+    val xEnabled =
+      (0 until soln.size).filter(soln(_)).map(x => "x%d".format(x)).mkString("[", ", ", "]")
+    println("xEnabled: " + xEnabled)
 
     optSoln.map(_._1).zip(simpleSoln).zipWithIndex.foreach {
       case ((a, b), idx) if a != b =>
@@ -812,7 +826,7 @@ trait Formulator extends SpaceEstimator {
 
         // TODO: we really want an index which maps a plan to all the x's used
 
-        (ectx.requiredOnions ++ ectx.precomputed).foreach { case (reln, m) =>
+        (ectx.requiredOnions.toSeq ++ ectx.precomputed.toSeq).foreach { case (reln, m) =>
           val gTable: HashMap[(String, Int), Int] =
             globalXAssignReg.getOrElse(reln, HashMap.empty)
           m.foreach { case (col, o) =>
@@ -861,6 +875,8 @@ trait Formulator extends SpaceEstimator {
     // the constraint can be expressed as Ax <= b, where b is the constant
     // which says don't exceed this space
 
+    var origSpace = 0.0
+
     // regular
     defns.defns.foreach { case (tbl, cols) =>
       val nRowsTable = stats.stats(tbl).row_count
@@ -869,6 +885,7 @@ trait Formulator extends SpaceEstimator {
         case TableColumn(name, tpe, _) =>
           val regColSize = tpe.size
           b_arg(0) += SpaceFactor * nRowsTable * regColSize
+          origSpace += nRowsTable * regColSize
           reg.get(tbl).flatMap(_.get(name)) match {
             case Some(o) =>
               val os = Onions.toSeq(o)
@@ -913,6 +930,14 @@ trait Formulator extends SpaceEstimator {
       }
     }
 
+    // assert we got every onion
+    (nTotalPlans until A_arg(0).size).foreach { x =>
+      if (x == 0.0) {
+        println("ERROR: x%d = 0".format(x))
+      }
+      assert( x != 0.0 )
+    }
+
     println("x vector assignments")
 
     queries.zipWithIndex.foldLeft(0) { case (acc, (plans, idx)) =>
@@ -926,7 +951,7 @@ trait Formulator extends SpaceEstimator {
         (idx, reln, col, onion)
       }
     }.toSeq.sortBy(_._1).map { case (idx, reln, col, onion) =>
-      println("%d: %s:%s:%d".format(idx, reln, col, onion))
+      println("x%d: %s:%s:%d".format(idx, reln, col, onion))
     }
 
     globalXAssignHom.flatMap { case (reln, m) =>
@@ -934,7 +959,7 @@ trait Formulator extends SpaceEstimator {
         (idx, reln, gid)
       }
     }.toSeq.sortBy(_._1).map { case (idx, reln, gid) =>
-      println("%d: %s:%d".format(idx, reln, gid))
+      println("x%d: %s:%d".format(idx, reln, gid))
     }
 
     // Do not allow any objective value to exceed 5 orders of magnitude of the
@@ -949,6 +974,8 @@ trait Formulator extends SpaceEstimator {
     }
 
     // apply scaling
+    println("Orig Space=(%f MB)".format( origSpace / (1 << 20).toDouble ))
+
     val c_arg_scaled = c_arg_capped.map(_ / ObjectiveFunctionScaleFactor)
     A_arg(0) = A_arg(0).map(_ / SpaceConstraintScaleFactor)
     b_arg(0) = b_arg(0) / SpaceConstraintScaleFactor
