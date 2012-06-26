@@ -751,8 +751,8 @@ case class RemoteSql(stmt: SelectStmt,
     subrelations.foreach(_._1.emitCPPHelpers(cg))
     namedSubselects.foreach(_._2._1.emitCPPHelpers(cg))
 
-    assert(_paramClassName eq null)
-    assert(_paramStmt eq null)
+    //assert(_paramClassName eq null)
+    //assert(_paramStmt eq null)
 
     _paramClassName = "param_generator_%s".format(cg.uniqueId())
     cg.println("class %s : public sql_param_generator {".format(_paramClassName))

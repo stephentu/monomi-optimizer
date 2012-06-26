@@ -559,16 +559,32 @@ trait Formulator extends SpaceEstimator {
     progInstance.globalXAssignReg.foreach { case (_, m) => knobState ++= m.values }
     progInstance.globalXAssignHom.foreach { case (_, m) => knobState ++= m.values }
 
-    // set the initial solution to be the cheapest
-    val tester = queries.map(_.map(x => (x._1, x._2)))
+    val tester = queries
 
+    // set the initial solution to be the cheapest
     var solnSoFar = tester.map(_.head)
+
+    def avgScaledCost(ests: Seq[Estimate]): Double = {
+      ests.map(_.cost).sum / (ests.size.toDouble * ObjectiveFunctionScaleFactor)
+    }
+
+    def geoMeanScaledCost(ests: Seq[Estimate]): Double = {
+      val prod = ests.map(_.cost).reduceLeft(_*_)
+      math.pow(prod, 1.0 / ests.size.toDouble) / ObjectiveFunctionScaleFactor
+    }
 
     while (true) {
       val encSpace = encryptedSpaceEstimate(defns, stats, solnSoFar.map(_._2))
+
+      println("test solution: avgScaledCost=(%f), geoMeanScaledCost=(%f), encSpace=(%f MB), budgetSpace=(%f MB)".format(
+        avgScaledCost(solnSoFar.map(_._3)),
+        geoMeanScaledCost(solnSoFar.map(_._3)),
+        encSpace.toDouble / (1 << 20).toDouble,
+        budgetSpace.toDouble / (1 << 20).toDouble))
+
       if (encSpace <= budgetSpace) {
         // done
-        outputDebugSolnInfo(defns, stats, simpleSoln, solnSoFar)
+        outputDebugSolnInfo(defns, stats, simpleSoln, solnSoFar.map(x => (x._1, x._2)))
         return solnSoFar.map(_._1)
       }
 
@@ -581,14 +597,15 @@ trait Formulator extends SpaceEstimator {
         throw new RuntimeException("Infeasible")
       }
 
-      val (largestKnob, _) =
+      val (_, knobSize) =
         knobState.toSeq.map(x => (x, knobSizes(x))) max Ordering[Long].on[(_,Long)](_._2)
 
-      println("turning off optimization: x%d".format(largestKnob))
+      // find all knobs of the same size
+      val candidateKnobs = knobState.filter(x => knobSizes(x) == knobSize)
 
-      knobState -= largestKnob
+      // for each candidate knob, flip it off, find best plan, and cost
 
-      def doesPlanQualify(ectx: EstimateContext): Boolean = {
+      def doesPlanQualify(knobState: Set[Int], ectx: EstimateContext): Boolean = {
         (ectx.requiredOnions.toSeq ++ ectx.precomputed.toSeq).foreach { case (reln, cols) =>
           val gTable = progInstance.globalXAssignReg.getOrElse(reln, Map.empty)
           cols.foreach { case (name, onions) =>
@@ -610,14 +627,36 @@ trait Formulator extends SpaceEstimator {
 
       // now compute a new solution, based on this new knobset
       // assumes plans is sorted in order of cost
-      def bestPlanForQuery(plans: Seq[(PlanNode, EstimateContext)]):
-        Option[(PlanNode, EstimateContext)] = {
-        plans.foldLeft( None : Option[(PlanNode, EstimateContext)] ) { case (acc, (p, ectx)) =>
-          acc.orElse(if (doesPlanQualify(ectx)) Some((p, ectx)) else None)
+      def bestPlanForQuery(
+        knobState: Set[Int], plans: Seq[(PlanNode, EstimateContext, Estimate)]):
+        Option[(PlanNode, EstimateContext, Estimate)] = {
+        plans.foldLeft( None : Option[(PlanNode, EstimateContext, Estimate)] ) {
+          case (acc, (p, ectx, est)) =>
+          acc.orElse(if (doesPlanQualify(knobState, ectx)) Some((p, ectx, est)) else None)
         }
       }
 
-      val newSoln = tester.map(x => bestPlanForQuery(x).getOrElse(throw new RuntimeException("Infeasible")))
+      val tests: Seq[(Int, Seq[(PlanNode, EstimateContext, Estimate)])] =
+        candidateKnobs.toSeq.flatMap { x =>
+          val testKnobState = knobState.toSet -- Set(x)
+          CollectionUtils.optSeq(
+            tester.map(x => bestPlanForQuery(testKnobState, x))).map(s => (x, s))
+        }
+
+      if (tests.isEmpty) {
+        throw new RuntimeException("Infeasible")
+      }
+
+      // find the min cost tie, and remove the associated knob
+      val (knobId, newSoln) =
+        tests min Ordering[Double].on[(_, Seq[(_, _, Estimate)])] { case (_, plans) =>
+          geoMeanScaledCost(plans.map(_._3))
+        }
+
+      println("turning off largest knob: x%d (%f MB) (broke %d ties)".format(
+        knobId, knobSize.toDouble / (1 << 20).toDouble, tests.size))
+
+      knobState -= knobId
       solnSoFar = newSoln
     }
 
