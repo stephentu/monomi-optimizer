@@ -1052,7 +1052,7 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
       resolveCheck(
         ch.equivStmt.copy(
           filter = ch.equivStmt.filter.map(x => And(x, origExpr)).orElse(Some(origExpr))),
-        ctx.defns)
+        ch.equivStmt.ctx.defns)
 
     val (_, r, rr, _, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
