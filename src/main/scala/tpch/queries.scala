@@ -607,6 +607,29 @@ order by
   s_name;
 """
 
+  val q20Rewritten = """
+select  s_name,  s_address
+from  supplier,  nation
+where  s_suppkey in (
+  select ps_suppkey from     (
+    select        ps_suppkey, min(ps_availqty) as x, sum(l_quantity) as y
+    from
+        partsupp, lineitem
+    where
+      l_partkey = ps_partkey
+      and l_suppkey = ps_suppkey
+      and l_shipdate >= date '1997-01-01'
+      and l_shipdate < date '1997-01-01' + interval '1' year
+      and ps_partkey in (          select            p_partkey          from            part          where            p_name like '%khaki%'        )
+    group by ps_partkey, ps_suppkey
+  ) as anon1
+  where       x > 0.5 * y
+)
+and s_nationkey = n_nationkey
+and n_name = 'ALGERIA'
+order by  s_name;
+"""
+
   val q21 = """
 select
   s_name,

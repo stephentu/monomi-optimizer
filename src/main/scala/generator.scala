@@ -1627,7 +1627,8 @@ trait Generator extends Traversals
     // locally. We restrict this optimization to only apply when we have
     // one subquery
 
-    if (encContext == PreserveOriginal && /* we only do this for the outer most query */
+    if ((encContext == PreserveOriginal ||
+         encContext.isInstanceOf[EncProj]) &&
         remoteMaterializeAdded) { /* necessary but not sufficient condition for this opt to be applicable */
       // need to check if the query only had one relation, and that it was replaced with
       // a remote materialize plan
@@ -1672,13 +1673,61 @@ trait Generator extends Traversals
             // exactly the original query in the clear, but it seems to be
             // a reasonable check
 
+
+            println("starting point p:")
+            println(p.pretty)
+            println("encContext: " + encContext)
+
+            def findProjUsage(n: Node): Seq[Int] = {
+              val ret = new ArrayBuffer[Int]
+              topDownTraversal(n) {
+                case FieldIdent(_, _, ColumnSymbol(_, col, _, _), _) =>
+                  val p = origSS.ctx.lookupNamedProjectionIndex(col).get
+                  ret += p
+                  false
+                case FieldIdent(_, _, ProjectionSymbol(name, ctx, _), _) =>
+                  throw new RuntimeException("should not see proj symbol in pre-projection")
+                case e => true
+              }
+              ret.toSeq
+            }
+
+            def mustDecryptSqlProjExpr(e: SqlExpr): Boolean = {
+              e match {
+                case FieldIdent(_, _, ColumnSymbol(_, col, _, _), _) => false
+                case FieldIdent(_, _, ProjectionSymbol(name, ctx, _), _) =>
+                  throw new RuntimeException("BAD?")
+                case _ => true
+              }
+            }
+
+            // find usages in WHERE, GROUP BY, ORDER clauses, so we know what
+            // we *HAVE* to decrypt
+            val mustDecryptPos =
+              (cur.filter.map(findProjUsage).getOrElse(Seq.empty) ++
+               cur.groupBy.map(findProjUsage).getOrElse(Seq.empty) ++
+               cur.orderBy.map(findProjUsage).getOrElse(Seq.empty) ++
+               cur.projections.flatMap { case ExprProj(e, _, _) =>
+                if (mustDecryptSqlProjExpr(e)) findProjUsage(e)
+                else Seq.empty
+              }
+             ).toSet
+
+            println("mustDecryptPos: " + mustDecryptPos)
+
             // do any necessary decryptions
             var res = {
               val dv = td.zipWithIndex.flatMap {
-                case (x, idx) if x.onion != PlainOnion => Some(idx)
+                case (x, idx)
+                  if x.onion != PlainOnion &&
+                     (encContext == PreserveOriginal || mustDecryptPos.contains(idx)) =>
+                  Some(idx)
                 case (_, idx) => None
               }
-              if (dv.isEmpty) p else LocalDecrypt(dv, p)
+              if (dv.isEmpty) p else {
+                println("adding LocalDecrypt with dv: " + dv)
+                LocalDecrypt(dv, p)
+              }
             }
 
             // if all our group by keys are directly in the projection, heuristically
@@ -1686,7 +1735,8 @@ trait Generator extends Traversals
             // following the tuple-descs back and seeing if we hit a remote sql
             // node w/o encountering a local transformation
 
-            if (config.groupByPushDown) {
+            if (config.groupByPushDown &&
+                encContext == PreserveOriginal /* only apply if outer */) {
               cur.groupBy.foreach { gb =>
                 if (gb.having.isEmpty) {
                   // only enable push-down if underlying query is easy to reason able
@@ -1757,7 +1807,7 @@ trait Generator extends Traversals
 
             // where clause
             res =
-              cur.filter.map(f => LocalFilter(rewritePre[SqlExpr](f), f, res, Seq.empty)).getOrElse(res)
+              cur.filter.map(f => LocalFilter(rewritePre[SqlExpr](f), f, res, Seq.empty, false)).getOrElse(res)
 
             // group by clause
             res =
@@ -1791,6 +1841,26 @@ trait Generator extends Traversals
 
             // limit
             res = cur.limit.map(l => LocalLimit(l, res)).getOrElse(res)
+
+            encContext match {
+              case EncProj(os, true) =>
+                val td = res.tupleDesc
+                assert(os.size == td.size)
+                val ev = td.map(_.onion).zip(os).zipWithIndex.flatMap {
+                  case ((cur, expected), _) if cur.isOneOf(expected) =>
+                    Seq.empty
+                  case ((cur, expected), idx) if cur.isPlain =>
+                    Seq((idx, OnionType.buildIndividual(Onions.pickOne(expected))))
+                  case ((cur, expected), _) =>
+                    println("ERROR: unimplemented")
+                    println("cur: " + cur.onion + ", expected: " + expected)
+                    println("res:")
+                    println(res.pretty)
+                    throw new RuntimeException("TODO")
+                }
+                res = LocalEncrypt(ev, res)
+              case _ =>
+            }
 
             return verifyPlanNode(res)
           }

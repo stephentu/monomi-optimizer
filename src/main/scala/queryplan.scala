@@ -990,8 +990,10 @@ case class LocalOuterJoinFilter(
   def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
 }
 
+// the canPushDownFilter flag is really a nasty hack
 case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
-                       child: PlanNode, subqueries: Seq[PlanNode]) extends PlanNode {
+                       child: PlanNode, subqueries: Seq[PlanNode],
+                       canPushDownFilter: Boolean = true) extends PlanNode {
   def underlying = Some(child)
   def tupleDesc = child.tupleDesc
   def pretty0(lvl: Int) = {
@@ -1048,11 +1050,25 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
         }.getOrElse(costPerInvocation.cost)
     }.sum
 
-    val stmt =
-      resolveCheck(
+    val stmtToCheck =
+      if (canPushDownFilter) {
         ch.equivStmt.copy(
-          filter = ch.equivStmt.filter.map(x => And(x, origExpr)).orElse(Some(origExpr))),
-        ch.equivStmt.ctx.defns)
+          filter = ch.equivStmt.filter.map(x => And(x, origExpr)).orElse(Some(origExpr)))
+      } else {
+        val newProjs = ch.equivStmt.projections.map {
+          case ExprProj(expr, None, _) => ExprProj(expr, None)
+          case ExprProj(_, Some(name), _) => ExprProj(FieldIdent(None, name), None)
+        }
+        SelectStmt(
+          newProjs,
+          Some(Seq(SubqueryRelationAST(ch.equivStmt, ctx.uniqueId()))),
+          None,
+          None,
+          None,
+          None)
+      }
+
+    val stmt = resolveCheck(stmtToCheck, ch.equivStmt.ctx.defns)
 
     val (_, r, rr, _, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
