@@ -472,7 +472,14 @@ order by
 //   group_concat(l_quantity)
 //   group_concat(l_extendedprice)
 //
-// but forms the basis for a reasonable comparison
+// but forms the basis for a reasonable comparison. This is b/c
+// in scale 10 there are only 58850 rows (before group by)
+// which match the WHERE clause, so if we had to send 2 more
+// 8-byte ints back, that would be 58850 * 2 * 8 = 0.90MB (uncompressed), which
+// even on our modest 10mbps network link would be less than 1 second of xfer time.
+// Furthermore, to decrypt 58850 * 2 ints in DET, it would take about
+// 58850 * 2 * (0.0173 / 1000.0) = 2.04 sec (0.25 sec for 8-way parallelism). So
+// in the worst case this would add ~3 seconds to query execution time
   val q17 = """
 select
   l_partkey, 0.2 * avg(l_quantity)

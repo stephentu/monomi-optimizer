@@ -349,6 +349,7 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
         System.err.println("Bad sql stmt: " + stmt.sql)
         System.err.println("Offending Node:")
         System.err.println(pretty)
+        System.err.println("Defns: " + defns.defns)
         throw e
     }
   }
