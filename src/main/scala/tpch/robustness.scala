@@ -63,7 +63,7 @@ class RobustTester extends Timer {
           val res = runner()
           val cost = res.map(_._2).sum
           val x = i.incrementAndGet()
-          if ((x % 1000) == 0) {
+          if ((x % 100) == 0) {
             println("  Finished excuting %d simulations...".format(x))
           }
           (idxs, res, cost)
@@ -76,6 +76,15 @@ class RobustTester extends Timer {
     val res = futures.map(_.get())
     val sorted = res.sortBy(_._3)
 
-    Info(sorted.last, sorted.head)
+    val ret = Info(sorted.last, sorted.head)
+
+    println("simulate(%d): worstIdxs: %s, worstCost: %f, bestIdxs: %s, bestCost: %f".format(
+      n,
+      ret.worstCase._1.mkString("[", ", ", "]"),
+      ret.worstCase._3,
+      ret.bestCase._1.mkString("[", ", ", "]"),
+      ret.bestCase._3))
+
+    ret
   }
 }
