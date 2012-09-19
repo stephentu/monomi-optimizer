@@ -1,17 +1,15 @@
 package edu.mit.cryptdb.tpch
 
 import edu.mit.cryptdb._
+import scala.actors.Futures.future
 
-class RobustTester {
+class RobustTester extends Timer {
 
   case class Info(
-    worstCase: Seq[(PlanNode, Double)],
-    bestCase: Seq[(PlanNode, Double)])
+    worstCase: (Seq[Int], Seq[(PlanNode, Double)], Double),
+    bestCase: (Seq[Int], Seq[(PlanNode, Double)], Double))
 
   private object resolver extends Resolver
-  private object generator extends Generator with DefaultOptimizerConfiguration
-  private object runtimeOptimizer extends RuntimeOptimizer with DefaultOptimizerConfiguration
-
   private val parser = new SQLParser
 
   // for each i in [1, 2, ..., queries.size()]:
@@ -31,55 +29,40 @@ class RobustTester {
     schema: Definitions, stats: Statistics,
     queries: Seq[SelectStmt], n: Int): Info = {
 
+    assert(!queries.isEmpty)
     assert(n >= 1 && n <= queries.size)
 
     println("simulate(%d)".format(n))
 
-    var worst: Option[Seq[(PlanNode, Double)]] = None
-    var best: Option[Seq[(PlanNode, Double)]] = None
+    val futures = (0 until queries.size).combinations(n).map { case idxs =>
+      def runner(): Seq[(PlanNode, Double)] = {
 
-    // all idxs for all (queries.size choose n) perms
-    var i = 0
-    (0 until queries.size).combinations(n).foreach { case idxs =>
-      val train = CollectionUtils.slice(queries, idxs)
-      val plans = generator.generateCandidatePlans(train)
-      val costs = plans.map(_.map { case (p, ctx) => (p, ctx, p.costEstimate(ctx, stats)) })
-      val simple = costs.map(_.sortBy(_._3.cost))
+        object generator extends Generator with DefaultOptimizerConfiguration
+        object runtimeOptimizer extends RuntimeOptimizer with DefaultOptimizerConfiguration
 
-      // recover the physical design from the solution
-      val design =
-        simple.map(_.head._2.makeRequiredOnionSet).foldLeft(new OnionSet) {
-          case (acc, os) => acc.merge(os)
-        }.complete(schema)
+        val train = CollectionUtils.slice(queries, idxs)
+        val plans = generator.generateCandidatePlans(train)
+        val costs = plans.map(_.map { case (p, ctx) => (p, ctx, p.costEstimate(ctx, stats)) })
+        val simple = costs.map(_.sortBy(_._3.cost))
 
-      val finalPlans = queries.map(x => runtimeOptimizer.optimize(design, stats, x))
-      val thisCost = finalPlans.map(_._2).sum
+        // recover the physical design from the solution
+        val design =
+          simple.map(_.head._2.makeRequiredOnionSet).foldLeft(new OnionSet) {
+            case (acc, os) => acc.merge(os)
+          }.complete(schema)
 
-      worst match {
-        case Some(xs) =>
-          if (xs.map(_._2).sum < thisCost) {
-            worst = Some(finalPlans)
-          }
-        case None =>
-          worst = Some(finalPlans)
+        queries.map(x => runtimeOptimizer.optimize(design, stats, x))
       }
-
-      best match {
-        case Some(xs) =>
-          if (xs.map(_._2).sum > thisCost) {
-            best = Some(finalPlans)
-          }
-        case None =>
-          best = Some(finalPlans)
-      }
-
-      i += 1
-      if ((i % 1000) == 0) {
-        println("  *** completed %d simulations".format(i))
+      future {
+        val res = runner()
+        val cost = res.map(_._2).sum
+        (idxs, res, cost)
       }
     }
 
-    assert(worst.isDefined && best.isDefined)
-    Info(worst.get, best.get)
+    val res = futures.map(_.apply())
+    val sorted = res.toSeq.sortBy(_._3)
+
+    Info(sorted.last, sorted.head)
   }
 }
