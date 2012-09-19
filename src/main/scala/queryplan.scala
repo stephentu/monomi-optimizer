@@ -1,43 +1,10 @@
 package edu.mit.cryptdb
 
-import scala.util.parsing.json._
+import net.liftweb.json._
 import scala.collection.mutable.{ ArrayBuffer, HashMap }
 
 object GlobalOpts {
   final val empty = GlobalOpts(Map.empty, Map.empty)
-}
-
-// we dont just use the JSON object because it's not thread-safe...
-class JSONParser extends scala.util.parsing.json.Parser {
-
-  // code taken from:
-  // https://github.com/scala/scala/blob/v2.9.2/src/library/scala/util/parsing/json/JSON.scala
-
-  private def unRaw (in : Any) : Any = in match {
-    case JSONObject(obj) => obj.map({ case (k,v) => (k,unRaw(v))}).toList
-    case JSONArray(list) => list.map(unRaw)
-    case x => x
-  }
-
-  def parseRaw(input : String) : Option[JSONType] =
-    phrase(root)(new lexical.Scanner(input)) match {
-      case Success(result, _) => Some(result)
-      case _ => None
-    }
-
-  def parseFull(input: String): Option[Any] =
-    parseRaw(input) match {
-      case Some(data) => Some(resolveType(data))
-      case None => None
-    }
-
-  def resolveType(input: Any): Any = input match {
-    case JSONObject(data) => data.transform {
-      case (k,v) => resolveType(v)
-    }
-    case JSONArray(data) => data.map(resolveType)
-    case x => x
-  }
 }
 
 case class GlobalOpts(
@@ -206,8 +173,6 @@ trait PgQueryPlanExtractor {
     extractCostFromDBSql(stmt.sqlFromDialect(PostgresDialect), dbconn, stats)
   }
 
-  private val jsonParser = new JSONParser
-
   def extractCostFromDBSql(sql: String, dbconn: DbConn,
                            stats: Option[Statistics] = None):
     (Double, Long, Option[Long],
@@ -366,11 +331,10 @@ trait PgQueryPlanExtractor {
           throw e
       }
     val res = r.map { rs =>
-      val planJson =
-        // JSON parser is not thread safe
-        jsonParser.synchronized {
-          jsonParser.parseFull(rs.getString(1))
-        }
+      val jsonAST = parse(rs.getString(1)) transform {
+        case JInt(x) => JDouble(x.toDouble)
+      }
+      val planJson = Some(jsonAST.values.asInstanceOf[Any])
       (for (L(l) <- planJson;
             M(m) = l.head;
             M(p) <- m.get("Plan")) yield extractInfoFromQueryPlan(p)).getOrElse(
