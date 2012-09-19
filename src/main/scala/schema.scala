@@ -65,14 +65,15 @@ class Statistics(val stats: Map[String, TableStats], val dbconn: Option[DbConn])
 trait DbConn extends Timer {
   def getConn: Connection
 
-  private val _tblCache = new HashMap[Long, String]
+  private val _tblCache = new HashMap[(Connection, Long), String]
 
   def makeIntTemporaryTable(nRows: Long, nameGenerator: => String): (Boolean, String) = {
+    val conn = getConn
     synchronized {
       var created = false
-      val x = _tblCache.getOrElseUpdate(nRows, {
+      val x = _tblCache.getOrElseUpdate((conn, nRows), {
         val tempTableName = nameGenerator
-        val stmt = getConn.createStatement
+        val stmt = conn.createStatement
         stmt.executeUpdate("CREATE TEMPORARY TABLE %s ( col0 INTEGER )".format(tempTableName))
 
         val insertTime =
@@ -101,8 +102,17 @@ trait DbConn extends Timer {
 
 class PgDbConn(val hostname: String, val port: Int, val db: String, val props: Properties) extends DbConn {
   Class.forName("org.postgresql.Driver")
-  val getConn = DriverManager.getConnection(
-    "jdbc:postgresql://%s:%d/%s".format(hostname, port, db), props)
+
+  // XXX: poor man's connection pooling...
+  // unfortunately, these connections never get closed
+  private val _connTL = new ThreadLocal[Connection] {
+    override protected def initialValue(): Connection = {
+      DriverManager.getConnection(
+        "jdbc:postgresql://%s:%d/%s".format(hostname, port, db), props)
+    }
+  }
+
+  def getConn = _connTL.get()
 }
 
 trait Schema {

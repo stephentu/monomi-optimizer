@@ -2982,7 +2982,7 @@ trait Generator extends Traversals
       stmts.zip(candidates).zip(perQueryInterestMap).zipWithIndex.map {
         case (((stmt, cands), im), idx) if im.isEmpty =>
 
-          println("trying query %d with %d onions...".format(idx, cands.size))
+          //println("trying query %d with %d onions...".format(idx, cands.size))
           val (time, res) =
             timedRunMillis(
               CollectionUtils.uniqueInOrderWithKey(
@@ -2990,7 +2990,7 @@ trait Generator extends Traversals
                   //println("  ...onion = " + o.compactToString)
                   (stmt, generatePlanFromOnionSet(stmt, o), o)
                 })(_._2))
-          println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
+          //println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
           res
 
         case (((stmt, cands), im), idx) =>
@@ -3020,14 +3020,14 @@ trait Generator extends Traversals
               }
             }
 
-          println("trying query %d with %d onions...".format(idx, oSets.size))
+          //println("trying query %d with %d onions...".format(idx, oSets.size))
           val (time, res) =
             timedRunMillis(
               CollectionUtils.uniqueInOrderWithKey(
                 oSets.map {
                   o => (stmt, generatePlanFromOnionSet(stmt, o), o)
                 })(_._2))
-          println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
+          //println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
           res
       }
 
@@ -3239,7 +3239,7 @@ trait Generator extends Traversals
     //  println()
     //}
 
-    println("trying query with %d onions...".format(candidates.size))
+    //println("trying query with %d onions...".format(candidates.size))
     if (candidates.size > 10000) {
       println("  WARNING: a high number of onions for sql: " + stmt.sql)
     }
@@ -3249,7 +3249,7 @@ trait Generator extends Traversals
           candidates.map {
             o => (stmt, generatePlanFromOnionSet(stmt, o), o)
           })(_._2))
-    println("  generated %d unique plans in %f ms".format(uniquePlans.size, time))
+    //println("  generated %d unique plans in %f ms".format(uniquePlans.size, time))
 
     // compute global opts from the unique plans
     val globalOpts = buildGlobalOptsFromPlans(uniquePlans.map(x => (x._2, x._3)))

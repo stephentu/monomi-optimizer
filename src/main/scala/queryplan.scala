@@ -459,7 +459,7 @@ object RemoteSql {
       dbconn.makeIntTemporaryTable(
         nRows, RemoteSql.globalUniqueNameGenerator.uniqueId())
 
-    println("created=(%b), tempTableName=(%s)".format(created, tempTableName))
+    //println("created=(%b), tempTableName=(%s)".format(created, tempTableName))
 
     (synchronized {
       _defnsCache
@@ -555,7 +555,7 @@ case class RemoteSql(stmt: SelectStmt,
 
         case In(e, Seq(NamedSubselectPlaceholder(name, _)), n, _) =>
           val ch = namedSubselects(name)._1.costEstimate(ctx, stats)
-          println("IN clause for namedSubselect=(%s) contains (%d) elements".format(name, ch.rows.toInt))
+          //println("IN clause for namedSubselect=(%s) contains (%d) elements".format(name, ch.rows.toInt))
           if (ch.rows.toInt > 10000) {
             // if we have too many elements for the IN clause, then we just stash the
             // values into a temp table

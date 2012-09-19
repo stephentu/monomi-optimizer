@@ -25,6 +25,9 @@ class RobustTester extends Timer {
     (1 to queries.size).map(i => (i, simulate(sa, st, re, i))).toMap
   }
 
+  private lazy val thdPool =
+    Executors.newFixedThreadPool(Runtime.getRuntime.availableProcessors * 2)
+
   private def simulate(
     schema: Definitions, stats: Statistics,
     queries: Seq[SelectStmt], n: Int): Info = {
@@ -34,7 +37,7 @@ class RobustTester extends Timer {
 
     println("simulate(%d)".format(n))
 
-    val thdPool = Executors.newFixedThreadPool(Runtime.getRuntime.availableProcessors * 2)
+    val i = new atomic.AtomicInteger(0)
 
     val futures = (0 until queries.size).combinations(n).map { case idxs =>
       def runner(): Seq[(PlanNode, Double)] = {
@@ -59,6 +62,10 @@ class RobustTester extends Timer {
         def call() = {
           val res = runner()
           val cost = res.map(_._2).sum
+          val x = i.incrementAndGet()
+          if ((x % 1000) == 0) {
+            println("  Finished excuting %d simulations...".format(x))
+          }
           (idxs, res, cost)
         }
       }
@@ -68,8 +75,6 @@ class RobustTester extends Timer {
 
     val res = futures.map(_.get())
     val sorted = res.sortBy(_._3)
-
-    thdPool.shutdownNow()
 
     Info(sorted.last, sorted.head)
   }
