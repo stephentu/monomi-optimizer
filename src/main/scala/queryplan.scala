@@ -59,15 +59,19 @@ case class EstimateContext(
 
     // add all requiredOnions
     requiredOnions.foreach { case (reln, cols) =>
-      cols.foreach { case (name, onion) =>
-        os.add(reln, FieldIdent(None, name), onion)
+      cols.foreach { case (name, onions) =>
+        Onions.toSeq(onions).foreach { onion =>
+          os.add(reln, FieldIdent(None, name), onion)
+        }
       }
     }
 
     // add all precomputed
     precomputed.foreach { case (reln, exprMap) =>
-      exprMap.foreach { case (name, onion) =>
-        os.add(reln, globalOpts.precomputed(reln)(name), onion)
+      exprMap.foreach { case (name, onions) =>
+        Onions.toSeq(onions).foreach { onion =>
+          os.add(reln, globalOpts.precomputed(reln)(name), onion)
+        }
       }
     }
 

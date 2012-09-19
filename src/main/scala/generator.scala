@@ -1674,9 +1674,9 @@ trait Generator extends Traversals
             // a reasonable check
 
 
-            println("starting point p:")
-            println(p.pretty)
-            println("encContext: " + encContext)
+           //println("starting point p:")
+           //println(p.pretty)
+           //println("encContext: " + encContext)
 
             def findProjUsage(n: Node): Seq[Int] = {
               val ret = new ArrayBuffer[Int]
@@ -1713,7 +1713,7 @@ trait Generator extends Traversals
               }
              ).toSet
 
-            println("mustDecryptPos: " + mustDecryptPos)
+           //println("mustDecryptPos: " + mustDecryptPos)
 
             // do any necessary decryptions
             var res = {
@@ -1725,7 +1725,7 @@ trait Generator extends Traversals
                 case (_, idx) => None
               }
               if (dv.isEmpty) p else {
-                println("adding LocalDecrypt with dv: " + dv)
+                //println("adding LocalDecrypt with dv: " + dv)
                 LocalDecrypt(dv, p)
               }
             }
@@ -2786,7 +2786,7 @@ trait Generator extends Traversals
 
     val precompExprMap = mkGlobalPreCompExprMap(onionSets0.flatten)
 
-    println("precompExprMap: " + precompExprMap)
+    //println("precompExprMap: " + precompExprMap)
 
     // make onionSets all reference global precomputed expressions
     // (HOM groups are still local though, b/c they are handled separately)
@@ -2863,14 +2863,14 @@ trait Generator extends Traversals
       }
     }
 
-    println("perQueryExprIndex:")
-    perQueryExprIndex.zipWithIndex.foreach { case (i, idx) =>
-      println("q%d:".format(idx))
-      i.foreach { case (k, v) =>
-        println("  %s:".format(k))
-        v.foreach(e => println("    %s".format(e.sql)))
-      }
-    }
+    //println("perQueryExprIndex:")
+    //perQueryExprIndex.zipWithIndex.foreach { case (i, idx) =>
+    //  println("q%d:".format(idx))
+    //  i.foreach { case (k, v) =>
+    //    println("  %s:".format(k))
+    //    v.foreach(e => println("    %s".format(e.sql)))
+    //  }
+    //}
 
     // build global index, assigning a unique number (per relation) to each
     // unique expression (HOM, not precomputed) amongst all queries. For instance,
@@ -2897,16 +2897,16 @@ trait Generator extends Traversals
       }.toMap
     }
 
-    println("globalExprIndex:")
-    globalExprIndex.foreach { case (k, m) =>
-      println("%s:".format(k))
-      m.foreach { case (e, id) =>
-        println("  %s : %d".format(e.sql, id))
-      }
-    }
+    //println("globalExprIndex:")
+    //globalExprIndex.foreach { case (k, m) =>
+    //  println("%s:".format(k))
+    //  m.foreach { case (e, id) =>
+    //    println("  %s : %d".format(e.sql, id))
+    //  }
+    //}
 
-    println("perQueryInterestMap:")
-    println(perQueryInterestMap)
+    //println("perQueryInterestMap:")
+    //println(perQueryInterestMap)
 
     // build a query index (mapping per relation ID to set of queries which use it)
     // using the example above, queryReverseIndex would be:
@@ -2922,8 +2922,8 @@ trait Generator extends Traversals
           }
       }
 
-    println("queryReverseIndex:")
-    println(queryReverseIndex)
+    //println("queryReverseIndex:")
+    //println(queryReverseIndex)
 
     val globalExprSplits /* Map[String, Set[ Set[Set[Int]] ]] */ =
       globalExprIndex.map { case (k, v) =>
@@ -2970,8 +2970,8 @@ trait Generator extends Traversals
         }
       }
 
-    println("globalExprSplits:")
-    println(globalExprSplits)
+    //println("globalExprSplits:")
+    //println(globalExprSplits)
 
     val revGlobalExprIndex = globalExprIndex.map { case (k, v) =>
       (k, v.map { case (k, v) => (v, k) }.toMap)
@@ -3042,9 +3042,9 @@ trait Generator extends Traversals
 
   @inline
   private def mkPowerSetOnionSet(os: Seq[OnionSet]): Seq[Seq[OnionSet]] = {
-    println("powerset over %d elements...".format(os.size))
+    //println("powerset over %d elements...".format(os.size))
     val (time, res) = timedRunMillis(CollectionUtils.powerSetMinusEmpty(os))
-    println("  took %f ms".format(time))
+    //println("  took %f ms".format(time))
     res
   }
 
