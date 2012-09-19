@@ -364,6 +364,50 @@ class OnionSet {
   override def toString =
     "OnionSet(opts = " + opts.toString +
     ", packedHOMs = " + packedHOMs.toString + ")"
+
+  def pretty: String = {
+    val allTables = (opts.keys.map(_._1).toSet ++ packedHOMs.keys.toSet).toSeq.sorted
+
+    // XXX: inefficient
+    def optsByReln(reln: String): (Seq[(String, Int)], Seq[(SqlExpr, String, Int)])= {
+
+      val left  = new ArrayBuffer[(String, Int)]
+      val right = new ArrayBuffer[(SqlExpr, String, Int)]
+
+      opts.foreach {
+        case ((reln0, x), (n, o)) if reln == reln0 =>
+          x match {
+            case Left(col)   => left  += ((col, o))
+            case Right(expr) => right += ((expr, n, o))
+          }
+        case _ =>
+      }
+
+      (left.toSeq, right.toSeq)
+    }
+
+    allTables.map { reln =>
+      val s = new StringBuffer
+
+      val (cols, precomp) = optsByReln(reln)
+
+      s.append("%s:\n".format(reln))
+      s.append("  columns:\n")
+      cols.foreach { case (name, o) =>
+        s.append("    %s: %s\n".format(name, Onions.str(o)))
+      }
+      s.append("  precomputed columns:\n")
+      precomp.foreach { case (expr, name, o) =>
+        s.append("    %s: %s %s\n".format(name, expr.sql, Onions.str(o)))
+      }
+      s.append("  hom groups:\n")
+      packedHOMs.get(reln).foreach { groups =>
+        s.append("    %s\n".format(groups.map(_.map(_.sql).mkString("{", ", ", "}"))))
+      }
+
+      s.toString
+    }.mkString("", "\n\n", "")
+  }
 }
 
 // this is a necessary evil until we rework the transformers api

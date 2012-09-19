@@ -134,6 +134,11 @@ object CollectionUtils {
       if ((idx + 1) != s) action()
     }
   }
+
+  // [xs[idxs[0]], xs[idxs[1]], ...]
+  def slice[A](xs: Seq[A], idxs: Seq[Int]): Seq[A] = {
+    idxs.map(i => xs(i))
+  }
 }
 
 object BitUtils {

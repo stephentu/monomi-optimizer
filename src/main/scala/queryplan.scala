@@ -53,6 +53,30 @@ case class EstimateContext(
 
   private val _idGen = new NameGenerator("fresh_")
   @inline def uniqueId(): String = _idGen.uniqueId()
+
+  def makeRequiredOnionSet: OnionSet = {
+    val os = new OnionSet
+
+    // add all requiredOnions
+    requiredOnions.foreach { case (reln, cols) =>
+      cols.foreach { case (name, onion) =>
+        os.add(reln, FieldIdent(None, name), onion)
+      }
+    }
+
+    // add all precomputed
+    precomputed.foreach { case (reln, exprMap) =>
+      exprMap.foreach { case (name, onion) =>
+        os.add(reln, globalOpts.precomputed(reln)(name), onion)
+      }
+    }
+
+    // add all homGroups
+    os.withGroups(
+      homGroups.map { case (reln, gids) =>
+        (reln, CollectionUtils.slice(globalOpts.homGroups(reln), gids.toSeq))
+      }.toMap)
+  }
 }
 
 case class Estimate(

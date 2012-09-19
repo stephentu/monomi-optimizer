@@ -2786,7 +2786,7 @@ trait Generator extends Traversals
 
     val precompExprMap = mkGlobalPreCompExprMap(onionSets0.flatten)
 
-    //println("precompExprMap: " + precompExprMap)
+    println("precompExprMap: " + precompExprMap)
 
     // make onionSets all reference global precomputed expressions
     // (HOM groups are still local though, b/c they are handled separately)
@@ -2841,6 +2841,14 @@ trait Generator extends Traversals
     //   take the previous list + onion power set (w/o groups), and invoke
     //   generatePlanFromOnionSet() w/ each elem in the list
 
+    // perQueryExprIndex maps each input query to a list of expressions
+    // it would be interested in for HOM. for example if our trace was,
+    //
+    // Q1: SELECT sum(foo.a), sum(foo.b + foo.c), d FROM foo ... WHERE ...
+    //
+    // would result in:
+    // [ { foo : [a, (b + c)] } ]
+
     val perQueryExprIndex = onionSets.map { os =>
       val maps = os.map(_.getHomGroups.map { case (k, v) =>
         (k, v.flatMap(_.toSet).toSet)
@@ -2855,20 +2863,33 @@ trait Generator extends Traversals
       }
     }
 
-    //println("perQueryExprIndex:")
-    //perQueryExprIndex.zipWithIndex.foreach { case (i, idx) =>
-    //  println("q%d:".format(idx))
-    //  i.foreach { case (k, v) =>
-    //    println("  %s:".format(k))
-    //    v.foreach(e => println("    %s".format(e.sql)))
-    //  }
-    //}
+    println("perQueryExprIndex:")
+    perQueryExprIndex.zipWithIndex.foreach { case (i, idx) =>
+      println("q%d:".format(idx))
+      i.foreach { case (k, v) =>
+        println("  %s:".format(k))
+        v.foreach(e => println("    %s".format(e.sql)))
+      }
+    }
 
-    // build global index, assigning a unique number (per relation)
-    // to each unique expression amongst all queries
+    // build global index, assigning a unique number (per relation) to each
+    // unique expression (HOM, not precomputed) amongst all queries. For instance,
+    // if our trace has:
+    //
+    // Q1: SELECT sum(foo.a) FROM foo WHERE ...
+    // Q2: SELECT sum(foo.b) FROM foo WHERE ...
+    //
+    // Then globalExprIndex would (possibly) be (where AST(x) is the representation
+    // of expression a):
+    // { 'foo' : { AST(a) : 0, AST(b) : 1 } }
     val globalExprIndex = new HashMap[String, HashMap[SqlExpr, Int]]
 
-    // Seq[Map[String, Set[Int]]]
+    // perQueryInterestMap maps each query to a set of (HOM) gids. Taking
+    // the example given above, our perQueryInterestMap would be:
+    //
+    // [ { 'foo' : [0] }, { 'foo' : [1] } ]
+    //
+    // type: Seq[Map[String, Set[Int]]]
     val perQueryInterestMap = perQueryExprIndex.map { m =>
       m.map { case (k, v) =>
         val relIdx = globalExprIndex.getOrElseUpdate(k, new HashMap[SqlExpr, Int])
@@ -2884,10 +2905,13 @@ trait Generator extends Traversals
       }
     }
 
-    //println("perQueryInterestMap:")
-    //println(perQueryInterestMap)
+    println("perQueryInterestMap:")
+    println(perQueryInterestMap)
 
     // build a query index (mapping per relation ID to set of queries which use it)
+    // using the example above, queryReverseIndex would be:
+    //
+    // { 'foo' : { 0 : [0], 1 : [1] } }
     val queryReverseIndex /* Map[String, Map[Int, Set[Int]]] */ =
       perQueryInterestMap.zipWithIndex.foldLeft( Map.empty : Map[String, Map[Int, Set[Int]]] ) {
         case (acc, (m, idx)) =>
@@ -2898,8 +2922,8 @@ trait Generator extends Traversals
           }
       }
 
-    //println("queryReverseIndex:")
-    //println(queryReverseIndex)
+    println("queryReverseIndex:")
+    println(queryReverseIndex)
 
     val globalExprSplits /* Map[String, Set[ Set[Set[Int]] ]] */ =
       globalExprIndex.map { case (k, v) =>
@@ -2946,8 +2970,8 @@ trait Generator extends Traversals
         }
       }
 
-    //println("globalExprSplits:")
-    //println(globalExprSplits)
+    println("globalExprSplits:")
+    println(globalExprSplits)
 
     val revGlobalExprIndex = globalExprIndex.map { case (k, v) =>
       (k, v.map { case (k, v) => (v, k) }.toMap)
@@ -3183,9 +3207,7 @@ trait Generator extends Traversals
     }
   }
 
-  def generateCandidatePlans(stmt: SelectStmt): CandidatePlans = {
-    val o0 = generateOnionSets(stmt)
-
+  def generateCandidatePlans(o0: Seq[OnionSet], stmt: SelectStmt): CandidatePlans = {
     //println("onions:")
     //o0.foreach { o =>
     //  println(o)
@@ -3232,6 +3254,11 @@ trait Generator extends Traversals
     // compute global opts from the unique plans
     val globalOpts = buildGlobalOptsFromPlans(uniquePlans.map(x => (x._2, x._3)))
     uniquePlans.map(x => mkGloballyAwarePlanWithEstimate(x._1, x._3, x._2, globalOpts))
+  }
+
+  def generateCandidatePlans(stmt: SelectStmt): CandidatePlans = {
+    val o0 = generateOnionSets(stmt)
+    generateCandidatePlans(o0, stmt)
   }
 
   def generateOnionSets(stmt: SelectStmt): Seq[OnionSet] = {
