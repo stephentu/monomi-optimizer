@@ -1,7 +1,7 @@
 package edu.mit.cryptdb.tpch
 
 import edu.mit.cryptdb._
-import scala.actors.Futures.future
+import java.util.concurrent._
 
 class RobustTester extends Timer {
 
@@ -34,9 +34,10 @@ class RobustTester extends Timer {
 
     println("simulate(%d)".format(n))
 
+    val thdPool = Executors.newFixedThreadPool(Runtime.getRuntime.availableProcessors * 2)
+
     val futures = (0 until queries.size).combinations(n).map { case idxs =>
       def runner(): Seq[(PlanNode, Double)] = {
-
         object generator extends Generator with DefaultOptimizerConfiguration
         object runtimeOptimizer extends RuntimeOptimizer with DefaultOptimizerConfiguration
 
@@ -53,15 +54,22 @@ class RobustTester extends Timer {
 
         queries.map(x => runtimeOptimizer.optimize(design, stats, x))
       }
-      future {
-        val res = runner()
-        val cost = res.map(_._2).sum
-        (idxs, res, cost)
-      }
-    }
 
-    val res = futures.map(_.apply())
-    val sorted = res.toSeq.sortBy(_._3)
+      val callable = new Callable[(Seq[Int], Seq[(PlanNode, Double)], Double)] {
+        def call() = {
+          val res = runner()
+          val cost = res.map(_._2).sum
+          (idxs, res, cost)
+        }
+      }
+
+      thdPool.submit(callable)
+    }.toIndexedSeq // force evaluation
+
+    val res = futures.map(_.get())
+    val sorted = res.sortBy(_._3)
+
+    thdPool.shutdownNow()
 
     Info(sorted.last, sorted.head)
   }
