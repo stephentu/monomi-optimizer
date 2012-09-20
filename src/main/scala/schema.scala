@@ -73,7 +73,7 @@ trait DbConn extends Timer {
     var ret = _tblCache.get((conn, nRows))
     var created = false
     if (ret eq null) {
-      conn.synchronized {
+      synchronized {
         // DCL-ed
         ret = _tblCache.get((conn, nRows))
         if (ret eq null) {
