@@ -65,38 +65,50 @@ class Statistics(val stats: Map[String, TableStats], val dbconn: Option[DbConn])
 trait DbConn extends Timer {
   def getConn: Connection
 
-  private val _tblCache = new HashMap[(Connection, Long), String]
+  private val _tblCache =
+    new java.util.concurrent.ConcurrentHashMap[(Connection, Long), String]
 
   def makeIntTemporaryTable(nRows: Long, nameGenerator: => String): (Boolean, String) = {
     val conn = getConn
-    synchronized {
-      var created = false
-      val x = _tblCache.getOrElseUpdate((conn, nRows), {
-        val tempTableName = nameGenerator
-        val stmt = conn.createStatement
-        stmt.executeUpdate("CREATE TEMPORARY TABLE %s ( col0 INTEGER )".format(tempTableName))
+    var ret = _tblCache.get((conn, nRows))
+    var created = false
+    if (ret eq null) {
+      conn.synchronized {
+        // DCL-ed
+        ret = _tblCache.get((conn, nRows))
+        if (ret eq null) {
+          // creator
 
-        val insertTime =
-          timedRunMillisNoReturn(
-            stmt.executeUpdate("INSERT INTO %s VALUES %s".format(
-              tempTableName,
-              (1L to nRows).map(x => "(%d)".format(x * 2)).mkString(","))))
+          val tempTableName = nameGenerator
+          val stmt = conn.createStatement
+          stmt.executeUpdate("CREATE TEMPORARY TABLE %s ( col0 INTEGER )".format(tempTableName))
 
-        println("insert time for temp table %s is %f ms".format(tempTableName, insertTime))
+          val insertTime =
+            timedRunMillisNoReturn(
+              stmt.executeUpdate("INSERT INTO %s VALUES %s".format(
+                tempTableName,
+                (1L to nRows).map(x => "(%d)".format(x * 2)).mkString(","))))
 
-        val analyzeTime =
-          timedRunMillisNoReturn(
-            stmt.executeUpdate("ANALYZE %s".format(tempTableName)))
+          println("insert time for temp table %s is %f ms".format(tempTableName, insertTime))
 
-        println("analyze time for temp table %s is %f ms".format(tempTableName, analyzeTime))
+          val analyzeTime =
+            timedRunMillisNoReturn(
+              stmt.executeUpdate("ANALYZE %s".format(tempTableName)))
 
-        stmt.close()
+          println("analyze time for temp table %s is %f ms".format(tempTableName, analyzeTime))
 
-        created = true
-        tempTableName
-      })
-      (created, x)
+          stmt.close()
+
+          created = true
+
+          val old = _tblCache.put((conn, nRows), tempTableName)
+          assert(old eq null)
+
+          ret = tempTableName
+        }
+      }
     }
+    (created, ret)
   }
 }
 

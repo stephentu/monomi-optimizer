@@ -416,7 +416,7 @@ object RemoteSql {
   val globalUniqueNameGenerator = new ThreadSafeNameGenerator("_fresh")
 
   private val _defnsCache =
-    new util.IdentityHashMap[DbConn, HashMap[String, Definitions]]
+    new java.util.concurrent.ConcurrentHashMap[String, Definitions]
 
   def makeIntTemporaryTable(nRows: Long, dbconn: DbConn): (Definitions, String) = {
     val (created, tempTableName) =
@@ -425,14 +425,13 @@ object RemoteSql {
 
     //println("created=(%b), tempTableName=(%s)".format(created, tempTableName))
 
-    (synchronized {
-      _defnsCache
-        .getOrElseUpdate(dbconn, HashMap.empty)
-        .getOrElseUpdate(tempTableName, {
-          val schema = new PgDbConnSchema(dbconn.asInstanceOf[PgDbConn])
-          schema.loadSchema()
-        })
-    }, tempTableName)
+    var d = _defnsCache.get(tempTableName)
+    if (d eq null) {
+      val schema = new PgDbConnSchema(dbconn.asInstanceOf[PgDbConn])
+      d = schema.loadSchema()
+      _defnsCache.putIfAbsent(tempTableName, d)
+    }
+    (d, tempTableName)
   }
 }
 
