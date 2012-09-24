@@ -21,6 +21,15 @@ trait RuntimeOptimizer {
   }
 
   def generateCandidatePlans(design: OnionSet, plan: SelectStmt): CandidatePlans = {
-    _gen.generateCandidatePlans(Seq(design), plan)
+    val os = _gen.generateOnionSets(plan, Some(design))
+    //println("physical design:")
+    //println(design.compactToString)
+    //println()
+    //println("permuted subset:")
+    //os.foreach { o =>
+    //  println(o)
+    //  println()
+    //}
+    _gen.generateCandidatePlans(os, plan)
   }
 }

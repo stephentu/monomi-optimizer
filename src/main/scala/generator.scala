@@ -3210,7 +3210,7 @@ trait Generator extends Traversals
   def generateCandidatePlans(o0: Seq[OnionSet], stmt: SelectStmt): CandidatePlans = {
     //println("onions:")
     //o0.foreach { o =>
-    //  println(o)
+    //  println(o.compactToString)
     //  println()
     //}
 
@@ -3261,7 +3261,10 @@ trait Generator extends Traversals
     generateCandidatePlans(o0, stmt)
   }
 
-  def generateOnionSets(stmt: SelectStmt): Seq[OnionSet] = {
+  def generateOnionSets(stmt: SelectStmt): Seq[OnionSet] =
+    generateOnionSets(stmt, None)
+
+  def generateOnionSets(stmt: SelectStmt, filter: Option[OnionSet]): Seq[OnionSet] = {
 
     def traverseContext(
       start: Node,
@@ -3283,10 +3286,19 @@ trait Generator extends Traversals
               if (config.rowLevelPrecomputation || !requiresPrecomputation) {
                 if (o == Onions.HOM_ROW_DESC) {
                   if (config.homAggConfig != HTNone) {
+                    // filters are handled elsewhere
                     workingSet.foreach(_.addPackedHOMToLastGroup(t, e))
                   }
                 } else {
-                  workingSet.foreach(_.add(t, e, o))
+                  filter match {
+                    case Some(f) =>
+                      // check that f contains (t, e, o)
+                      f.lookup(t, e).filter { case (_, o0) => (o0 & o) != 0 }.foreach {
+                        _ => workingSet.foreach(_.add(t, e, o))
+                      }
+                    case None =>
+                      workingSet.foreach(_.add(t, e, o))
+                  }
                 }
               }
           }
@@ -3424,12 +3436,47 @@ trait Generator extends Traversals
       // one w/o the hom group
       def toggleHomGroups(s: Seq[OnionSet]): Seq[OnionSet] = {
         s.flatMap { os =>
-          if (!os.getHomGroups.isEmpty) Seq(os, os.withoutGroups) else Seq(os)
+          val homGroups = os.getHomGroups
+          if (!homGroups.isEmpty) {
+            filter match {
+              case Some(f) =>
+                // map each expr in each group to zero or more groups in the filter
+                // which contain said expression. then uniquify the resulting groups
+                // in the end
+                //
+                // XXX: consider power-setting the groups?
+                val groups = homGroups.map { case (reln, exprGroups) =>
+
+                  // build index of expressions over filter groups
+                  val exprIdx = new HashMap[SqlExpr, ArrayBuffer[Seq[SqlExpr]]]
+                  f.getHomGroups.get(reln).foreach(_.foreach { exprs =>
+                    exprs.foreach { expr =>
+                      val buf = exprIdx.getOrElse(expr, new ArrayBuffer[Seq[SqlExpr]])
+                      buf += exprs
+                      exprIdx.put(expr, buf)
+                    }
+                  })
+
+                  (reln, exprGroups.flatten.flatMap { expr =>
+                    exprIdx.get(expr).map(_.toSeq).getOrElse(Seq.empty)
+                  }.toSet.toSeq)
+                }
+
+                def filterEmptyGroups(m: Map[String, Seq[Seq[SqlExpr]]]) =
+                  m.filterNot(_._2.isEmpty)
+                val m = filterEmptyGroups(groups.toMap)
+                if (m.isEmpty)
+                  Seq(os)
+                else
+                  Seq(os, os.withGroups(m))
+              case None => Seq(os, os.withoutGroups)
+            }
+          } else Seq(os)
         }
       }
 
       (toggleHomGroups(s0) ++ s1.getOrElse(Seq.empty) ++ s2.getOrElse(Seq.empty) ++
-      s3.getOrElse(Seq.empty) ++ s4.getOrElse(Seq.empty)).filterNot(_.isEmpty)
+      s3.getOrElse(Seq.empty) ++ s4.getOrElse(Seq.empty)).filterNot(_.isEmpty).toSet.toSeq
     }
 
     buildForSelectStmt(stmt, Seq(new OnionSet))
