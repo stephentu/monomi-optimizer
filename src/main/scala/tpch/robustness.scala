@@ -15,14 +15,24 @@ class RobustTester extends Timer {
   // for each i in [1, 2, ..., queries.size()]:
   //   find the i queries which, when trained on, produce the worst/best
   //      sum(Run(Q1), Run(Q2), ..., Run(QN))
-  def simulate(schema: Schema, queries: Seq[String]): Map[Int, Info] = {
+  def simulate(schema: Schema, queries: Seq[String],
+               start: Option[Int] = None, stop: Option[Int] = None):
+    Map[Int, Info] = {
+
+    start.foreach { x =>
+      assert(x >= 1 && x <= queries.size)
+      stop.foreach(y => assert(x <= y))
+    }
+    stop.foreach(x => assert(x >= 1 && x <= queries.size))
+
     val sa = schema.loadSchema()
     val st = schema.loadStats()
 
     val un = queries.map(parser.parse(_))
     val re = un.map(x => resolver.resolve(x.get, sa))
 
-    (1 to queries.size).map(i => (i, simulate(sa, st, re, i))).toMap
+    (start.getOrElse(1) to stop.getOrElse(queries.size))
+      .map(i => (i, simulate(sa, st, re, i))).toMap
   }
 
   private lazy val thdPool =
