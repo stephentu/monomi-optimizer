@@ -38,6 +38,14 @@ class RobustTester extends Timer {
   private lazy val thdPool =
     Executors.newFixedThreadPool(Runtime.getRuntime.availableProcessors * 2)
 
+  private val _thdLocalGenerator = new ThreadLocal[Generator] {
+    protected override def initialValue = new Generator with DefaultOptimizerConfiguration
+  }
+
+  private val _thdLocalRuntimeOptimizer = new ThreadLocal[RuntimeOptimizer] {
+    protected override def initialValue = new RuntimeOptimizer with DefaultOptimizerConfiguration
+  }
+
   private def simulate(
     schema: Definitions, stats: Statistics,
     queries: Seq[SelectStmt], n: Int): Info = {
@@ -51,12 +59,14 @@ class RobustTester extends Timer {
 
     val futures = (0 until queries.size).combinations(n).map { case idxs =>
       def runner(): Seq[(PlanNode, Double)] = {
-        object generator extends Generator with DefaultOptimizerConfiguration
-        object runtimeOptimizer extends RuntimeOptimizer with DefaultOptimizerConfiguration
-
         val train = CollectionUtils.slice(queries, idxs)
-        val plans = generator.generateCandidatePlans(train)
-        val costs = plans.map(_.map { case (p, ctx) => (p, ctx, p.costEstimate(ctx, stats)) })
+
+        val (time0, plans) =
+          timedRunMillis(_thdLocalGenerator.get().generateCandidatePlans(train))
+
+        val (time1, costs) =
+          timedRunMillis(plans.map(_.map { case (p, ctx) => (p, ctx, p.costEstimate(ctx, stats)) }))
+
         val simple = costs.map(_.sortBy(_._3.cost))
 
         // recover the physical design from the solution
@@ -65,7 +75,14 @@ class RobustTester extends Timer {
             case (acc, os) => acc.merge(os)
           }.complete(schema)
 
-        queries.map(x => runtimeOptimizer.optimize(design, stats, x))
+        val (time2, ret) =
+          timedRunMillis(queries.map(x => _thdLocalRuntimeOptimizer.get().optimize(design, stats, x)))
+
+        //println("time0 = %f ms".format(time0))
+        //println("time1 = %f ms".format(time1))
+        //println("time2 = %f ms".format(time2))
+
+        ret
       }
 
       val callable = new Callable[(Seq[Int], Seq[(PlanNode, Double)], Double)] {
@@ -74,7 +91,8 @@ class RobustTester extends Timer {
           val cost = res.map(_._2).sum
           val x = i.incrementAndGet()
           if ((x % 100) == 0) {
-            println("  Finished excuting %d simulations...".format(x))
+            println("  Finished excuting %d simulations (cacheHitRate=%f)...".format(
+              x, _thdLocalGenerator.get().cacheHitRate * 100.0))
           }
           (idxs, res, cost)
         }

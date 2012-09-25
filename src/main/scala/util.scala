@@ -182,3 +182,21 @@ object ProcUtils {
     ret
   }
 }
+
+// assumes object's hashCode is deterministic and value isn't changing
+final class CacheProxy[T](val value: T) {
+  private var _h: Int = 0
+  override def hashCode = {
+    // java memory model makes this thread-safe
+    if (_h == 0)
+      _h = value.hashCode
+    _h
+  }
+  override def equals(that: Any): Boolean = {
+    if (this eq that.asInstanceOf[AnyRef])
+      return true
+    if (!that.isInstanceOf[CacheProxy[_]])
+      return false
+    value.equals(that.asInstanceOf[CacheProxy[_]].value)
+  }
+}

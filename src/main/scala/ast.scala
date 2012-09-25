@@ -15,6 +15,8 @@ trait Node extends PrettyPrinters {
   def sql: String = sqlFromDialect(PostgresDialect)
 
   def sqlFromDialect(dialect: SqlDialect): String
+
+  val cacheProxy: CacheProxy[Node] = new CacheProxy(this)
 }
 
 case class SelectStmt(projections: Seq[SqlProj],

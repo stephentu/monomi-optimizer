@@ -3,6 +3,7 @@ package edu.mit.cryptdb
 import scala.collection.mutable.{
   ArrayBuffer, HashMap, HashSet, Seq => MSeq, Map => MMap }
 
+// Generator instances are not thread-safe
 trait Generator extends Traversals
   with PlanTraversals with Transformers with PlanTransformers with Timer {
 
@@ -111,8 +112,24 @@ trait Generator extends Traversals
     p
   }
 
-  def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode =
-    generatePlanFromOnionSet0(stmt, onionSet, PreserveOriginal, new GenPlanContext)
+  private val _planCache = new HashMap[(CacheProxy[Node], OnionSet), PlanNode]
+
+  private var _nCacheReqs: Long = 0
+  private var _nCacheHits: Long = 0
+
+  @inline def cacheHitRate: Double = _nCacheHits.toDouble / _nCacheReqs.toDouble
+
+  def generatePlanFromOnionSet(stmt: SelectStmt, onionSet: OnionSet): PlanNode = {
+    _nCacheReqs += 1
+    var invoke = false
+    val ret = _planCache.getOrElseUpdate(
+      (stmt.cacheProxy, onionSet),
+      {invoke = true;
+       generatePlanFromOnionSet0(stmt, onionSet, PreserveOriginal, new GenPlanContext)})
+    if (!invoke)
+      _nCacheHits += 1
+    ret
+  }
 
   abstract trait EncContext {
     def needsProjections: Boolean = true
@@ -216,9 +233,9 @@ trait Generator extends Traversals
   private val _subselectMaterializeNamePrefix = "_subselect$"
 
   private val _hiddenNamePrefix = "_hidden$"
-  private val _hiddenNames = new NameGenerator(_hiddenNamePrefix)
 
   private class GenPlanContext {
+    val _hiddenNames = new NameGenerator(_hiddenNamePrefix)
     val _subselectMaterializeNames = new NameGenerator(_subselectMaterializeNamePrefix)
   }
 
@@ -1143,7 +1160,7 @@ trait Generator extends Traversals
               translateForUniqueHomID(s, true).map {
                 case (expr, hds) =>
                   assert(hds.size == 1)
-                  val id0 = _hiddenNames.uniqueId()
+                  val id0 = genPlanContext._hiddenNames.uniqueId()
                   val expr0 = FieldIdent(None, id0)
                   val projs =
                     Seq((expr0, ExprProj(expr, None),
@@ -1155,7 +1172,7 @@ trait Generator extends Traversals
             topDownTraverseContext(e, e.ctx) {
               case avg @ Avg(f, d, _) if curRewriteCtx.aggContext =>
                 handleHomSumSpecialCase(Sum(f, d)).map { case (expr, projs) =>
-                  val cnt = FieldIdent(None, _hiddenNames.uniqueId())
+                  val cnt = FieldIdent(None, genPlanContext._hiddenNames.uniqueId())
                   ret +=
                     (avg ->
                      (Div(expr, cnt), projs ++ Seq((cnt, ExprProj(CountStar(), None),
@@ -2778,7 +2795,9 @@ trait Generator extends Traversals
 
   // return value 1-to-1 with input stmts (stmts.size == ret.size)
   def generateCandidatePlans(stmts: Seq[SelectStmt]): Seq[CandidatePlans] = {
-    val onionSets0 /* Seq[Seq[OnionSet]] */ = stmts.map(generateOnionSets)
+    val (time0, onionSets0) /* Seq[Seq[OnionSet]] */ =
+      timedRunMillis(stmts.map(generateOnionSets))
+    //println("  * onionSetTime = %f ms".format(time0))
 
     //println(onionSets0)
 
@@ -2796,15 +2815,17 @@ trait Generator extends Traversals
 
     // ------- generate various permutations -------- //
 
-    val perms /* Seq[ Seq[Seq[(Set[String], OnionSet)]] ] */ =
-      onionSets.map { os /* Seq[OnionSet] */ =>
-        if (config.greedyOnionSelection) {
-          Seq(os.map(x => (x.groupsForRelations.toSet, x.withoutGroups)))
-        } else {
-          CollectionUtils.powerSetMinusEmpty(
-            os.map(x => (x.groupsForRelations.toSet, x.withoutGroups)))
-        }
-      }
+    val (time1, perms) /* Seq[ Seq[Seq[(Set[String], OnionSet)]] ] */ =
+      timedRunMillis(
+        onionSets.map { os /* Seq[OnionSet] */ =>
+          if (config.greedyOnionSelection) {
+            Seq(os.map(x => (x.groupsForRelations.toSet, x.withoutGroups)))
+          } else {
+            CollectionUtils.powerSetMinusEmpty(
+              os.map(x => (x.groupsForRelations.toSet, x.withoutGroups)))
+          }
+        })
+    //println("  * permTime = %f ms".format(time1))
 
     // the candidates don't have groups in them, but have
     // the set of relations for which it had created a HOM
@@ -2925,50 +2946,53 @@ trait Generator extends Traversals
     //println("queryReverseIndex:")
     //println(queryReverseIndex)
 
-    val globalExprSplits /* Map[String, Set[ Set[Set[Int]] ]] */ =
-      globalExprIndex.map { case (k, v) =>
-        assert(v.values.size == v.values.toSet.size)
-        if (config.homAggConfig == HTRegWithColPacking ||
-            config.homAggConfig == HTColumar) {
-          val exprs = v.values.toSet
-          val allNonDupGroupings = CollectionUtils.allPossibleGroupings(exprs)
+    val (time2, globalExprSplits) /* Map[String, Set[ Set[Set[Int]] ]] */ =
+      timedRunMillis(
+        globalExprIndex.map { case (k, v) =>
+          assert(v.values.size == v.values.toSet.size)
+          if (config.homAggConfig == HTRegWithColPacking ||
+              config.homAggConfig == HTColumar) {
+            val exprs = v.values.toSet
+            val allNonDupGroupings = CollectionUtils.allPossibleGroupings(exprs)
 
-          val relnReverseIdx = queryReverseIndex(k)
+            val relnReverseIdx = queryReverseIndex(k)
 
-          // ret contains the query id (if Some(_))
-          def groupForOnlyOneQuery(s: Set[Int]): Option[Int] = {
-            val interest = s.flatMap(relnReverseIdx)
-            assert(!interest.isEmpty)
-            if (interest.size == 1) Some(interest.head) else None
+            // ret contains the query id (if Some(_))
+            def groupForOnlyOneQuery(s: Set[Int]): Option[Int] = {
+              val interest = s.flatMap(relnReverseIdx)
+              assert(!interest.isEmpty)
+              if (interest.size == 1) Some(interest.head) else None
+            }
+
+            def allInterestedQueries(s: Set[Int]): Set[Int] = {
+              s.flatMap(relnReverseIdx)
+            }
+
+            // give each query its own copy of the split
+            // (unique amongst shared sets)
+            val optimalSplits = perQueryInterestMap.flatMap { m => m.get(k) }.toSet
+
+            // greedy merging for each group
+            (k, allNonDupGroupings.map { grouping /* Set[Set[Int]] */ =>
+              val gseq = grouping.toIndexedSeq
+              val gmap = gseq.zipWithIndex.flatMap { case (g, i) =>
+                groupForOnlyOneQuery(g).map(q => (q, i))
+              }.groupBy(x => x._1).map { case (k, v) => (k, v.map(_._2))}.toMap
+
+              //println("gseq: " + gseq)
+              //println("gseq interest: " + gseq.map(allInterestedQueries))
+              //println("gmap: " + gmap)
+
+              val ungrouped = (0 until gseq.size).toSet -- gmap.values.flatten.toSet
+
+              ungrouped.map(gseq(_)).toSet ++ gmap.values.map(ii => ii.flatMap(gseq(_)).toSet).toSet
+            } ++ Set(optimalSplits))
+          } else {
+            (k, Set(v.values.map(Set(_)).toSet))
           }
+        })
 
-          def allInterestedQueries(s: Set[Int]): Set[Int] = {
-            s.flatMap(relnReverseIdx)
-          }
-
-          // give each query its own copy of the split
-          // (unique amongst shared sets)
-          val optimalSplits = perQueryInterestMap.flatMap { m => m.get(k) }.toSet
-
-          // greedy merging for each group
-          (k, allNonDupGroupings.map { grouping /* Set[Set[Int]] */ =>
-            val gseq = grouping.toIndexedSeq
-            val gmap = gseq.zipWithIndex.flatMap { case (g, i) =>
-              groupForOnlyOneQuery(g).map(q => (q, i))
-            }.groupBy(x => x._1).map { case (k, v) => (k, v.map(_._2))}.toMap
-
-            //println("gseq: " + gseq)
-            //println("gseq interest: " + gseq.map(allInterestedQueries))
-            //println("gmap: " + gmap)
-
-            val ungrouped = (0 until gseq.size).toSet -- gmap.values.flatten.toSet
-
-            ungrouped.map(gseq(_)).toSet ++ gmap.values.map(ii => ii.flatMap(gseq(_)).toSet).toSet
-          } ++ Set(optimalSplits))
-        } else {
-          (k, Set(v.values.map(Set(_)).toSet))
-        }
-      }
+    //println("  * globalSplitsTime = %f ms".format(time2))
 
     //println("globalExprSplits:")
     //println(globalExprSplits)
@@ -2978,58 +3002,61 @@ trait Generator extends Traversals
     }.toMap
 
     // TODO: parallelize this loop
-    val uniquePlans =
-      stmts.zip(candidates).zip(perQueryInterestMap).zipWithIndex.map {
-        case (((stmt, cands), im), idx) if im.isEmpty =>
+    val (timeLoop, uniquePlans) =
+      timedRunMillis(
+        stmts.zip(candidates).zip(perQueryInterestMap).zipWithIndex.map {
+          case (((stmt, cands), im), idx) if im.isEmpty =>
 
-          //println("trying query %d with %d onions...".format(idx, cands.size))
-          val (time, res) =
-            timedRunMillis(
-              CollectionUtils.uniqueInOrderWithKey(
-                cands.map(_._2).map { o =>
-                  //println("  ...onion = " + o.compactToString)
-                  (stmt, generatePlanFromOnionSet(stmt, o), o)
-                })(_._2))
-          //println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
-          res
+            //println("trying query %d with %d onions...".format(idx, cands.size))
+            val (time, res) =
+              timedRunMillis(
+                CollectionUtils.uniqueInOrderWithKey(
+                  cands.map(_._2).map { o =>
+                    //println("  ...onion = " + o.compactToString)
+                    (stmt, generatePlanFromOnionSet(stmt, o), o)
+                  })(_._2))
+            //println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
+            res
 
-        case (((stmt, cands), im), idx) =>
+          case (((stmt, cands), im), idx) =>
 
-          if (im.keys.size > 1) {
-            System.err.println("WARNING: query is generating multi-group candidates:")
-            System.err.println("  " + stmt.sql)
-            throw new RuntimeException("TODO: implement handling > 1 group relation")
-          }
-
-          val reln = im.keys.head
-          val exprSplits /* Seq[ Seq[Seq[SqlExpr]] ] */ =
-            globalExprSplits(reln).toSeq.map { split =>
-              split.toSeq.map { group =>
-                group.toSeq.map(i => revGlobalExprIndex(reln)(i))
-              }
+            if (im.keys.size > 1) {
+              System.err.println("WARNING: query is generating multi-group candidates:")
+              System.err.println("  " + stmt.sql)
+              throw new RuntimeException("TODO: implement handling > 1 group relation")
             }
 
-          val oSets =
-            for (split <- exprSplits; cand <- cands) yield {
-              // TODO: relax assumption
-              assert(cand._1.size <= 1)
-              if (cand._1.contains(reln)) {
-                cand._2.withGroups(Map(reln -> split))
-              } else {
-                cand._2
+            val reln = im.keys.head
+            val exprSplits /* Seq[ Seq[Seq[SqlExpr]] ] */ =
+              globalExprSplits(reln).toSeq.map { split =>
+                split.toSeq.map { group =>
+                  group.toSeq.map(i => revGlobalExprIndex(reln)(i))
+                }
               }
-            }
 
-          //println("trying query %d with %d onions...".format(idx, oSets.size))
-          val (time, res) =
-            timedRunMillis(
-              CollectionUtils.uniqueInOrderWithKey(
-                oSets.map {
-                  o => (stmt, generatePlanFromOnionSet(stmt, o), o)
-                })(_._2))
-          //println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
-          res
-      }
+            val oSets =
+              for (split <- exprSplits; cand <- cands) yield {
+                // TODO: relax assumption
+                assert(cand._1.size <= 1)
+                if (cand._1.contains(reln)) {
+                  cand._2.withGroups(Map(reln -> split))
+                } else {
+                  cand._2
+                }
+              }
+
+            //println("[ Case B ] trying query %d with %d onions...".format(idx, oSets.size))
+            val (time, res) =
+              timedRunMillis(
+                CollectionUtils.uniqueInOrderWithKey(
+                  oSets.map {
+                    o => (stmt, generatePlanFromOnionSet(stmt, o), o)
+                  })(_._2))
+            //println("  generated %d unique plans for query %d in %f ms".format(res.size, idx, time))
+            res
+        })
+
+    //println("  * loopTime = %f ms".format(timeLoop))
 
     val globalOpts = buildGlobalOptsFromPlans(uniquePlans.flatMap(_.map(x => (x._2, x._3))))
     uniquePlans.map(_.map(x => mkGloballyAwarePlanWithEstimate(x._1, x._3, x._2, globalOpts)))
