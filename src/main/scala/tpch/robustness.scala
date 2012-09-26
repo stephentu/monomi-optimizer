@@ -3,14 +3,69 @@ package edu.mit.cryptdb.tpch
 import edu.mit.cryptdb._
 import java.util.concurrent._
 
-class RobustTester extends Timer {
+class RobustTester extends Timer with PlanTransformers {
 
   case class Info(
     worstCase: (Seq[Int], Seq[(PlanNode, Double)], Double),
-    bestCase: (Seq[Int], Seq[(PlanNode, Double)], Double))
+    bestCase: (Seq[Int], Seq[(PlanNode, Double)], Double)) {
+
+    def worstCasePlans: Seq[PlanNode] = worstCase._2.map(_._1)
+    def bestCasePlans : Seq[PlanNode] = bestCase._2.map(_._1)
+  }
 
   private object resolver extends Resolver
   private val parser = new SQLParser
+
+  def workloadDiff(lhs: Seq[PlanNode], rhs: Seq[PlanNode]):
+    Seq[(Int, PlanNode, PlanNode)] = {
+    assert(lhs.size == rhs.size)
+
+    // XXX: workaround the fact that context objects still may exist in AST
+    // nodes of plan nodes- eventually we should clean this up, so that
+    // PlanNodes have no context objects in their ASTs
+
+    @inline def fix[N <: Node](s: N): N = s.withoutContextT[N]
+
+    def trfm(p: PlanNode): PlanNode =
+      topDownTransformation(p) {
+        case RemoteSql(stmt, p, ss, ns) =>
+          (Some(RemoteSql(fix(stmt), p,
+                          ss.map { case (r, s) => (r, fix(s)) },
+                          ns.map { case (k, (p, s)) => (k, (p, fix(s))) })), true)
+
+        case LocalOuterJoinFilter(e, or, p, ch, sq) =>
+          (Some(LocalOuterJoinFilter(fix(e), fix(or), p, ch, sq)), true)
+
+        case LocalFilter(e, oe, c, sq, f) =>
+          (Some(LocalFilter(fix(e), fix(oe), c, sq, f)), true)
+
+        case LocalTransform(t, os, c) =>
+          (Some(LocalTransform(t.map(x => x match {
+                case Left(i) => Left(i)
+                case Right((e, o, e0)) => Right((fix(e), o, fix(e0)))
+              }), fix(os), c)), true)
+
+        case LocalGroupBy(k, ok, f, of, c, sq) =>
+          (Some(LocalGroupBy(k.map(fix), ok.map(fix), f.map(fix), of.map(fix), c, sq)), true)
+
+        case LocalGroupFilter(f, of, c, sq) =>
+          (Some(LocalGroupFilter(fix(f), fix(of), c, sq)), true)
+
+        case e =>
+          (Some(e), true)
+      }
+
+    val lhs0 = lhs.map(trfm)
+    val rhs0 = rhs.map(trfm)
+
+    lhs0.zip(rhs0).zipWithIndex.flatMap {
+      case ((lhs, rhs), idx) =>
+        if (lhs != rhs)
+          Some((idx, lhs, rhs))
+        else
+          None
+    }
+  }
 
   // for each i in [1, 2, ..., queries.size()]:
   //   find the i queries which, when trained on, produce the worst/best

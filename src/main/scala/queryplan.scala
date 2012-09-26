@@ -443,8 +443,7 @@ case class RemoteSql(stmt: SelectStmt,
                      subrelations: Seq[(RemoteMaterialize, SelectStmt)] = Seq.empty,
 
                      /* These stmts will be evaluated by the query to substitute values.
-                      * these subselects do *not* accept a/dsf
-                      rguments, so they can be safely
+                      * these subselects do *not* accept arguments, so they can be safely
                       * run at the beginning of the query */
                      namedSubselects: Map[String, (PlanNode, SelectStmt)] = Map.empty)
 

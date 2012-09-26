@@ -176,7 +176,7 @@ class OnionSet {
   private def mkKey(relation: String, expr: SqlExpr) = {
     ((relation, expr match {
       case FieldIdent(_, n, _, _) => Left(n)
-      case _ => Right(expr.copyWithContext(null).asInstanceOf[SqlExpr])
+      case _ => Right(expr.withoutContextT[SqlExpr])
     }))
   }
 
@@ -249,7 +249,7 @@ class OnionSet {
 
   // adds to previous existing group. if no groups exist, adds to last
   def addPackedHOMToLastGroup(relation: String, expr: SqlExpr): Unit = {
-    val expr0 = expr.copyWithContext(null).asInstanceOf[SqlExpr]
+    val expr0 = expr.withoutContextT[SqlExpr]
     packedHOMs.get(relation) match {
       case Some(groups) =>
         assert(!groups.isEmpty)
@@ -263,7 +263,7 @@ class OnionSet {
   // return value is:
   // (group number (unique per relation), in group position (unique per group))
   def lookupPackedHOM(relation: String, expr: SqlExpr): Seq[(Int, Int)] = {
-    val expr0 = expr.copyWithContext(null).asInstanceOf[SqlExpr]
+    val expr0 = expr.withoutContextT[SqlExpr]
     packedHOMs.get(relation).map { _.zipWithIndex.flatMap { case (group, gidx) =>
       group.zipWithIndex.filter { _._1 == expr0 }.map { case (_, pidx) => (gidx, pidx) }
     }}.getOrElse(Seq.empty)
@@ -337,11 +337,11 @@ class OnionSet {
       case (k @ (relation, Left(name)), v) =>
         cpy.opts.put(k, v)
       case ((relation, Right(expr)), v) =>
-        cpy.opts.put((relation, Right(expr.copyWithContext(null).asInstanceOf[SqlExpr])), v)
+        cpy.opts.put((relation, Right(expr.withoutContextT[SqlExpr])), v)
     }
     packedHOMs.foreach {
       case (k, vs) =>
-        cpy.packedHOMs.put(k, vs.map(_.map(_.copyWithContext(null).asInstanceOf[SqlExpr])))
+        cpy.packedHOMs.put(k, vs.map(_.map(_.withoutContextT[SqlExpr])))
     }
     cpy
   }
@@ -352,7 +352,7 @@ class OnionSet {
     val o = opts.flatMap { case (k @ (rname, expr), (s, v)) =>
       val x = v & (~Onions.DET)
       if (x != 0 || expr.isRight) {
-        Some((k, (s, x)))
+        Some((k, (s, if (expr.isRight) v else x)))
       } else {
         None
       }
