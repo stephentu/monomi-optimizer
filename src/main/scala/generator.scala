@@ -3493,9 +3493,9 @@ trait Generator extends Traversals
                   m.filterNot(_._2.isEmpty)
                 val m = filterEmptyGroups(groups.toMap)
                 if (m.isEmpty)
-                  Seq(os)
+                  Seq(os.withoutGroups)
                 else
-                  Seq(os, os.withGroups(m))
+                  Seq(os.withoutGroups, os.withGroups(m))
               case None => Seq(os, os.withoutGroups)
             }
           } else Seq(os)
