@@ -150,9 +150,11 @@ trait Generator extends Traversals
   }
 
   private def buildHomGroupPreference(uses: Seq[Seq[HomDesc]]):
-    Map[String, Seq[Int]] = {
-    // filter out all non-explicit hom-descriptors
-    val uses0 = uses.filterNot(_.isEmpty).flatten
+    // all groups in the set are equal
+    Map[String, Seq[ Set[Int] ]] = {
+    //val uses0 = uses.filterNot(_.isEmpty).flatten
+    uses.foreach(x => assert(!x.isEmpty))
+    val uses0 = uses.flatten
 
     // build counts for each unique descriptor
     val counts = new HashMap[String, MMap[Int, Int]]
@@ -162,7 +164,11 @@ trait Generator extends Traversals
     }
 
     counts.map {
-      case (k, vs) => (k, vs.toSeq.sortWith(_._2 < _._2).map(_._1)) }.toMap
+      case (k, vs) =>
+        (k, vs.toSeq.groupBy(_._2).map {
+           case (c, xs) => (c, xs.map(_._1))
+         }.toSeq.sortWith(_._1 > _._1).map(_._2.toSet))
+    }.toMap
   }
 
   // returns a mapping of DependentFieldPlaceholder -> FieldIdent which was
@@ -197,7 +203,7 @@ trait Generator extends Traversals
   }
 
   case class RewriteAnalysisContext(subrels: Map[String, PlanNode],
-                                    homGroupPreferences: Map[String, Seq[Int]],
+                                    homGroupPreferences: Map[String, Seq[ Set[Int] ]],
                                     groupKeys: Map[Symbol, (FieldIdent, OnionType)])
 
   case class HomDesc(table: String, group: Int, pos: Int)
@@ -1092,8 +1098,12 @@ trait Generator extends Traversals
                 val useIdx =
                   analysis.homGroupPreferences.get(hd.head.table).flatMap { prefs =>
                     prefs.foldLeft( None : Option[Int] ) {
-                      case (acc, elem) =>
-                        acc.orElse(if (m.contains(elem)) Some(elem) else None)
+                      case (acc, elems) =>
+                        acc.orElse {
+                          elems.filter(elem => m.contains(elem)).map { elem =>
+                            (elem, onionSet.lookupPackedHOMById(hd.head.table, elem).get.size)
+                          }.toSeq.sortWith(_._2 < _._2).headOption.map(_._1)
+                        }
                     }
                   }.getOrElse(0)
                 hd.filter(_.group == useIdx).head
@@ -1530,8 +1540,9 @@ trait Generator extends Traversals
 
     def gatherHomRowDesc(e: SqlExpr) = {
       topDownTraverseContext(e, e.ctx) {
-        case e: SqlExpr =>
+        case e: SqlExpr if !e.isLiteral =>
           getSupportedHOMRowDescExpr(e, subqueryRelationPlans).map { case (_, hds) =>
+            assert(!hds.isEmpty)
             homGroupChoices += hds
             false
           }.getOrElse(true)
@@ -3104,50 +3115,55 @@ trait Generator extends Traversals
       ggidx
     }
 
-    val pnew = topDownTransformation(rewrittenPlan) {
-      case r @ RemoteSql(stmt, _, _, _) =>
-        val s = topDownTransformation(stmt) {
-          case FieldIdent(qual, name, _, _) =>
-            assert(qual.isDefined)
-            val qual0 = basename(qual.get)
-            val name0 = basename(name)
-            assert(!name0.startsWith("virtual_local"))
+    def doTransform[N <: Node](n: N): N =
+      topDownTransformation(n) {
+        case FieldIdent(qual, name, _, _) =>
+          assert(qual.isDefined)
+          val qual0 = basename(qual.get)
+          val name0 = basename(name)
+          assert(!name0.startsWith("virtual_local"))
 
-            if (name0.startsWith("virtual_global")) {
-              val m = precomputed.getOrElseUpdate(qual0, new HashMap[String, Int])
-              m.put(name0, m.getOrElse(name0, 0) | encType(name).get)
-            } else {
-              val cols = origPlan.ctx.defns.lookupByColumnName(name0)
-              if (cols.size > 1) {
-                println("failure: cols: " + cols)
-              }
-              assert(cols.size <= 1) // no reason this has to hold, but assume for now b/c
-                                     // it holds for TPC-H. really, we should be propagating
-                                     // more information during plan generation phase - see comment
-                                     // above
-              cols.headOption.foreach { c =>
-                encType(name).foreach { o =>
-                  val m = requiredOnions.getOrElseUpdate(c._1, new HashMap[String, Int])
-                  m.put(name0, m.getOrElse(name0, 0) | o)
-                }
+          if (name0.startsWith("virtual_global")) {
+            val m = precomputed.getOrElseUpdate(qual0, new HashMap[String, Int])
+            m.put(name0, m.getOrElse(name0, 0) | encType(name).get)
+          } else {
+            val cols = origPlan.ctx.defns.lookupByColumnName(name0)
+            if (cols.size > 1) {
+              println("failure: cols: " + cols)
+            }
+            assert(cols.size <= 1) // no reason this has to hold, but assume for now b/c
+                                   // it holds for TPC-H. really, we should be propagating
+                                   // more information during plan generation phase - see comment
+                                   // above
+            //if (cols.isEmpty)
+            //  println("WARNING: could not find column %s.%s".format(qual0, name0))
+            cols.headOption.foreach { c =>
+              encType(name).foreach { o =>
+                val m = requiredOnions.getOrElseUpdate(c._1, new HashMap[String, Int])
+                m.put(name0, m.getOrElse(name0, 0) | o)
               }
             }
+          }
 
-            keepGoing // no need for replacement
+          keepGoing // no need for replacement
 
-          case ag @ AggCall("hom_agg", Seq(a0, a1 @ StringLiteral(tbl, _), IntLiteral(grp, _)), _) =>
-            // need to replace this local group id with a global group id
-            // (the group id is local to the onion set used to generate the plan)
+        case ag @ AggCall("hom_agg", Seq(a0, a1 @ StringLiteral(tbl, _), IntLiteral(grp, _)), _) =>
+          // need to replace this local group id with a global group id
+          // (the group id is local to the onion set used to generate the plan)
 
-            val ggidx = mapLocalGidToGlobalGid(tbl, grp.toInt)
+          val ggidx = mapLocalGidToGlobalGid(tbl, grp.toInt)
 
-            homGroups.getOrElseUpdate(tbl, new HashSet[Int]) += ggidx
+          homGroups.getOrElseUpdate(tbl, new HashSet[Int]) += ggidx
 
-            replaceWith(ag.copy(args = Seq(a0, a1, IntLiteral(ggidx))))
+          replaceWith(ag.copy(args = Seq(doTransform(a0), a1, IntLiteral(ggidx))))
 
-          case _ => (None, true)
-        }.asInstanceOf[SelectStmt]
+        case e => (None, true)
 
+      }.asInstanceOf[N]
+
+    val pnew = topDownTransformation(rewrittenPlan) {
+      case r @ RemoteSql(stmt, _, _, _) =>
+        val s = doTransform(stmt)
         val newProjs = r.projs.map { pd =>
           pd.onion match {
             case HomGroupOnion(reln, localGid) =>
@@ -3156,7 +3172,6 @@ trait Generator extends Traversals
             case _ => pd
           }
         }
-
         (Some(r.copy(stmt = s, projs = newProjs)), true)
       case _ => keepGoing
     }
