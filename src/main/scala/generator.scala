@@ -3157,7 +3157,7 @@ trait Generator extends Traversals
 
           replaceWith(ag.copy(args = Seq(doTransform(a0), a1, IntLiteral(ggidx))))
 
-        case e => (None, true)
+        case _ => (None, true)
 
       }.asInstanceOf[N]
 

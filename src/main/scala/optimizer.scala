@@ -11,6 +11,7 @@ trait RuntimeOptimizer {
 
   def optimize(design: OnionSet, stats: Statistics, plan: SelectStmt): (PlanNode, Double) = {
     val plans = generateCandidatePlans(design, plan)
+    assert(!plans.isEmpty)
     val costs = plans.map { case (p, ctx) => (p, ctx, p.costEstimate(ctx, stats)) }
     val best = costs.minBy(_._3.cost)
     (best._1, best._3.cost)
@@ -22,6 +23,7 @@ trait RuntimeOptimizer {
 
   def generateCandidatePlans(design: OnionSet, plan: SelectStmt): CandidatePlans = {
     val os = _gen.generateOnionSets(plan, Some(design))
+    assert(!os.isEmpty)
     //println("physical design:")
     //println(design.compactToString)
     //println()
