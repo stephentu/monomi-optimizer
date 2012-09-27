@@ -3518,7 +3518,7 @@ trait Generator extends Traversals
       }
 
       (toggleHomGroups(s0) ++ s1.getOrElse(Seq.empty) ++ s2.getOrElse(Seq.empty) ++
-      s3.getOrElse(Seq.empty) ++ s4.getOrElse(Seq.empty)).filterNot(_.isEmpty).toSet.toSeq
+      s3.getOrElse(Seq.empty) ++ s4.getOrElse(Seq.empty)).toSet.toSeq
     }
 
     buildForSelectStmt(stmt, Seq(new OnionSet))
