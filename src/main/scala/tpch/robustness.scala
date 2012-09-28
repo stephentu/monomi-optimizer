@@ -7,10 +7,24 @@ class RobustTester extends Timer with PlanTransformers {
 
   case class Info(
     worstCase: (Seq[Int], Seq[(PlanNode, Double)], Double),
-    bestCase: (Seq[Int], Seq[(PlanNode, Double)], Double)) {
+    bestCase: (Seq[Int], Seq[(PlanNode, Double)], Double),
+    // allCosts must is sorted
+    allCosts: Seq[Double]) {
+
+    assert(allCosts.sorted == allCosts)
 
     def worstCasePlans: Seq[PlanNode] = worstCase._2.map(_._1)
     def bestCasePlans : Seq[PlanNode] = bestCase._2.map(_._1)
+
+    // array of points (cost, cdf_value), which means
+    // cdf_value fraction of all executions executed with
+    // cost time or less
+    def cdf: Seq[(Double, Double)] = {
+      val n = allCosts.size
+      allCosts.zipWithIndex.map { case (cost, idx) =>
+        (cost, (idx + 1).toDouble / n)
+      }
+    }
   }
 
   private object resolver extends Resolver
@@ -159,7 +173,7 @@ class RobustTester extends Timer with PlanTransformers {
     val res = futures.map(_.get())
     val sorted = res.sortBy(_._3)
 
-    val ret = Info(sorted.last, sorted.head)
+    val ret = Info(sorted.last, sorted.head, sorted.map(_._3))
 
     println("simulate(%d): worstIdxs: %s, worstCost: %f, bestIdxs: %s, bestCost: %f".format(
       n,
