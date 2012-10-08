@@ -9,12 +9,12 @@ trait RuntimeOptimizer {
   // takes a physical design + stats + a query plan, and greedily computes
   // the best plan and returns possible plans
 
-  def optimize(design: OnionSet, stats: Statistics, plan: SelectStmt): (PlanNode, Double) = {
+  def optimize(design: OnionSet, stats: Statistics, plan: SelectStmt):
+    (PlanNode, EstimateContext, Estimate) = {
     val plans = generateCandidatePlans(design, plan)
     assert(!plans.isEmpty)
     val costs = plans.map { case (p, ctx) => (p, ctx, p.costEstimate(ctx, stats)) }
-    val best = costs.minBy(_._3.cost)
-    (best._1, best._3.cost)
+    costs.minBy(_._3.cost)
   }
 
   private object _gen extends Generator {

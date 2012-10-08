@@ -145,7 +145,7 @@ trait ProgramGenerator {
     makeMakefile()
   }
 
-  def generate(baseFolder: File, plans: Seq[PlanNode]): Unit = {
+  def generate(baseFolder: File, plans: Seq[PlanNode], ctx: CodeGenContext): Unit = {
     baseFolder.mkdirs()
 
     def makeProgram() = {
@@ -168,13 +168,13 @@ trait ProgramGenerator {
       cg.println("#include <execution/query_cache.hh>")
       cg.println("#include <util/util.hh>")
 
-      plans.foreach(_.emitCPPHelpers(cg))
+      plans.foreach(_.emitCPPHelpers(cg, ctx))
 
       plans.zipWithIndex.foreach { case (p, idx) =>
         cg.blockBegin("static void query_%d(exec_context& ctx) {".format(idx))
 
           cg.print("physical_operator* op = ")
-          p.emitCPP(cg)
+          p.emitCPP(cg, ctx)
           cg.println(";")
 
           cg.println("op->open(ctx);")

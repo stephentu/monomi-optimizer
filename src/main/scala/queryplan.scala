@@ -83,6 +83,8 @@ case class EstimateContext(
   }
 }
 
+case class CodeGenContext(globalOpts: GlobalOpts)
+
 case class Estimate(
   cost: Double,
   rows: Long,
@@ -380,9 +382,9 @@ trait PlanNode extends Traversals with Transformers with Resolver with PgQueryPl
     }
   }
 
-  def emitCPPHelpers(cg: CodeGenerator): Unit
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext): Unit
 
-  def emitCPP(cg: CodeGenerator): Unit
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext): Unit
 
   // printing stuff
   def pretty: String = pretty0(0)
@@ -432,6 +434,19 @@ object RemoteSql {
       _defnsCache.putIfAbsent(tempTableName, d)
     }
     (d, tempTableName)
+  }
+
+  lazy val UserTranslator: user.Translator = {
+    Option(System.getProperty("userTranslatorClass")).flatMap { clsName =>
+      try {
+        Some(Class.forName(clsName).newInstance.asInstanceOf[user.Translator])
+      } catch {
+        case e =>
+          Console.err.println("[WARN] could not instantiate user translator: %s".format(clsName))
+          Console.err.println("[WARN] message: %s".format(e.getMessage))
+        None
+      }
+    }.getOrElse(new tpch.TPCHTranslator)
   }
 }
 
@@ -772,9 +787,9 @@ case class RemoteSql(stmt: SelectStmt,
   private var _paramClassName: String = null
   private var _paramStmt: SelectStmt = null
 
-  def emitCPPHelpers(cg: CodeGenerator) = {
-    subrelations.foreach(_._1.emitCPPHelpers(cg))
-    namedSubselects.foreach(_._2._1.emitCPPHelpers(cg))
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) = {
+    subrelations.foreach(_._1.emitCPPHelpers(cg, ctx))
+    namedSubselects.foreach(_._2._1.emitCPPHelpers(cg, ctx))
 
     //assert(_paramClassName eq null)
     //assert(_paramStmt eq null)
@@ -795,10 +810,22 @@ case class RemoteSql(stmt: SelectStmt,
 
       def subMarkers(q: String): String = q.replaceAll("\\$", "_")
 
+      import FieldNameHelpers._
+
       _paramStmt = topDownTransformation(stmt) {
         case FieldIdent(qual, name, _, _) =>
-          (Some(FieldIdent(qual.map(subMarkers), subMarkers(name))), false)
-
+          val qual0 = basename(qual.get)
+          val name0 = basename(name)
+          // check if precomputed using globalOpts. if so,
+          // ask the translator to rewrite the name
+          ctx.globalOpts.precomputed.get(qual0).flatMap(_.get(name0).map { expr =>
+            val newName = RemoteSql.UserTranslator.translatePrecomputedExprName(
+              name0, qual0, expr, encType(name).get)
+            (Some(FieldIdent(qual.map(subMarkers), newName)), false)
+          }).getOrElse {
+            // default case
+            (Some(FieldIdent(qual.map(subMarkers), subMarkers(name))), false)
+          }
         case TableRelationAST(name, alias, _) =>
           (Some(TableRelationAST(subMarkers(name), alias)), false)
 
@@ -896,7 +923,7 @@ case class RemoteSql(stmt: SelectStmt,
     cg.println("};")
   }
 
-  def emitCPP(cg: CodeGenerator) = {
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
     assert(_paramClassName ne null)
     assert(_paramStmt ne null)
 
@@ -906,14 +933,14 @@ case class RemoteSql(stmt: SelectStmt,
     cg.print(", {")
 
     CollectionUtils
-      .foreachWithAllButLastAction(subrelations)(_._1.emitCPP(cg))(() => cg.println(", "))
+      .foreachWithAllButLastAction(subrelations)(_._1.emitCPP(cg, ctx))(() => cg.println(", "))
 
     cg.print("}, util::map_from_pair_vec<std::string, physical_operator*>({")
 
     CollectionUtils.foreachWithAllButLastAction(namedSubselects.toSeq)({
       case (name, (plan, _)) =>
         cg.print("std::pair<std::string, physical_operator*>(%s, ".format(quoteDbl(name)))
-        plan.emitCPP(cg)
+        plan.emitCPP(cg, ctx)
         cg.print(")")
     })(() => cg.println(", "))
 
@@ -943,9 +970,9 @@ case class RemoteMaterialize(name: String, child: PlanNode) extends PlanNode {
     ch.copy(cost = ch.cost + xferCost)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) = child.emitCPPHelpers(cg, ctx)
 
-  def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = throw new RuntimeException("TODO")
 }
 
 case class LocalOuterJoinFilter(
@@ -1008,10 +1035,10 @@ case class LocalOuterJoinFilter(
     Estimate(ch.cost, r, rr.getOrElse(1), stmt, ch.seqScanInfo)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) =
-    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) =
+    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg, ctx))
 
-  def emitCPP(cg: CodeGenerator) = throw new RuntimeException("TODO")
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = throw new RuntimeException("TODO")
 }
 
 // the canPushDownFilter flag is really a nasty hack
@@ -1100,16 +1127,16 @@ case class LocalFilter(expr: SqlExpr, origExpr: SqlExpr,
     Estimate(ch.cost + subCosts, r, rr.getOrElse(1L), stmt, ch.seqScanInfo)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) =
-    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) =
+    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg, ctx))
 
-  def emitCPP(cg: CodeGenerator) = {
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
     cg.blockBegin("new local_filter_op(")
       cg.print(expr.constantFold.toCPP)
       cg.println(",")
-      child.emitCPP(cg)
+      child.emitCPP(cg, ctx)
       cg.blockBegin(",{")
-        subqueries.foreach(s => {s.emitCPP(cg); cg.println(",")})
+        subqueries.foreach(s => {s.emitCPP(cg, ctx); cg.println(",")})
       cg.blockEnd("}")
     cg.blockEnd(")")
   }
@@ -1203,9 +1230,9 @@ case class LocalTransform(
     //ch.copy(equivStmt = newStmt)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) = child.emitCPPHelpers(cg, ctx)
 
-  def emitCPP(cg: CodeGenerator) = {
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
     cg.blockBegin("new local_transform_op(")
       cg.print("{")
       trfms.foreach {
@@ -1225,7 +1252,7 @@ case class LocalTransform(
           ))
       }
       cg.println("},")
-      child.emitCPP(cg)
+      child.emitCPP(cg, ctx)
     cg.blockEnd(")")
   }
 }
@@ -1316,17 +1343,17 @@ case class LocalGroupBy(
     Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) =
-    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) =
+    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg, ctx))
 
-  def emitCPP(cg: CodeGenerator) = {
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
     val pos = keys.map {
       case TuplePosition(i, _) => i
       case e => throw new RuntimeException("TODO: unsupported: " + e)
     }
     cg.blockBegin("new local_group_by(")
       cg.println("%s,".format(pos.map(_.toString).mkString("{", ", ", "}")))
-      child.emitCPP(cg)
+      child.emitCPP(cg, ctx)
     cg.blockEnd(")")
   }
 }
@@ -1385,16 +1412,16 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
     Estimate(ch.cost + subCosts, r, rr, stmt, ch.seqScanInfo)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) =
-    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg))
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) =
+    (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg, ctx))
 
-  def emitCPP(cg: CodeGenerator) = {
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
     cg.blockBegin("new local_group_filter(")
       cg.print(filter.toCPP)
       cg.println(",")
-      child.emitCPP(cg)
+      child.emitCPP(cg, ctx)
       cg.blockBegin(", {")
-        subqueries.foreach(s => {s.emitCPP(cg); cg.println(",")})
+        subqueries.foreach(s => {s.emitCPP(cg, ctx); cg.println(",")})
       cg.blockEnd("}")
     cg.blockEnd(")")
   }
@@ -1418,15 +1445,15 @@ case class LocalOrderBy(sortKeys: Seq[(Int, OrderType)], child: PlanNode) extend
     child.costEstimate(ctx, stats)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) = child.emitCPPHelpers(cg, ctx)
 
-  def emitCPP(cg: CodeGenerator) = {
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
     cg.blockBegin("new local_order_by(")
       cg.println("%s,".format(
           sortKeys.map {
             case (i, o) => "std::make_pair(%d, %b)".format(i, o == DESC)
           }.mkString("{", ", ", "}")))
-      child.emitCPP(cg)
+      child.emitCPP(cg, ctx)
     cg.blockEnd(")")
   }
 }
@@ -1446,11 +1473,11 @@ case class LocalLimit(limit: Int, child: PlanNode) extends PlanNode {
              ch.equivStmt, ch.seqScanInfo)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) = child.emitCPPHelpers(cg, ctx)
 
-  def emitCPP(cg: CodeGenerator) = {
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
     cg.blockBegin("new local_limit(%d, ".format(limit))
-      child.emitCPP(cg)
+      child.emitCPP(cg, ctx)
     cg.blockEnd(")")
   }
 }
@@ -1495,13 +1522,13 @@ case class LocalDecrypt(positions: Seq[Int], child: PlanNode) extends PlanNode {
     ch.copy(cost = ch.cost + contrib)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) = child.emitCPPHelpers(cg, ctx)
 
-  def emitCPP(cg: CodeGenerator) = {
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
     cg.blockBegin("new local_decrypt_op(")
       cg.println("%s,".format(
           positions.map(_.toString).mkString("{", ", ", "}")))
-      child.emitCPP(cg)
+      child.emitCPP(cg, ctx)
     cg.blockEnd(")")
   }
 }
@@ -1544,9 +1571,9 @@ case class LocalEncrypt(
     ch.copy(cost = ch.cost + contrib)
   }
 
-  def emitCPPHelpers(cg: CodeGenerator) = child.emitCPPHelpers(cg)
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) = child.emitCPPHelpers(cg, ctx)
 
-  def emitCPP(cg: CodeGenerator) = {
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
     cg.print("new local_encrypt_op({")
     CollectionUtils.foreachWithAllButLastAction(positions)({ case (p, o) =>
       // TODO: we do a non-existent job of propagating encrypt information
@@ -1556,7 +1583,7 @@ case class LocalEncrypt(
       cg.print("std::pair<size_t, db_column_desc>(%d, %s)".format(p, pd.toCPP))
     })(() => cg.print(", "))
     cg.print("}, ")
-    child.emitCPP(cg)
+    child.emitCPP(cg, ctx)
     cg.print(")")
   }
 }

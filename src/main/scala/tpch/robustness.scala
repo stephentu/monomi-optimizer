@@ -151,7 +151,7 @@ class RobustTester extends Timer with PlanTransformers {
         //println("time1 = %f ms".format(time1))
         //println("time2 = %f ms".format(time2))
 
-        ret
+        ret.map { case (p, _, est) => (p, est.cost) }
       }
 
       val callable = new Callable[(Seq[Int], Seq[(PlanNode, Double)], Double)] {

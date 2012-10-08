@@ -12,7 +12,7 @@ trait Translator {
     plainTableName: String, plainColumnName: String, encOnion: Int): String
 
   def translatePrecomputedExprName(
-    exprId: Int, plainTableName: String, expr: SqlExpr, encOnion: Int): String
+    exprId: String, plainTableName: String, expr: SqlExpr, encOnion: Int): String
 
   def filenameForHomAggGroup(
     aggId: Int, plainDbName: String, plainTableName: String, aggs: Seq[SqlExpr]): String

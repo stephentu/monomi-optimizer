@@ -20,7 +20,7 @@ class TPCHTranslator extends Translator {
   }
 
   def translatePrecomputedExprName(
-    exprId: Int, plainTableName: String, expr: SqlExpr, encOnion: Int): String = {
+    exprId: String, plainTableName: String, expr: SqlExpr, encOnion: Int): String = {
 
     // enumerate all the interesting ones
 
@@ -52,7 +52,7 @@ class TPCHTranslator extends Translator {
     }
 
     // default case
-    "precomp_expr_" + exprId
+    exprId
   }
 
   private val FSPrefix = "/space/stephentu/data"
