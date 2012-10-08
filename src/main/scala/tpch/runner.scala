@@ -16,11 +16,7 @@ object Runner {
     val ps = new PrintStream(new FileOutputStream(f))
     scala.Console.setOut(ps)
 
-    val queries =
-      Seq(Queries.q1, Queries.q2, Queries.q3, Queries.q4, Queries.q5,
-          Queries.q6, Queries.q7, Queries.q8, Queries.q9, Queries.q10,
-          Queries.q11, Queries.q12, Queries.q14, Queries.q17, Queries.q18,
-          Queries.q19, Queries.q20Rewritten, Queries.q21, Queries.q22)
+    val queries = Queries.VldbTrainQueries
 
     val _props = new java.util.Properties
     _props.setProperty("user", "stephentu")
