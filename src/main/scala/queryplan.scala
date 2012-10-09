@@ -816,18 +816,21 @@ case class RemoteSql(stmt: SelectStmt,
         case FieldIdent(qual, name, _, _) =>
           val qual0 = basename(qual.get)
           val name0 = basename(name)
+          val qualName = RemoteSql.UserTranslator.translateTableName(qual0)
           // check if precomputed using globalOpts. if so,
           // ask the translator to rewrite the name
           ctx.globalOpts.precomputed.get(qual0).flatMap(_.get(name0).map { expr =>
             val newName = RemoteSql.UserTranslator.translatePrecomputedExprName(
               name0, qual0, expr, encType(name).get)
-            (Some(FieldIdent(qual.map(subMarkers), newName)), false)
+            (Some(FieldIdent(Some(qualName), newName)), false)
           }).getOrElse {
             // default case
-            (Some(FieldIdent(qual.map(subMarkers), subMarkers(name))), false)
+            (Some(FieldIdent(Some(qualName), subMarkers(name))), false)
           }
         case TableRelationAST(name, alias, _) =>
-          (Some(TableRelationAST(subMarkers(name), alias)), false)
+          val name0 = basename(name)
+          val qualName = RemoteSql.UserTranslator.translateTableName(name0)
+          (Some(TableRelationAST(qualName, alias)), false)
 
         case BoundDependentFieldPlaceholder(pos, onion, _) =>
           val id = nextId()

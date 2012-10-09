@@ -7,7 +7,7 @@ import edu.mit.cryptdb.user._
 class TPCHTranslator extends Translator {
 
   def translateTableName(plainTableName: String) = {
-    plainTableName + "_enc"
+    plainTableName + "_enc_cryptdb_opt"
   }
 
   @inline
