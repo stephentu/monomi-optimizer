@@ -131,12 +131,13 @@ trait ProgramGenerator {
       val cg = new CodeGenerator(makefile)
       val dirname = baseFolder.getName
       val dirnameCaps = dirname.toUpperCase
+      val dirnameCapsSanitized = dirnameCaps.replace('-', '_')
 
       cg.println("OBJDIRS += " + dirname)
-      cg.println(dirnameCaps + "PROGS := program")
-      cg.println(dirnameCaps + "PROGOBJS := $(patsubst %,$(OBJDIR)/" + dirname + "/%,$(" + dirnameCaps + "PROGS))")
-      cg.println("all: $(" + dirnameCaps + "PROGOBJS)")
-      cg.println("$(" + dirnameCaps + "PROGOBJS): %: %.o $(OBJDIR)/libcryptdb.so $(OBJDIR)/libedbutil.so")
+      cg.println(dirnameCapsSanitized + "PROGS := program")
+      cg.println(dirnameCapsSanitized + "PROGOBJS := $(patsubst %,$(OBJDIR)/" + dirname + "/%,$(" + dirnameCapsSanitized + "PROGS))")
+      cg.println("all: $(" + dirnameCapsSanitized + "PROGOBJS)")
+      cg.println("$(" + dirnameCapsSanitized + "PROGOBJS): %: %.o $(OBJDIR)/libcryptdb.so $(OBJDIR)/libedbutil.so")
       cg.println("\t$(CXX) $< -o $@ -ledbparser  $(LDFLAGS) -ledbutil -lcryptdb -lmysqlclient -ltbb -lgmp -lpq")
     }
 
@@ -239,12 +240,13 @@ trait ProgramGenerator {
       val cg = new CodeGenerator(makefile)
       val dirname = baseFolder.getName
       val dirnameCaps = dirname.toUpperCase
+      val dirnameCapsSanitized = dirnameCaps.replace('-', '_')
 
       cg.println("OBJDIRS += " + dirname)
-      cg.println(dirnameCaps + "PROGS := program")
-      cg.println(dirnameCaps + "PROGOBJS := $(patsubst %,$(OBJDIR)/" + dirname + "/%,$(" + dirnameCaps + "PROGS))")
-      cg.println("all: $(" + dirnameCaps + "PROGOBJS)")
-      cg.println("$(" + dirnameCaps + "PROGOBJS): %: %.o $(OBJDIR)/libcryptdb.so $(OBJDIR)/libedbparser.so $(OBJDIR)/libedbutil.so $(OBJDIR)/libexecution.so")
+      cg.println(dirnameCapsSanitized + "PROGS := program")
+      cg.println(dirnameCapsSanitized + "PROGOBJS := $(patsubst %,$(OBJDIR)/" + dirname + "/%,$(" + dirnameCapsSanitized + "PROGS))")
+      cg.println("all: $(" + dirnameCapsSanitized + "PROGOBJS)")
+      cg.println("$(" + dirnameCapsSanitized + "PROGOBJS): %: %.o $(OBJDIR)/libcryptdb.so $(OBJDIR)/libedbparser.so $(OBJDIR)/libedbutil.so $(OBJDIR)/libexecution.so")
       cg.println("\t$(CXX) $< -o $@ -ledbparser  $(LDFLAGS) -ledbutil -lcryptdb -ledbcrypto -ledbcrypto2 -lexecution -lmysqlclient -ltbb -lgmp -lpq")
     }
 

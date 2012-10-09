@@ -83,7 +83,7 @@ case class EstimateContext(
   }
 }
 
-case class CodeGenContext(globalOpts: GlobalOpts)
+case class CodeGenContext(defns: Definitions, globalOpts: GlobalOpts)
 
 case class Estimate(
   cost: Double,
@@ -845,6 +845,11 @@ case class RemoteSql(stmt: SelectStmt,
           // rows_per_agg (int64),
           // row_id (int64),
 
+  //def filenameForHomAggGroup(
+  //  aggId: Int, plainDbName: String, plainTableName: String, aggs: Seq[SqlExpr]): String
+          val filename = RemoteSql.UserTranslator.filenameForHomAggGroup(
+            gid.toInt, ctx.defns.dbconn.get.db, reln, ctx.globalOpts.homGroups(reln)(gid.toInt))
+
           // TODO: we need to compute these values instead of hardcoding
           val plainSizeBits = 1024
           val rowsPerAgg = 12
@@ -858,7 +863,7 @@ case class RemoteSql(stmt: SelectStmt,
             cg.println("m[%d] = (RowColPackCipherSize == 2048) ? db_elem(ctx.crypto->cm->getPKInfo()) : db_elem(StringFromZZ(pk[0] * pk[0]));".format(id))
           cg.blockEnd("}")
 
-          (Some(AggCall("agg_hash", Seq(QueryParamPlaceholder(id), StringLiteral("lineitem_enc/group_%d".format(gid)), IntLiteral(plainSizeBits * 2 / 8), IntLiteral(rowsPerAgg), f0))), true)
+          (Some(AggCall("agg_hash", Seq(QueryParamPlaceholder(id), StringLiteral(filename), IntLiteral(plainSizeBits * 2 / 8), IntLiteral(rowsPerAgg), f0))), true)
 
         case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), MetaFieldIdent(pos, tpe, _)), _) =>
           assert(e.isLiteral)

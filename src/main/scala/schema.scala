@@ -65,6 +65,8 @@ class Statistics(val stats: Map[String, TableStats], val dbconn: Option[DbConn])
 trait DbConn extends Timer {
   def getConn: Connection
 
+  def db: String
+
   private val _tblCache =
     new java.util.concurrent.ConcurrentHashMap[(Connection, Long), String]
 
