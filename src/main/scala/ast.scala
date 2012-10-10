@@ -659,19 +659,19 @@ case class IntLiteral(v: Long, ctx: Context = null) extends LiteralExpr {
     val s = if (onion == Onions.DET) "det" else "ope"
     tpe match {
       case IntType(1) =>
-        "db_elem((int64_t)encrypt_u8_%s(ctx.crypto, %d, %d, %b))".format(s, v, fieldPos, join)
+        "db_elem((int64_t)encrypt_u8_%s(ctx.crypto, %d, _FP(%d), _FJ(%b)))".format(s, v, fieldPos, join)
       case IntType(4) =>
-        "db_elem((int64_t)encrypt_u32_%s(ctx.crypto, %d, %d, %b))".format(s, v, fieldPos, join)
+        "db_elem((int64_t)encrypt_u32_%s(ctx.crypto, %d, _FP(%d), _FJ(%b)))".format(s, v, fieldPos, join)
       case IntType(8) =>
-        "db_elem((int64_t)encrypt_u64_%s(ctx.crypto, %d, %d, %b))".format(s, v, fieldPos, join)
+        "db_elem((int64_t)encrypt_u64_%s(ctx.crypto, %d, _FP(%d), _FJ(%b)))".format(s, v, fieldPos, join)
 
       case DecimalType(15, 2) =>
         // TODO: hack for TPC-H
         if (onion == Onions.DET) {
-          "db_elem((int64_t)encrypt_decimal_15_2_det(ctx.crypto, %d /*%s*/, %d, %b))".format(
+          "db_elem((int64_t)encrypt_decimal_15_2_det(ctx.crypto, %d /*%s*/, _FP(%d), _FJ(%b)))".format(
             v * 100, v.toString, fieldPos, join)
         } else {
-          "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, %d, %b), 16)))".format(v * 100, v.toString, fieldPos, join)
+          "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, _FP(%d), _FJ(%b)), 16)))".format(v * 100, v.toString, fieldPos, join)
         }
 
       case t =>
@@ -692,7 +692,7 @@ case class FloatLiteral(v: Double, ctx: Context = null) extends LiteralExpr {
     tpe match {
       case DecimalType(15, 2) =>
         // TODO: hack for TPC-H
-        "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, %d, %b), 16)))".format((v * 100.0).toLong, v.toString, fieldPos, join)
+        "db_elem(str_reverse(str_resize(encrypt_decimal_15_2_ope(ctx.crypto, %d /*%s*/, _FP(%d), _FJ(%b)), 16)))".format((v * 100.0).toLong, v.toString, fieldPos, join)
 
       case t =>
         throw new RuntimeException("unsupported type for encrypting float literal: " + t)
@@ -714,10 +714,10 @@ case class StringLiteral(v: String, ctx: Context = null) extends LiteralExpr {
       case FixedLenString(1) =>
         // special case char
         assert(v.length == 1)
-        "db_elem((int64_t)encrypt_u8_%s(ctx.crypto, %d /*%s*/, %d, %b))".format(
+        "db_elem((int64_t)encrypt_u8_%s(ctx.crypto, %d /*%s*/, _FP(%d), _FJ(%b)))".format(
           s, v.getBytes.apply(0).asInstanceOf[Int], v, fieldPos, join)
       case _: FixedLenString | _: VariableLenString =>
-        "db_elem(encrypt_string_%s(ctx.crypto, %s, %d, %b))".format(
+        "db_elem(encrypt_string_%s(ctx.crypto, %s, _FP(%d), _FJ(%b)))".format(
           s, quoteDbl(v), fieldPos, join)
       case t =>
         throw new RuntimeException("invalid type for encryption: expected some string type, got: " + t)
@@ -761,7 +761,7 @@ case class DateLiteral(d: String, ctx: Context = null) extends LiteralExpr {
     assert(onion == Onions.DET || onion == Onions.OPE)
     assert(tpe == DateType)
     val s = if (onion == Onions.DET) "det" else "ope"
-    "db_elem((int64_t)encrypt_date_%s(ctx.crypto, %d /*%s*/, %d, %b))".format(
+    "db_elem((int64_t)encrypt_date_%s(ctx.crypto, %d /*%s*/, _FP(%d), _FJ(%b)))".format(
       s, _intRepr, d, fieldPos, join)
   }
   def copyWithContext(c: Context) = copy(ctx = c)

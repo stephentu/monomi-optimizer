@@ -169,6 +169,22 @@ trait ProgramGenerator {
       cg.println("#include <execution/query_cache.hh>")
       cg.println("#include <util/util.hh>")
 
+      cg.blockBegin("static inline size_t _FP(size_t i) {")
+        cg.println("#ifdef ALL_SAME_KEY")
+        cg.println("return 0;")
+        cg.println("#else")
+        cg.println("return i;")
+        cg.println("#endif /* ALL_SAME_KEY */")
+      cg.blockEnd("}")
+
+      cg.blockBegin("static inline bool _FJ(bool join) {")
+        cg.println("#ifdef ALL_SAME_KEY")
+        cg.println("return false;")
+        cg.println("#else")
+        cg.println("return join;")
+        cg.println("#endif /* ALL_SAME_KEY */")
+      cg.blockEnd("}")
+
       plans.foreach(_.emitCPPHelpers(cg, ctx))
 
       plans.zipWithIndex.foreach { case (p, idx) =>
