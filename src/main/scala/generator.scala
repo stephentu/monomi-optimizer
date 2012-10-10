@@ -1255,9 +1255,10 @@ trait Generator extends Traversals
             fields.map {
               case (f, (ft, o), aggContext) =>
                 if (aggContext && curRewriteCtx.respectStructure) {
-                  if (f.getType.tpe == DecimalType(15, 2)) {
+                  f.getType.tpe match {
+                    case DecimalType(15, 2) | IntType(_) | DateType =>
                     (f, ExprProj(AggCall("group_serializer", Seq(ft)), None), o, true)
-                  } else {
+                    case _ =>
                     (f, ExprProj(GroupConcat(ft, ",", f.getType.tpe.isStringType), None), o, true)
                   }
                 } else {
@@ -2097,13 +2098,13 @@ trait Generator extends Traversals
             def procProjs(p: Seq[(SqlExpr, SqlProj, OnionType, Boolean)]) = {
               p.map {
                 case t @ (origExpr, ep @ ExprProj(e, _, _), onion, v) if !v =>
-                  def wrapWithGroupConcat(e: SqlExpr, tpe: DataType) = {
-                    if (tpe == DecimalType(15, 2)) {
-                      AggCall("group_serializer", Seq(e))
-                    } else {
-                      GroupConcat(e, ",", tpe.isStringType)
+                  def wrapWithGroupConcat(e: SqlExpr, tpe: DataType) =
+                    tpe match {
+                      case DecimalType(15, 2) | IntType(_) | DateType =>
+                        AggCall("group_serializer", Seq(e))
+                      case _ =>
+                        GroupConcat(e, ",", tpe.isStringType)
                     }
-                  }
                   origExpr match {
                     case FieldIdent(_, _, sym, _) =>
                       assert(sym ne null)
