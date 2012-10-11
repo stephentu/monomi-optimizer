@@ -1,5 +1,7 @@
 package edu.mit.cryptdb.tpch
 
+import java.io.{ File, PrintWriter }
+
 // TODO: take data from the same run of ./qgen (instead of mixing runs together)
 // this way, we can say we used random seed X if asked
 
@@ -741,6 +743,41 @@ order by
           o_custkey = c_custkey
       )
 """
+
+  val QueriesById = Map(
+    1  -> Queries.q1,
+    2  -> Queries.q2,
+    3  -> Queries.q3,
+    4  -> Queries.q4,
+    5  -> Queries.q5,
+    6  -> Queries.q6,
+    7  -> Queries.q7,
+    8  -> Queries.q8,
+    9  -> Queries.q9,
+    10 -> Queries.q10,
+    11 -> Queries.q11,
+    12 -> Queries.q12,
+    13 -> Queries.q13,
+    14 -> Queries.q14,
+    16 -> Queries.q16,
+    17 -> Queries.q17,
+    18 -> Queries.q18,
+    19 -> Queries.q19,
+    20 -> Queries.q20,
+    21 -> Queries.q21,
+    22 -> Queries.q22)
+
+  // makes a bunch of qN.sql files in dir. helpful for debugging
+  def makeSqlFiles(queries: Map[Int, String], dir: File): Unit = {
+    dir.mkdirs()
+    queries.foreach { case (id, sql) =>
+      val f = new File(dir, "q%d.sql".format(id))
+      val p = new PrintWriter(f)
+      p.println(sql)
+      p.flush()
+      p.close()
+    }
+  }
 
   val AllQueries = Seq(Queries.q1, Queries.q2, Queries.q3, Queries.q4, Queries.q5, Queries.q6, Queries.q7, Queries.q8, Queries.q9, Queries.q10, Queries.q11, Queries.q12, Queries.q13, Queries.q14, /*Queries.q15,*/ Queries.q16, Queries.q17, Queries.q18, Queries.q19, Queries.q20, Queries.q21, Queries.q22)
 
