@@ -6,9 +6,14 @@ import edu.mit.cryptdb.user._
 // must be completely stateless
 class TPCHTranslator extends Translator {
 
-  def translateTableName(plainTableName: String) = {
-    plainTableName + "_enc_cryptdb_opt_with_det"
-  }
+  def translateTableName(plainTableName: String) =
+    plainTableName match {
+      case "customer" | "lineitem" | "part" | "partsupp" |
+           "region" | "nation" | "orders" | "supplier" =>
+        plainTableName + "_enc_cryptdb_opt_with_det"
+      case _ =>
+        plainTableName
+    }
 
   @inline
   private def colName(name: String, onion: Int): String =
@@ -60,7 +65,7 @@ class TPCHTranslator extends Translator {
   def filenameForHomAggGroup(
     aggId: Int, plainDbName: String, plainTableName: String, aggs: Seq[SqlExpr]): String = {
 
-    val p = FSPrefix + "/" + plainDbName + "/" + translateTableName(plainTableName)
+    val p = FSPrefix + "/" + plainDbName + "/" + plainTableName + "_enc"
 
     // enumerate all the interesting ones
 
