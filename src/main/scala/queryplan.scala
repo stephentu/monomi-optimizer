@@ -848,8 +848,6 @@ case class RemoteSql(stmt: SelectStmt,
           // rows_per_agg (int64),
           // row_id (int64),
 
-  //def filenameForHomAggGroup(
-  //  aggId: Int, plainDbName: String, plainTableName: String, aggs: Seq[SqlExpr]): String
           val filename = RemoteSql.UserTranslator.filenameForHomAggGroup(
             gid.toInt, ctx.defns.dbconn.get.db, reln, ctx.globalOpts.homGroups(reln)(gid.toInt))
 

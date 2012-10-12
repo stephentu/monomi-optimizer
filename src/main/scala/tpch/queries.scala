@@ -788,6 +788,7 @@ order by
         Queries.q19, Queries.q20Rewritten, Queries.q21, Queries.q22)
 
   // simulated using our cost optimizer, using edu.mit.cryptdb.tpch.Runner
+  // the first entry is n = 1, next is n = 2, and so on...
   val VldbSimulationIdxs =
     Seq(
       Seq(15),

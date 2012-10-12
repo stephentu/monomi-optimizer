@@ -69,6 +69,9 @@ class TPCHTranslator extends Translator {
 
     // enumerate all the interesting ones
 
+    println("filenameForHomAggGroup: table %s".format(plainTableName))
+    println("  " + aggs.map(_.sql).mkString("[", ", ", "]"))
+
     // customer
     if (plainTableName == "customer") {
       aggs match {

@@ -146,7 +146,7 @@ trait ProgramGenerator {
     makeMakefile()
   }
 
-  def generate(baseFolder: File, plans: Seq[PlanNode], ctx: CodeGenContext): Unit = {
+  def generate(baseFolder: File, plans: Seq[(PlanNode, CodeGenContext)]): Unit = {
     baseFolder.mkdirs()
 
     def makeProgram() = {
@@ -185,9 +185,9 @@ trait ProgramGenerator {
         cg.println("#endif /* ALL_SAME_KEY */")
       cg.blockEnd("}")
 
-      plans.foreach(_.emitCPPHelpers(cg, ctx))
+      plans.foreach { case (p, ctx) => p.emitCPPHelpers(cg, ctx) }
 
-      plans.zipWithIndex.foreach { case (p, idx) =>
+      plans.zipWithIndex.foreach { case ((p, ctx), idx) =>
         cg.blockBegin("static void query_%d(exec_context& ctx) {".format(idx))
 
           cg.print("physical_operator* op = ")
