@@ -848,12 +848,21 @@ case class RemoteSql(stmt: SelectStmt,
           // rows_per_agg (int64),
           // row_id (int64),
 
-          val filename = RemoteSql.UserTranslator.filenameForHomAggGroup(
-            gid.toInt, ctx.defns.dbconn.get.db, reln, ctx.globalOpts.homGroups(reln)(gid.toInt))
+          val group = ctx.globalOpts.homGroups(reln)(gid.toInt)
 
-          // TODO: we need to compute these values instead of hardcoding
-          val plainSizeBits = 1024
-          val rowsPerAgg = 12
+          val filename = RemoteSql.UserTranslator.filenameForHomAggGroup(
+            gid.toInt, ctx.defns.dbconn.get.db, reln, group)
+
+          val plainSizeBytes = RemoteSql.UserTranslator.sizeInfoForHomAggGroup(
+            reln, group)
+
+          val plainSizeBits = plainSizeBytes * 8
+
+          val nBitsPerAgg = 83 // TODO: this is hardcoded in our system in various places
+
+          val nBitsPerRow = nBitsPerAgg * group.size
+
+          val rowsPerAgg = math.floor( plainSizeBits.toDouble / nBitsPerRow.toDouble ).toInt
 
           val id = nextId()
           cg.blockBegin("{")
@@ -864,7 +873,9 @@ case class RemoteSql(stmt: SelectStmt,
             cg.println("m[%d] = (RowColPackCipherSize == 2048) ? db_elem(ctx.crypto->cm->getPKInfo()) : db_elem(StringFromZZ(pk[0] * pk[0]));".format(id))
           cg.blockEnd("}")
 
-          (Some(AggCall("agg_hash", Seq(QueryParamPlaceholder(id), StringLiteral(filename), IntLiteral(plainSizeBits * 2 / 8), IntLiteral(rowsPerAgg), f0))), true)
+          // XXX: need to read optimizer config to see if we allow multi-slot
+          // optimizations for now, assume we do
+          (Some(AggCall("agg_hash", Seq(QueryParamPlaceholder(id), StringLiteral(filename), IntLiteral(plainSizeBits * 2 / 8), IntLiteral(rowsPerAgg), IntLiteral(1), f0))), true)
 
         case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), MetaFieldIdent(pos, tpe, _)), _) =>
           assert(e.isLiteral)

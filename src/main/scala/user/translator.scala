@@ -2,6 +2,7 @@ package edu.mit.cryptdb.user
 
 import edu.mit.cryptdb.SqlExpr
 
+
 // implementations should be completely stateless
 trait Translator {
 
@@ -20,4 +21,6 @@ trait Translator {
   def preferredHomAggGroup(
     plainTableName: String, group: Seq[SqlExpr]): Seq[SqlExpr]
 
+  def sizeInfoForHomAggGroup(
+    plainTableName: String, group: Seq[SqlExpr]): Int
 }

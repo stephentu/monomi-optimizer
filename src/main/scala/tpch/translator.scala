@@ -73,6 +73,16 @@ class TPCHTranslator extends Translator {
 
   private val _lineitem_agg0_set = _lineitem_agg0_seq.toSet
 
+  private val _lineitem_agg1_seq = Seq(
+    Mult(FieldIdent(None, "l_extendedprice"), Minus(IntLiteral(1), FieldIdent(None, "l_discount"))))
+
+  private val _lineitem_agg1_set = _lineitem_agg1_seq.toSet
+
+  private val _lineitem_agg2_seq = Seq(
+    Mult(FieldIdent(None, "l_extendedprice"), FieldIdent(None, "l_discount")))
+
+  private val _lineitem_agg2_set = _lineitem_agg2_seq.toSet
+
   private val _customer_agg0_seq = Seq(
     FieldIdent(None, "c_acctbal"))
 
@@ -100,6 +110,10 @@ class TPCHTranslator extends Translator {
     else if (plainTableName == "lineitem") {
       if (aggs == _lineitem_agg0_seq)
         return p + "/row_col_pack/data"
+      if (aggs == _lineitem_agg1_seq)
+        return p + "/row_pack/disc_price"
+      if (aggs == _lineitem_agg2_seq)
+        return p + "/row_pack/revenue"
     }
 
     // partsupp
@@ -107,6 +121,9 @@ class TPCHTranslator extends Translator {
       if (aggs == _partsupp_agg0_seq)
         return p + "/row_pack/volume"
     }
+
+    println("[WARNING] Unable to assign filename for reln %s:".format(plainTableName))
+    println("  " + aggs.map(_.sql).mkString("[", ", ", "]"))
 
     // default case
     p + "/agg_" + aggId
@@ -116,21 +133,25 @@ class TPCHTranslator extends Translator {
     plainTableName: String, group: Seq[SqlExpr]): Seq[SqlExpr] = {
     val fields = group.toSet
     plainTableName match {
-      case "customer" =>
-        if (fields == _customer_agg0_set)
-          return _customer_agg0_seq
-
       case "lineitem" =>
         if (fields == _lineitem_agg0_set)
           return _lineitem_agg0_seq
 
-      case "partsupp" =>
-        if (fields == _partsupp_agg0_set)
-          return _partsupp_agg0_seq
-
       case _ =>
     }
     group
+  }
+
+  // returns size of plaintext agg in BYTES
+  def sizeInfoForHomAggGroup(
+    plainTableName: String, group: Seq[SqlExpr]): Int = {
+    plainTableName match {
+      case "lineitem" =>
+        if (group == _lineitem_agg0_seq)
+          return (1256 / 8)
+      case _ =>
+    }
+    (1024 / 8)
   }
 
 }
