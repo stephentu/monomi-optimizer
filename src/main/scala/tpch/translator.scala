@@ -62,6 +62,27 @@ class TPCHTranslator extends Translator {
 
   private val FSPrefix = "/space/stephentu/data"
 
+  private val _lineitem_agg0_seq = Seq(
+    FieldIdent(None, "l_quantity"),
+    FieldIdent(None, "l_extendedprice"),
+    FieldIdent(None, "l_discount"),
+    // (l_extendedprice * (1 - l_discount))
+    Mult(FieldIdent(None, "l_extendedprice"), Minus(IntLiteral(1), FieldIdent(None, "l_discount"))),
+  // ((l_extendedprice * (1 - l_discount)) * (1 + l_tax))
+  Mult(Mult(FieldIdent(None, "l_extendedprice"), Minus(IntLiteral(1), FieldIdent(None, "l_discount"))), Plus(IntLiteral(1), FieldIdent(None, "l_tax"))))
+
+  private val _lineitem_agg0_set = _lineitem_agg0_seq.toSet
+
+  private val _customer_agg0_seq = Seq(
+    FieldIdent(None, "c_acctbal"))
+
+  private val _customer_agg0_set = _customer_agg0_seq.toSet
+
+  private val _partsupp_agg0_seq = Seq(
+    Mult(FieldIdent(None, "ps_supplycost"), FieldIdent(None, "ps_availqty")))
+
+  private val _partsupp_agg0_set = _partsupp_agg0_seq.toSet
+
   def filenameForHomAggGroup(
     aggId: Int, plainDbName: String, plainTableName: String, aggs: Seq[SqlExpr]): String = {
 
@@ -69,48 +90,47 @@ class TPCHTranslator extends Translator {
 
     // enumerate all the interesting ones
 
-    println("filenameForHomAggGroup: table %s".format(plainTableName))
-    println("  " + aggs.map(_.sql).mkString("[", ", ", "]"))
-
     // customer
     if (plainTableName == "customer") {
-      aggs match {
-        case Seq(FieldIdent(None, "c_acctbal", _, _)) =>
-          return p + "/row_pack/acctbal"
-        case _ =>
-      }
+      if (aggs == _customer_agg0_seq)
+        return p + "/row_pack/acctbal"
     }
 
     // lineitem
     else if (plainTableName == "lineitem") {
-      aggs match {
-        case Seq(
-            FieldIdent(None, "l_quantity", _, _),
-            FieldIdent(None, "l_extendedprice", _, _),
-            FieldIdent(None, "l_discount", _, _),
-            // (l_extendedprice * (1 - l_discount))
-            Mult(FieldIdent(None, "l_extendedprice", _, _), Minus(IntLiteral(1, _), FieldIdent(None, "l_discount", _, _), _), _),
-            // ((l_extendedprice * (1 - l_discount)) * (1 + l_tax))
-            Mult(Mult(FieldIdent(None, "l_extendedprice", _, _), Minus(IntLiteral(1, _), FieldIdent(None, "l_discount", _, _), _), _), Plus(IntLiteral(1, _), FieldIdent(None, "l_tax", _, _), _), _)
-          ) =>
-
-          // XXX: ordering might be off
-          return p + "/row_col_pack/data"
-        case _ =>
-      }
+      if (aggs == _lineitem_agg0_seq)
+        return p + "/row_col_pack/data"
     }
 
     // partsupp
     else if (plainTableName == "partsupp") {
-      aggs match {
-        case Seq(Mult(FieldIdent(None, "ps_supplycost", _, _), FieldIdent(None, "ps_availqty", _, _), _)) =>
-          return p + "/row_pack/volume"
-        case _ =>
-      }
+      if (aggs == _partsupp_agg0_seq)
+        return p + "/row_pack/volume"
     }
 
     // default case
     p + "/agg_" + aggId
+  }
+
+  def preferredHomAggGroup(
+    plainTableName: String, group: Seq[SqlExpr]): Seq[SqlExpr] = {
+    val fields = group.toSet
+    plainTableName match {
+      case "customer" =>
+        if (fields == _customer_agg0_set)
+          return _customer_agg0_seq
+
+      case "lineitem" =>
+        if (fields == _lineitem_agg0_set)
+          return _lineitem_agg0_seq
+
+      case "partsupp" =>
+        if (fields == _partsupp_agg0_set)
+          return _partsupp_agg0_seq
+
+      case _ =>
+    }
+    group
   }
 
 }

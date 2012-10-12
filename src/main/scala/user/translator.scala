@@ -17,4 +17,7 @@ trait Translator {
   def filenameForHomAggGroup(
     aggId: Int, plainDbName: String, plainTableName: String, aggs: Seq[SqlExpr]): String
 
+  def preferredHomAggGroup(
+    plainTableName: String, group: Seq[SqlExpr]): Seq[SqlExpr]
+
 }

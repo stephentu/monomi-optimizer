@@ -3051,7 +3051,12 @@ trait Generator extends Traversals
                 // TODO: relax assumption
                 assert(cand._1.size <= 1)
                 if (cand._1.contains(reln)) {
-                  cand._2.withGroups(Map(reln -> split))
+                  // ask the user translator for a preferred ordering
+                  // for this particular split
+                  cand._2.withGroups(
+                    Map(reln ->
+                      split.map(x =>
+                        RemoteSql.UserTranslator.preferredHomAggGroup(reln, x))))
                 } else {
                   cand._2
                 }
