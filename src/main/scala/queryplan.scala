@@ -875,7 +875,7 @@ case class RemoteSql(stmt: SelectStmt,
 
           // XXX: need to read optimizer config to see if we allow multi-slot
           // optimizations for now, assume we do
-          (Some(AggCall("agg_hash", Seq(QueryParamPlaceholder(id), StringLiteral(filename), IntLiteral(plainSizeBits * 2 / 8), IntLiteral(rowsPerAgg), IntLiteral(1), f0))), true)
+          (Some(AggCall("agg_hash", Seq(QueryParamPlaceholder(id), StringLiteral(filename), IntLiteral(plainSizeBits * 2 / 8), IntLiteral(rowsPerAgg), StringLiteral("t"), f0))), true)
 
         case FunctionCall("encrypt", Seq(e, IntLiteral(o, _), MetaFieldIdent(pos, tpe, _)), _) =>
           assert(e.isLiteral)

@@ -2,42 +2,14 @@ package edu.mit.cryptdb.tpch
 
 import edu.mit.cryptdb._
 import java.util.concurrent._
+import collection.mutable.HashMap
 
-class RobustTester extends Timer with PlanTransformers {
-
-  case class Info(
-    worstCase: (Seq[Int], Seq[(PlanNode, Double)], Double),
-    bestCase: (Seq[Int], Seq[(PlanNode, Double)], Double),
-    // allCosts must is sorted
-    allCosts: Seq[Double]) {
-
-    assert(allCosts.sorted == allCosts)
-
-    def worstCasePlans: Seq[PlanNode] = worstCase._2.map(_._1)
-    def bestCasePlans : Seq[PlanNode] = bestCase._2.map(_._1)
-
-    // array of points (cost, cdf_value), which means
-    // cdf_value fraction of all executions executed with
-    // cost time or less
-    def cdf: Seq[(Double, Double)] = {
-      val n = allCosts.size
-      allCosts.zipWithIndex.map { case (cost, idx) =>
-        (cost, (idx + 1).toDouble / n)
-      }
-    }
-  }
-
-  private object resolver extends Resolver
-  private val parser = new SQLParser
-
-  def workloadDiff(lhs: Seq[PlanNode], rhs: Seq[PlanNode]):
-    Seq[(Int, PlanNode, PlanNode)] = {
-    assert(lhs.size == rhs.size)
-
-    // XXX: workaround the fact that context objects still may exist in AST
-    // nodes of plan nodes- eventually we should clean this up, so that
-    // PlanNodes have no context objects in their ASTs
-
+object RobustTester extends PlanTransformers {
+  // This is a nasty hack
+  // XXX: workaround the fact that context objects still may exist in AST
+  // nodes of plan nodes- eventually we should clean this up, so that
+  // PlanNodes have no context objects in their ASTs
+  def sanitizePlanNode(p: PlanNode): PlanNode = {
     @inline def fix[N <: Node](s: N): N = s.withoutContextT[N]
 
     def trfm(p: PlanNode): PlanNode =
@@ -69,9 +41,14 @@ class RobustTester extends Timer with PlanTransformers {
           (Some(e), true)
       }
 
-    val lhs0 = lhs.map(trfm)
-    val rhs0 = rhs.map(trfm)
+    trfm(p)
+  }
 
+  def workloadDiff(lhs: Seq[PlanNode], rhs: Seq[PlanNode]):
+    Seq[(Int, PlanNode, PlanNode)] = {
+    assert(lhs.size == rhs.size)
+    val lhs0 = lhs.map(sanitizePlanNode)
+    val rhs0 = rhs.map(sanitizePlanNode)
     lhs0.zip(rhs0).zipWithIndex.flatMap {
       case ((lhs, rhs), idx) =>
         if (lhs != rhs)
@@ -80,6 +57,60 @@ class RobustTester extends Timer with PlanTransformers {
           None
     }
   }
+
+  // used by the test runners to avoid running redundant plans. the
+  // first seq returned by findCommonPlans will be a seq of 0s
+  def findCommonPlans(allPlans: Seq[ Seq[PlanNode] ]):
+    Seq[ Seq[Int] ] = {
+    assert(!allPlans.isEmpty)
+    allPlans.tail.foreach { x => assert(x.size == allPlans.head.size) }
+    val allPlans0 = allPlans.map(_.map(sanitizePlanNode))
+    val leftmost = allPlans0.head.map { p =>
+      val x = new HashMap[PlanNode, Int]
+      x += ((p, 0))
+      x
+    }
+    allPlans0.zipWithIndex.map { case (plans, myIdx) =>
+      plans.zip(leftmost).map { case (p, m) =>
+        m.get(p) match {
+          case Some(idx) => idx
+          case None =>
+            m += ((p, myIdx))
+            myIdx
+        }
+      }
+    }
+  }
+}
+
+class RobustTester extends Timer {
+
+  import RobustTester._
+
+  case class Info(
+    worstCase: (Seq[Int], Seq[(PlanNode, Double)], Double),
+    bestCase: (Seq[Int], Seq[(PlanNode, Double)], Double),
+    // allCosts must is sorted
+    allCosts: Seq[Double]) {
+
+    assert(allCosts.sorted == allCosts)
+
+    def worstCasePlans: Seq[PlanNode] = worstCase._2.map(_._1)
+    def bestCasePlans : Seq[PlanNode] = bestCase._2.map(_._1)
+
+    // array of points (cost, cdf_value), which means
+    // cdf_value fraction of all executions executed with
+    // cost time or less
+    def cdf: Seq[(Double, Double)] = {
+      val n = allCosts.size
+      allCosts.zipWithIndex.map { case (cost, idx) =>
+        (cost, (idx + 1).toDouble / n)
+      }
+    }
+  }
+
+  private object resolver extends Resolver
+  private val parser = new SQLParser
 
   // for each i in [1, 2, ..., queries.size()]:
   //   find the i queries which, when trained on, produce the worst/best
