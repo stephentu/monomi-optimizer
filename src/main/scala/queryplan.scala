@@ -1281,6 +1281,15 @@ case class LocalTransform(
       child.emitCPP(cg, ctx)
     cg.blockEnd(")")
   }
+
+  def allIdentityTransforms: Boolean = {
+    trfms.flatMap(_.right.toOption).isEmpty
+  }
+
+  def identityTransformPositions: Seq[Int] = {
+    assert(allIdentityTransforms)
+    trfms.map(_.left.get)
+  }
 }
 
 case class LocalGroupBy(

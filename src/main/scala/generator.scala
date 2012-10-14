@@ -1262,9 +1262,9 @@ trait Generator extends Traversals
                 if (aggContext && curRewriteCtx.respectStructure) {
                   f.getType.tpe match {
                     case DecimalType(15, 2) | IntType(_) | DateType =>
-                    (f, ExprProj(AggCall("group_serializer", Seq(ft)), None), o, true)
+                      (f, ExprProj(AggCall("group_serializer", Seq(ft)), None), o, true)
                     case _ =>
-                    (f, ExprProj(GroupConcat(ft, ",", f.getType.tpe.isStringType), None), o, true)
+                      (f, ExprProj(GroupConcat(ft, ",", f.getType.tpe.isStringType), None), o, true)
                   }
                 } else {
                   (f, ExprProj(ft, None), o, false)
@@ -1363,6 +1363,13 @@ trait Generator extends Traversals
       }
 
     // --- subqueries --- //
+
+    def checkCanExposePlain(e: SqlExpr) =
+      e match {
+        case _: CountStar => true
+        case _: CountExpr => true
+        case _ => false
+      }
 
     val subqueryRelations =
       cur.relations.map(_.flatMap(findSubqueryRelations)).getOrElse(Seq.empty)
@@ -1507,13 +1514,6 @@ trait Generator extends Traversals
         // TODO: not the most efficient implementation
         buildForSelectStmt(cur)
 
-        def checkCanExposePlain(e: SqlExpr) =
-          e match {
-            case _: CountStar => true
-            case _: CountExpr => true
-            case _ => false
-          }
-
         (subq.alias,
          (generatePlanFromOnionSet0(
            subq.subquery,
@@ -1523,6 +1523,7 @@ trait Generator extends Traversals
                 // TODO: wildcard projections
                case (x, NamedProjection(_, e, _)) =>
                  if (x != 0) x else {
+                   // XXX: why do we care about checkCanExposePlain()?
                    if (checkCanExposePlain(e)) {
                      (Onions.PLAIN | Onions.DET | Onions.OPE)
                    } else {
@@ -1699,18 +1700,32 @@ trait Generator extends Traversals
             }
           }
 
-          val p = unwrap(rm)
-          val td = p.tupleDesc
+          // XXX: don't use vars here
+          var p = unwrap(rm)
+          var td = p.tupleDesc
           if (td.size == origSS.projections.size &&
               td.filterNot(_.onion.isOneOf(Onions.PLAIN | Onions.DET | Onions.OPE)).isEmpty) {
             // TODO: not 100% sure this guarantees us that we have
             // exactly the original query in the clear, but it seems to be
             // a reasonable check
 
+            //println("starting point before p:")
+            //println(p.pretty)
 
-           //println("starting point p:")
-           //println(p.pretty)
-           //println("encContext: " + encContext)
+            // try to generate a plan which exposes the lowest level possible
+            p = generatePlanFromOnionSet0(
+              origSS,
+              onionSet,
+              EncProj(origSS.ctx.projections.map {
+                  case _ => (Onions.PLAIN | Onions.DET | Onions.OPE)
+                }.toSeq, true),
+              genPlanContext)
+            td = p.tupleDesc
+
+            //println("starting point after p:")
+            //println(p.pretty)
+
+            //println("encContext: " + encContext)
 
             def findProjUsage(n: Node): Seq[Int] = {
               val ret = new ArrayBuffer[Int]
@@ -1793,7 +1808,12 @@ trait Generator extends Traversals
                             // need to group_concat
                             proj match {
                               case ExprProj(e, alias, _) =>
-                                ExprProj(GroupConcat(e, ",", posDesc.origTpe.isStringType), alias)
+                                posDesc.origTpe match {
+                                  case DecimalType(15, 2) | IntType(_) | DateType =>
+                                    ExprProj(AggCall("group_serializer", Seq(e)), alias)
+                                  case _ =>
+                                    ExprProj(GroupConcat(e, ",", posDesc.origTpe.isStringType), alias)
+                                }
                               case _ => throw new RuntimeException("unhandled")
                             }
                           case ((proj, _), _) => proj
@@ -2637,26 +2657,50 @@ trait Generator extends Traversals
             stage5
           } else {
 
-            //println("o: " + o)
-            //println("stage5td: " + stage5td)
-            //println("stage5: " + stage5.pretty)
+            // optimization: if we have:
+            // LocalTransform(
+            //    LocalDecrypt(...))
+            // where the LocalTransform() is all identity transforms,
+            // see if we can omit the decryption
 
-            val dec =
-              stage5td.map(_.onion).zip(o).zipWithIndex.flatMap {
-                case ((onion, y), i) =>
-                  if (onion.isOneOf(y) || onion.isPlain) Seq.empty else Seq(i)
-              }
+            (stage5 match {
+              case lt @ LocalTransform(_, _, ld @ LocalDecrypt(_, ch))
+                if lt.allIdentityTransforms =>
 
-            val enc =
-              stage5td.map(_.onion).zip(o).zipWithIndex.flatMap {
-                case ((onion, y), i) =>
-                  if (onion.isOneOf(y)) Seq.empty
-                  else Seq((i, OnionType.buildIndividual(Onions.pickOne(y))))
-              }
+                val ltpos = lt.identityTransformPositions
+                val chtd = ch.tupleDesc
 
-            val first  = if (dec.isEmpty) stage5 else verifyPlanNode(LocalDecrypt(dec, stage5))
-            val second = if (enc.isEmpty) first  else verifyPlanNode(LocalEncrypt(enc, first))
-            second
+                if (ltpos.map(chtd(_)).zip(o).filterNot { case (pd, onion) =>
+                      pd.onion.isOneOf(onion)
+                    }.isEmpty) {
+                  // case where optimization applies
+                  Some(lt.copy(child = ch))
+                } else {
+                  None
+                }
+              case _ => None
+            }).getOrElse {
+              //println("o: " + o)
+              //println("stage5td: " + stage5td)
+              //println("stage5: " + stage5.pretty)
+
+              val dec =
+                stage5td.map(_.onion).zip(o).zipWithIndex.flatMap {
+                  case ((onion, y), i) =>
+                    if (onion.isOneOf(y) || onion.isPlain) Seq.empty else Seq(i)
+                }
+
+              val enc =
+                stage5td.map(_.onion).zip(o).zipWithIndex.flatMap {
+                  case ((onion, y), i) =>
+                    if (onion.isOneOf(y)) Seq.empty
+                    else Seq((i, OnionType.buildIndividual(Onions.pickOne(y))))
+                }
+
+              val first  = if (dec.isEmpty) stage5 else verifyPlanNode(LocalDecrypt(dec, stage5))
+              val second = if (enc.isEmpty) first  else verifyPlanNode(LocalEncrypt(enc, first))
+              second
+            }
           }
       })
   }
