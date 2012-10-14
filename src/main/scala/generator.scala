@@ -278,7 +278,12 @@ trait Generator extends Traversals
       Option[(SqlExpr, Seq[HomDesc])] = {
       if (e.isLiteral) {
         // TODO: coerce to integer?
-        Some((FunctionCall("hom_row_desc_lit", Seq(e)), Seq.empty))
+        e match {
+          case IntLiteral(0, _) =>
+            Some((NullLiteral(), Seq.empty))
+          case _ =>
+            Some((FunctionCall("hom_row_desc_lit", Seq(e)), Seq.empty))
+        }
       } else {
         def procSubqueryRef(e: SqlExpr): Option[(SqlExpr, Seq[HomDesc])] = {
           e match {

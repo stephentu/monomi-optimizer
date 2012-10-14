@@ -157,6 +157,15 @@ case class PosDesc(
       origFieldPos.getOrElse(0),
       vectorCtx)
   }
+
+  def encryptDesc(newOnion: OnionType): PosDesc =
+    origTpe match {
+      case DoubleType =>
+        // XXX: Hack for TPC-H
+        // double type encrypts into DECIMAL(15, 2) for now
+        copy(origTpe = DecimalType(15, 2), onion = newOnion)
+      case _ => copy(onion = newOnion)
+    }
 }
 
 case class UserAggDesc(
@@ -1564,7 +1573,7 @@ case class LocalEncrypt(
            }).isEmpty)
     val p0 = positions.toMap
     td.zipWithIndex.map {
-      case (pd, i) if p0.contains(i) => pd.copy(onion = p0(i))
+      case (pd, i) if p0.contains(i) => pd.encryptDesc(p0(i))
       case (pd, _)                   => pd
     }
   }
@@ -1591,12 +1600,10 @@ case class LocalEncrypt(
   def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) = child.emitCPPHelpers(cg, ctx)
 
   def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
+    val td = tupleDesc
     cg.print("new local_encrypt_op({")
     CollectionUtils.foreachWithAllButLastAction(positions)({ case (p, o) =>
-      // TODO: we do a non-existent job of propagating encrypt information
-      // so for now, we just emit some default and require the file to be
-      // manually modified
-      val pd = PosDesc(IntType(4), None, o, false, false) // some dummy values
+      val pd = td(p)
       cg.print("std::pair<size_t, db_column_desc>(%d, %s)".format(p, pd.toCPP))
     })(() => cg.print(", "))
     cg.print("}, ")
