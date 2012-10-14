@@ -924,7 +924,7 @@ case class RemoteSql(stmt: SelectStmt,
           cg.blockBegin("{")
 
             cg.println(
-              "Binary key(ctx.crypto->cm->getKey(ctx.crypto->cm->getmkey(), fieldname(%d, \"SWP\"), SECLEVEL::SWP));".format(pos))
+              "Binary key(ctx.crypto->cm->getKey(ctx.crypto->cm->getmkey(), fieldname(_FP(%d), \"SWP\"), SECLEVEL::SWP));".format(pos))
             cg.println(
               "Token t = CryptoManager::token(key, Binary(%s));".format(
                 quoteDbl(tokens.head.toLowerCase)))
