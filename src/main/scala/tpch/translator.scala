@@ -54,6 +54,14 @@ class TPCHTranslator extends Translator {
           return colName("o_orderdate_year", encOnion)
         case _ =>
       }
+
+    // partsupp
+    } else if (plainTableName == "partsupp") {
+      expr match {
+        case Mult(FieldIdent(None, "ps_supplycost", _, _), FieldIdent(None, "ps_availqty", _, _), _) =>
+          return colName("ps_volume", encOnion)
+        case _ =>
+      }
     }
 
     // default case
