@@ -787,8 +787,14 @@ order by
         Queries.q11, Queries.q12, Queries.q14, Queries.q17, Queries.q18,
         Queries.q19, Queries.q20Rewritten, Queries.q21, Queries.q22)
 
+  val VldbTrainQueriesIndices =
+    // corresponds to VldbTrainQueries- don't modify one w/o modifying the other
+    Seq(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 17, 18, 19, 20, 21, 22)
+
   // simulated using our cost optimizer, using edu.mit.cryptdb.tpch.Runner
   // the first entry is n = 1, next is n = 2, and so on...
+  //
+  // if you modify VldbTrainQueries, must modify this
   val VldbSimulationIdxs =
     Seq(
       Seq(15),

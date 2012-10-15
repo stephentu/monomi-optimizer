@@ -3,11 +3,13 @@
 ### This script compares the output of a plaintext run and a
 ### run from monomi, and checks if they deliver the same results
 
+import datetime
 import math
 import re
 import sys
 
-N_ROW_REGEX=re.compile(r'\(\d+ rows\)')
+N_ROW_REGEX=re.compile(r'\(\d+ rows?\)')
+TOL=10.0 # really high tol
 def plaintext_row_ignore(row):
   '''returns true if row should be ignored'''
   if row.startswith("Timing is on."):
@@ -27,13 +29,17 @@ def monomi_row_ignore(row):
     return True
   return False
 
-FIXED_PT_REGEX=re.compile(r'-?[0-9]+\.[0-9]*')
-INT_REGEX=re.compile(r'-?[1-9][0-9]*')
+FIXED_PT_REGEX=re.compile(r'^-?[0-9]+\.[0-9]*$')
+INT_REGEX=re.compile(r'^-?[1-9][0-9]*$')
+DATE_REGEX=re.compile(r'^(\d+)-(\d+)-(\d+)$')
 def heuristic_parse(elem):
   if FIXED_PT_REGEX.match(elem):
     return float(elem)
   if INT_REGEX.match(elem):
     return int(elem)
+  m = DATE_REGEX.match(elem)
+  if m:
+    return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
   return elem
 
 SEP='|'
@@ -51,14 +57,18 @@ def ingest_plaintext(filename):
     return rows
 
 def ingest_monomi(filename):
+  '''returns either (True, None) for a timeout, or (False, rows) for a
+     successful parse'''
   with open(filename, 'r') as fp:
     rows = []
     for line in fp.readlines():
       line = line.strip()
+      if line == 'killed by timeout':
+        return (True, None)
       if not line or monomi_row_ignore(line):
         continue
       rows.append([heuristic_parse(x.strip()) for x in line.split(SEP)])
-    return rows
+    return (False, rows)
 
 def diff_outputs(lhs, rhs):
   '''returns either (True, None), or (False, message)'''
@@ -72,7 +82,7 @@ def diff_outputs(lhs, rhs):
         return (False, 'types do not match up (lhs = %s, rhs = %s)' % (x, y))
       if isinstance(x, float):
         # allow lots of slack
-        if math.fabs(x - y) >= 1e-2:
+        if math.fabs(x - y) >= TOL:
           return (False, 'values do not match up in row (lhs_value = %s, rhs_value = %s) [lhs = %s, rhs = %s]' % (x, y, a, b))
       else:
         if x != y:
@@ -85,8 +95,11 @@ if __name__ == '__main__':
     sys.exit(1)
   (pf, mf) = sys.argv[1:]
   pr = ingest_plaintext(pf)
-  mr = ingest_monomi(mf)
+  (timeout, mr) = ingest_monomi(mf)
+  if timeout:
+    print pf, mf, 'timeout occured'
+    sys.exit(2)
   (ret, msg) = diff_outputs(pr, mr)
   if not ret:
-    print msg
-    sys.exit(2)
+    print pf, mf, msg
+    sys.exit(3)
