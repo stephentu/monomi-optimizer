@@ -167,6 +167,7 @@ trait ProgramGenerator {
       cg.println("#include <execution/operator_types.hh>")
       cg.println("#include <execution/eval_nodes.hh>")
       cg.println("#include <execution/query_cache.hh>")
+      cg.println("#include <execution/commandline.hh>")
       cg.println("#include <util/util.hh>")
 
       cg.blockBegin("static inline size_t _FP(size_t i) {")
@@ -210,8 +211,11 @@ trait ProgramGenerator {
 
       cg.blockBegin("int main(int argc, char **argv) {")
 
-        cg.blockBegin("if (argc != 2) {")
-          cg.println("std::cerr << \"[Usage]: \" << argv[0] << \" [query num]\" << std::endl;")
+        cg.println("command_line_opts opts(DB_HOSTNAME, DB_USERNAME, DB_PASSWORD, DB_DATABASE, DB_PORT);")
+        cg.println("command_line_opts::parse_options(argc, argv, opts);")
+        cg.println("std::cerr << opts << std::endl;")
+        cg.blockBegin("if ((optind + 1) != argc) {")
+          cg.println("std::cerr << \"[Usage]: \" << argv[0] << \" [options] [query num]\" << std::endl;")
           cg.println("return 1;")
         cg.blockEnd("}")
 
@@ -219,7 +223,7 @@ trait ProgramGenerator {
 
         cg.println("CryptoManager cm(\"12345\");")
         cg.println("crypto_manager_stub cm_stub(&cm, CRYPTO_USE_OLD_OPE);")
-        cg.println("PGConnect pg(DB_HOSTNAME, DB_USERNAME, DB_PASSWORD, DB_DATABASE, DB_PORT, true);")
+        cg.println("PGConnect pg(opts.db_hostname, opts.db_username, opts.db_passwd, opts.db_database, opts.db_port, true);")
         cg.println("paillier_cache pp_cache;")
         cg.println("query_cache cache;")
         cg.println("exec_context ctx(&pg, &cm_stub, &pp_cache, NULL, &cache);")
