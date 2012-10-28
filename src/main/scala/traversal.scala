@@ -37,6 +37,7 @@ trait PlanTraversals {
       case LocalLimit(_, c) => recur(c)
       case LocalDecrypt(_, c) => recur(c)
       case LocalEncrypt(_, c) => recur(c)
+      case LocalFlattener(c) => recur(c)
     }
     postVisit(n)
   }

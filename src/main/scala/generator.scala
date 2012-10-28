@@ -573,7 +573,9 @@ trait Generator extends Traversals
     // the filter, then even if some filter clauses cannot be answered on the
     // server, we can still apply a LocalGroupFilter
     def checkCanDoGroupByOnServer: Boolean = {
-      checkCanDoFilterOnServer
+      //checkCanDoFilterOnServer
+      checkCanDoFilterOnServer && checkFilterClauseOnServer &&
+      checkJoinClausesOnServer
     }
 
     // corresponds 1-to-1 w/ the group by keys
@@ -633,6 +635,9 @@ trait Generator extends Traversals
     //     vector ctx)
     val finalProjs =
       new ArrayBuffer[(SqlExpr, Option[String], SqlProj, OnionType, Boolean)]
+
+    // XXX: un-necessary hack
+    var needsRemoteSqlFlattener: Boolean = false
 
     case class RewriteContext(
       onions: Seq[Int],
@@ -1227,7 +1232,10 @@ trait Generator extends Traversals
             def proc(e: SqlExpr, aggContext: Boolean): Seq[(SqlExpr, (SqlExpr, OnionType), Boolean)] = {
               if (e.isLiteral) return Seq.empty
               doTransformServer(
-                e, RewriteContext(Seq(Onions.DET, Onions.OPE), !aggContext, false))
+                e, RewriteContext(
+                  Seq(Onions.DET, Onions.OPE),
+                  serverRewriteMode == ServerAll && !aggContext,
+                  false))
               .map(x => Seq((e, x, aggContext)))
               .getOrElse {
                 e match {
@@ -1259,7 +1267,31 @@ trait Generator extends Traversals
             val fields = startingFields.flatMap { case (e, a) => proc(e, a) }
             fields.map {
               case (f, (ft, o), aggContext) =>
-                if (aggContext && curRewriteCtx.respectStructure) {
+                // XXX: There are two cases when seeing something in agg context:
+                //
+                //   1) The original SQL query had a group by clause, and this expr
+                //      is NOT one of the keys (aggContext => NOT one of the keys)
+                //
+                //   2) This expr is a child of a SQL aggregate (such as SUM())
+                //
+                //   Note that neither case excludes the other case
+                //
+                //   If we have case (1) AND the rewritten query has a GROUP BY, then
+                //   we need to use group context
+                //
+                //   If we do NOT have case (1) but we have case (2), then we have
+                //   a choice. What we do is this: If the entire WHERE clause
+                //   is satisfied on the server query, then use group context. Otherwise,
+                //   don't use group context, but wrap the RemoteSql node immediately
+                //   with a LocalFlattener (since the upstream nodes are programmed
+                //   to expect vector context)
+                //
+                // YES, this is all very hacky. But it's also N days before the
+                // conference deadline.
+
+                if (aggContext &&
+                    ((stmt.groupBy.isDefined && cur.groupBy.isDefined) ||
+                     (checkFilterClauseOnServer && checkJoinClausesOnServer))) {
                   f.getType.tpe match {
                     case DecimalType(15, 2) | IntType(_) | DateType =>
                       (f, ExprProj(AggCall("group_serializer", Seq(ft)), None), o, true)
@@ -1267,6 +1299,11 @@ trait Generator extends Traversals
                       (f, ExprProj(GroupConcat(ft, ",", f.getType.tpe.isStringType), None), o, true)
                   }
                 } else {
+                  if (aggContext && newLocalGroupBy.isEmpty) {
+                    assert(!checkFilterClauseOnServer || !checkJoinClausesOnServer)
+                    //println("setting needsRemoteSqlFlattener to true with: " + f)
+                    needsRemoteSqlFlattener = true
+                  }
                   (f, ExprProj(ft, None), o, false)
                 }
             }
@@ -2110,7 +2147,8 @@ trait Generator extends Traversals
 
     // fix up filter projections to be group_concat()-ed if necessary
     if (stmt.projectionsInAggContext &&
-        (!stmt.groupBy.isDefined || cur.groupBy.isDefined)) {
+        !needsRemoteSqlFlattener &&
+        cur.groupBy.isDefined) {
 
       // if we were originally in agg context, and we still haven't
       // removed a group by even after processing the group by, then
@@ -2169,7 +2207,7 @@ trait Generator extends Traversals
     val analysis1 = analysis.copy(groupKeys = groupKeys.toMap)
 
     def checkGroupByExplicitlyRemoved: Boolean =
-      cur.groupBy.isDefined && !newLocalGroupBy.isEmpty
+      stmt.groupBy.isDefined && !newLocalGroupBy.isEmpty
 
     // order by
     cur = {
@@ -2351,6 +2389,10 @@ trait Generator extends Traversals
               if (!canDoServer) ServerProj else ServerAll) match {
 
               case Left((expr, onion)) =>
+
+                //if (!canDoServer)
+                //  println("!canDoServer and got left: " + expr.sql)
+
                 //println("orig e: " + e.sql)
                 //println("got left: " + expr.sql )
                 val stmtIdx = projectionInsert(e, a, ExprProj(expr, a), onion, false)
@@ -2358,6 +2400,10 @@ trait Generator extends Traversals
               case Right((optExpr, comp)) =>
                 assert(!optExpr.isDefined)
                 //println("got right: " + comp)
+
+                //if (!canDoServer)
+                //  println("!canDoServer and got right: " + comp.projections.map(_._2))
+
                 val m = processClientComputation(comp)
                 projPosMaps += Right((comp, m))
             }
@@ -2400,15 +2446,18 @@ trait Generator extends Traversals
           PosDesc(tpe.tpe, tpe.field.map(_.pos), o, tpe.field.map(_.partOfPK).getOrElse(false), v)
       }.toSeq
 
+    val remoteSql: PlanNode =
+      RemoteSql(cur, tdesc, finalSubqueryRelationPlans.toSeq, subselectNodes.toMap)
+
+    val wrapRemoteSql =
+      if (needsRemoteSqlFlattener) LocalFlattener(remoteSql) else remoteSql
+
     // --join filters
     val stage0 =
       verifyPlanNode(
         newLocalJoinFilters
           .zip(localJoinFilterPosMaps)
-          .foldLeft(
-            RemoteSql(cur, tdesc,
-                      finalSubqueryRelationPlans.toSeq,
-                      subselectNodes.toMap) : PlanNode ) {
+          .foldLeft(wrapRemoteSql) {
             case (acc, ((comp, rlnsToNull, reln), mapping)) =>
               if (rlnsToNull.isEmpty) {
                 // regular inner join, use LocalFilter

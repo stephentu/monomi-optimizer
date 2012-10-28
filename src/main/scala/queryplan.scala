@@ -135,6 +135,8 @@ object CostConstants {
   @inline def secToPGUnit(s: Double): Double = {
     s * PGUnitPerSec
   }
+
+  final val GroupByRowsRate: Double = 1.0/1.79758e6 // secs/row
 }
 
 case class PosDesc(
@@ -285,6 +287,27 @@ trait PgQueryPlanExtractor {
           }
 
           (totalCost, r, rr,
+           noOverwriteFoldLeft(Seq(userAggMapFold, aggs)),
+           selMapFold, seqScanInfoFold)
+
+        case "Hash Join" /* XXX: other types of joins */ =>
+          val rrOuter = outerChildren.headOption.flatMap(_._3)
+
+          val aggs =
+            (for (L(fields) <- node.get("Output").toList;
+                  S(expr)   <- fields) yield {
+              expr match {
+                case HomAggRegex(id) =>
+                  Seq((id, UserAggDesc(planRows, rrOuter, selMapFold)))
+                case _ =>
+                  SearchSWPRegex.findAllIn(expr).matchData.map { m =>
+                    val id = m.group(1)
+                    ((id, UserAggDesc(planRows, rrOuter, selMapFold)))
+                  }
+              }
+            }).flatten.toMap
+
+          (totalCost, planRows, rrOuter,
            noOverwriteFoldLeft(Seq(userAggMapFold, aggs)),
            selMapFold, seqScanInfoFold)
 
@@ -459,6 +482,36 @@ object RemoteSql {
   }
 }
 
+case class LocalFlattener(child: PlanNode)
+  extends PlanNode {
+
+  def tupleDesc = {
+    val td = child.tupleDesc
+    if (!td.filter(_.vectorCtx).isEmpty) {
+      println("child: " + child)
+    }
+    td.foreach(x => assert(!x.vectorCtx))
+    td.map(_.copy(vectorCtx = true))
+  }
+
+  def underlying = Some(child)
+
+  protected def costEstimateImpl(ctx: EstimateContext, stats: Statistics) =
+    child.costEstimate(ctx, stats)
+
+  def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) =
+    child.emitCPPHelpers(cg, ctx)
+
+  def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
+    cg.blockBegin("new local_flattener_op(")
+      child.emitCPP(cg, ctx)
+    cg.blockEnd(")")
+  }
+
+  protected def pretty0(lvl: Int) =
+    "* LocalFlattener()" + childPretty(lvl, child)
+}
+
 case class RemoteSql(stmt: SelectStmt,
                      projs: Seq[PosDesc],
 
@@ -605,7 +658,7 @@ case class RemoteSql(stmt: SelectStmt,
     val (c, r, rr, m, ssi) =
       extractCostFromDBStmt(reverseStmt0, ctx.defns.dbconn.get, Some(stats))
 
-    //println("sql: " + reverseStmt.sqlFromDialect(PostgresDialect))
+    //println("sql: " + reverseStmt0.sqlFromDialect(PostgresDialect))
     //println("m: " + m)
 
     var aggCost: Double = 0.0
@@ -1053,7 +1106,7 @@ case class LocalOuterJoinFilter(
             (Some(origRelation), false)
           case _ => (None, true)
         }.asInstanceOf[SelectStmt],
-        ctx.defns)
+        ch.equivStmt.ctx.defns)
 
     val (_, r, rr, _, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
 
@@ -1304,7 +1357,24 @@ case class LocalGroupBy(
 
   def underlying = Some(child)
 
-  def tupleDesc = child.tupleDesc
+  protected def posVec: Seq[Int] =
+    keys.map {
+      case TuplePosition(i, _) => i
+      case e => throw new RuntimeException("TODO: unsupported: " + e)
+    }
+
+  def tupleDesc = {
+    val pos = posVec.toSet
+    child.tupleDesc.zipWithIndex.map { case (td, idx) =>
+      assert(!td.vectorCtx)
+      if (pos.contains(idx)) {
+        td
+      } else {
+        td.copy(vectorCtx = true)
+      }
+    }
+  }
+
   def pretty0(lvl: Int) =
     "* LocalGroupBy(cost = " + _lastCostEstimate + ", keys = " + keys.map(_.sql).mkString(", ") + ", group_filter = " + filter.map(_.sql).getOrElse("none") + ")" + childPretty(lvl, child)
 
@@ -1371,21 +1441,22 @@ case class LocalGroupBy(
 
           },
           groupBy = Some(SqlGroupBy(origKeys, origFilter))),
-        ctx.defns)
+        ch.equivStmt.ctx.defns)
 
     val (_, r, Some(rr), _, _) = extractCostFromDBStmt(stmt, ctx.defns.dbconn.get, Some(stats))
     // TODO: estimate the cost
-    Estimate(ch.cost, r, rr, stmt, ch.seqScanInfo)
+
+    val groupByCost =
+      CostConstants.secToPGUnit(CostConstants.GroupByRowsRate) * (r * rr).toDouble
+
+    Estimate(ch.cost + groupByCost, r, rr, stmt, ch.seqScanInfo)
   }
 
   def emitCPPHelpers(cg: CodeGenerator, ctx: CodeGenContext) =
     (Seq(child) ++ subqueries).foreach(_.emitCPPHelpers(cg, ctx))
 
   def emitCPP(cg: CodeGenerator, ctx: CodeGenContext) = {
-    val pos = keys.map {
-      case TuplePosition(i, _) => i
-      case e => throw new RuntimeException("TODO: unsupported: " + e)
-    }
+    val pos = posVec
     cg.blockBegin("new local_group_by(")
       cg.println("%s,".format(pos.map(_.toString).mkString("{", ", ", "}")))
       child.emitCPP(cg, ctx)
@@ -1436,7 +1507,7 @@ case class LocalGroupFilter(filter: SqlExpr, origFilter: SqlExpr,
           groupBy =
             ch.equivStmt.groupBy.map(_.copy(having =
               ch.equivStmt.groupBy.get.having.map(x => And(x, origFilter)).orElse(Some(origFilter))))),
-        ctx.defns)
+        ch.equivStmt.ctx.defns)
 
     //println(stmt.sqlFromDialect(PostgresDialect))
 

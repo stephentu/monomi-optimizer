@@ -34,6 +34,7 @@ trait PlanTransformers {
       case node @ LocalLimit(_, c) => node.copy(child = recur(c))
       case node @ LocalDecrypt(_, c) => node.copy(child = recur(c))
       case node @ LocalEncrypt(_, c) => node.copy(child = recur(c))
+      case node @ LocalFlattener(c) => node.copy(child = recur(c))
       case e => e
     }
   }
