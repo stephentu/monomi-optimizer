@@ -925,9 +925,13 @@ trait Generator extends Traversals
                       doTransformServer(e, curRewriteCtx.restrictTo(Onions.OPE)).map(x => (x, Onions.OPE)))
                     .map {
                       case ((e0, _), o) =>
-                        val p =
-                          generatePlanFromOnionSet0(ss, onionSet, EncProj(Seq(o), true), genPlanContext)
-                        replaceWith(In(e0, Seq(addSubselectAndReturnPlaceholder(p, ss)), n))
+                        generatePlanFromOnionSet0(ss, onionSet, EncProj(Seq(o), true), genPlanContext) match {
+                          case r @ RemoteSql(s, _, _, _) =>
+                            mergeRemoteSql(r)
+                            replaceWith(In(e0, Seq(Subselect(s)), n))
+                          case p =>
+                            replaceWith(In(e0, Seq(addSubselectAndReturnPlaceholder(p, ss)), n))
+                        }
                     }.getOrElse(bailOut)
 
                   case _ => bailOut
