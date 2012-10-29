@@ -219,7 +219,7 @@ trait ProgramGenerator {
           cg.println("return 1;")
         cg.blockEnd("}")
 
-        cg.println("int q = atoi(argv[1]);")
+        cg.println("int q = atoi(argv[optind]);")
 
         cg.println("CryptoManager cm(\"12345\");")
         cg.println("crypto_manager_stub cm_stub(&cm, CRYPTO_USE_OLD_OPE);")
