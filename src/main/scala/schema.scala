@@ -204,6 +204,7 @@ where table_catalog = ? and (table_schema = 'public' or table_schema like 'pg_te
           case "bigint" => IntType(8)
           case "smallint" => IntType(2)
           case "bytea" => VariableLenByteArray(None)
+          case "boolean" => BoolType
           case e => sys.error("unknown type: " + e)
         }, pkCols.contains(cname))
       })
@@ -243,6 +244,14 @@ where table_catalog = ? and (table_schema = 'public' or table_schema like 'pg_te
     import java.text._
     private val df = new SimpleDateFormat("yyyy-mm-dd")
     def mkFromString(s: String) = df.parse(s, new ParsePosition(0))
+  }
+
+  private implicit object BoolElemBuilder extends ElemBuilder[Boolean] {
+    def mkFromString(s: String) = s match {
+      case "0" | "f" | "false" => false
+      case "1" | "t" | "true"  => true
+      case e => throw new RuntimeException("not a valid bool: " + e)
+    }
   }
 
   private def seqFromPGAnyArray[T](o: PGobject)(implicit t: ElemBuilder[T]): Seq[T] = {
@@ -377,6 +386,7 @@ where schemaname = 'public' and tablename = ?
               case _: FixedLenString => seqFromPGAnyArray[String](pg)
               case _: VariableLenString => seqFromPGAnyArray[String](pg)
               case DateType => seqFromPGAnyArray[java.util.Date](pg)
+              case BoolType => seqFromPGAnyArray[Boolean](pg)
               case _ => throw new RuntimeException("cannot handle: " + tpe)
             }
 
